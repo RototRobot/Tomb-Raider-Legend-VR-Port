@@ -446,3 +446,9 @@ game data, and needs a legitimate copy of the game.
 > - **Crystal Dynamics**, for making Tomb Raider: Legend.
 
 Any mistakes in this mod are my own, not theirs.
+
+
+## In Loving Memory
+Sophie 2010-2026
+
+<img width="1024" height="768" alt="image0" src="https://github.com/user-attachments/assets/b4979262-379b-4c29-a9ed-5284aac9dfd9" />
