@@ -1,0 +1,2661 @@
+#include "sm3_converter.h"
+
+#include "sm3_disasm.h"
+
+#include "../ir/ir_utils.h"
+
+namespace dxbc_spv::sm3 {
+
+constexpr uint32_t TextureStageCount = 8u;
+
+/* Types in SM3
+ * Integer:
+ *   - Instructions:
+ *     - loop and rep instructions: Both of those load it straight from a constant integer register.
+ *   - Registers:
+ *     - Constant integer: Only used for loop and rep. Can NOT be used to write the address register or for relative addressing.
+ *     - Address register (a0): Only written to with mova (or mov on SM1.1) which takes in a float and has a specific rounding mode.
+ *                              Used for relative addressing, can't be read directly.
+ *     - Loop counter register (aL): Used to hold the loop index. Automatically populated in loops, can't be written to.
+ *
+ * Boolean:
+ *   - Instructions:
+ *     - if bool: Loads straight from a constant boolean register.
+ *     - if pred: Loads predicate register.
+ *     - callnz: Loads straight from a constant boolean register.
+ *     - callnz pred: Loads predicate register.
+ *     - breakp pred: Loads predicate register.
+ *   - Registers:
+ *     - pred: Can't be read directly. Can only be used with if pred or to make operations conditional with predication.
+ *             Can only be written to with setp which compares two float registers.
+ *             Can be altered with NOT modifier before application.
+ *
+ * Float:
+ *   Everything else. Has partial precision flag in Dst operand.
+ */
+
+Converter::Converter(util::ByteReader code, const Options& options)
+: m_code(code)
+, m_options(options)
+, m_ioMap(*this)
+, m_regFile(*this)
+, m_resources(*this) {
+}
+
+Converter::~Converter() {
+
+}
+
+bool Converter::convertShader(ir::Builder& builder) {
+  if (!initParser(m_parser, m_code))
+    return false;
+
+  auto shaderType = getShaderInfo().getType();
+
+  /* The SWVP option is only for vertex shaders. */
+  dxbc_spv_assert(shaderType == ShaderType::eVertex || !m_options.isSWVP);
+
+  initialize(builder, shaderType);
+
+  while (m_parser) {
+    Instruction op = m_parser.parseInstruction();
+
+    if (!op.isCoissued())
+      m_regFile.emitBufferedStores(builder);
+
+    /* Execute the actual instruction. */
+    if (!op || !convertInstruction(builder, op))
+      return false;
+  }
+
+  m_regFile.emitBufferedStores(builder);
+
+  return finalize(builder, shaderType);
+}
+
+
+bool Converter::convertInstruction(ir::Builder& builder, const Instruction& op) {
+  auto opCode = op.getOpCode();
+
+  /* Increment instruction counter for debug purposes */
+  m_instructionCount += 1u;
+
+  switch (opCode) {
+    case OpCode::eNop:
+    case OpCode::eReserved0:
+    case OpCode::ePhase:
+    case OpCode::eEnd:
+      return true;
+
+    case OpCode::eTexM3x2Pad:
+    case OpCode::eTexM3x3Pad:
+      /* We don't need to do anything here, these are just padding instructions */
+      return true;
+
+    case OpCode::eComment:
+      return handleComment(builder, op);
+
+    case OpCode::eDef:
+    case OpCode::eDefI:
+    case OpCode::eDefB:
+      return handleDef(builder, op);
+
+    case OpCode::eDcl:
+      return handleDcl(builder, op);
+
+    case OpCode::eMov:
+    case OpCode::eMova:
+      return handleMov(builder, op);
+
+    case OpCode::eSlt:
+    case OpCode::eSge:
+      return handleCompare(builder, op);
+
+    case OpCode::eAdd:
+    case OpCode::eSub:
+    case OpCode::eExp:
+    case OpCode::eFrc:
+    case OpCode::eLog:
+    case OpCode::eLogP:
+    case OpCode::eMax:
+    case OpCode::eMin:
+    case OpCode::eMul:
+    case OpCode::eRcp:
+    case OpCode::eRsq:
+    case OpCode::eSgn:
+    case OpCode::eAbs:
+    case OpCode::eMad:
+      return handleArithmetic(builder, op);
+
+    case OpCode::eDp2Add:
+    case OpCode::eDp3:
+    case OpCode::eDp4:
+      return handleDot(builder, op);
+
+    case OpCode::eLit:
+      return handleLit(builder, op);
+
+    case OpCode::eExpP:
+      return handleExpP(builder, op);
+
+    case OpCode::eM4x4:
+    case OpCode::eM4x3:
+    case OpCode::eM3x4:
+    case OpCode::eM3x3:
+    case OpCode::eM3x2:
+      return handleMatrixArithmetic(builder, op);
+
+    case OpCode::eBem:
+      return handleBem(builder, op);
+
+    case OpCode::eTexCrd:
+      return handleTexCoord(builder, op);
+
+    case OpCode::eTexLd:
+    case OpCode::eTexBem:
+    case OpCode::eTexBemL:
+    case OpCode::eTexReg2Ar:
+    case OpCode::eTexReg2Gb:
+    case OpCode::eTexM3x2Tex:
+    case OpCode::eTexM3x3Tex:
+    case OpCode::eTexM3x3Spec:
+    case OpCode::eTexM3x3VSpec:
+    case OpCode::eTexReg2Rgb:
+    case OpCode::eTexDp3Tex:
+    case OpCode::eTexM3x2Depth:
+    case OpCode::eTexDp3:
+    case OpCode::eTexM3x3:
+    case OpCode::eTexLdd:
+    case OpCode::eTexLdl:
+      return handleTextureSample(builder, op);
+
+    case OpCode::eTexKill:
+      return handleTexKill(builder, op);
+
+    case OpCode::eTexDepth:
+      return handleTexDepth(builder, op);
+
+    case OpCode::eLrp:
+      return handleLrp(builder, op);
+
+    case OpCode::eCmp:
+    case OpCode::eCnd:
+      return handleSelect(builder, op);
+
+    case OpCode::eNrm:
+      return handleNrm(builder, op);
+
+    case OpCode::eSinCos:
+      return handleSinCos(builder, op);
+
+    case OpCode::ePow:
+      return handlePow(builder, op);
+
+    case OpCode::eDst:
+      return handleDst(builder, op);
+
+    case OpCode::eDsX:
+    case OpCode::eDsY:
+      return handleDerivatives(builder, op);
+
+    case OpCode::eCrs:
+      return handleCrs(builder, op);
+
+    case OpCode::eSetP:
+      return handleSetP(builder, op);
+
+    case OpCode::eIf:
+    case OpCode::eIfC:
+      return handleIf(builder, op);
+
+    case OpCode::eElse:
+      return handleElse(builder, op);
+
+    case OpCode::eEndIf:
+      return handleEndIf(builder, op);
+
+    case OpCode::eBreak:
+    case OpCode::eBreakC:
+    case OpCode::eBreakP:
+      return handleBreak(builder, op);
+
+    case OpCode::eLoop:
+      return handleLoop(builder, op);
+
+    case OpCode::eEndLoop:
+      return handleEndLoop(builder, op);
+
+    case OpCode::eRep:
+      return handleRep(builder, op);
+
+    case OpCode::eEndRep:
+      return handleEndRep(builder, op);
+
+    case OpCode::eLabel:
+      return handleLabel(builder, op);
+
+    case OpCode::eCall:
+    case OpCode::eCallNz:
+      return handleCall(builder, op);
+
+    case OpCode::eRet:
+      return handleRet(builder);
+  }
+
+  return logOpError(op, "Unhandled opcode.");
+}
+
+
+bool Converter::initialize(ir::Builder& builder, ShaderType shaderType) {
+  /* A valid debug namee is required for the main function */
+  m_entryPoint.mainFunc = builder.add(ir::Op::Function(ir::ScalarType::eVoid));
+  builder.add(ir::Op::FunctionEnd());
+
+  /* Emit entry point instruction as the first instruction of the
+   * shader. This is technically not needed, but makes things more
+   * readable. */
+  auto stage = resolveShaderStage(shaderType);
+
+  auto entryPointOp = ir::Op::EntryPoint(m_entryPoint.mainFunc, stage);
+
+  m_entryPoint.def = builder.addAfter(ir::SsaDef(), std::move(entryPointOp));
+
+  /* Need to emit the shader name regardless of debug names as well */
+  if (m_options.name)
+    builder.add(ir::Op::DebugName(m_entryPoint.def, m_options.name));
+
+  emitFloatModes(builder);
+  m_ioMap.initialize(builder);
+  m_regFile.initialize(builder);
+  m_resources.initialize(builder);
+
+  if (getShaderInfo().getType() == ShaderType::ePixel) {
+    m_psSharedData = emitSharedConstants(builder);
+  }
+
+  if (shaderType == ShaderType::ePixel) {
+    emitAlphaTest(builder);
+
+    if (getShaderInfo().getVersion().first < 3u) {
+      /* With shader model 3, the user has to implement fog themselves. There is no fixed function fog blending at
+       * after the pixel shader.
+       * Vertex fog is implemented by the fixed function pipeline (the Direct3D Lighting & Transform engine).
+       * So there's no code needed in vertex shaders. */
+      m_fogInput = emitFogInput(builder);
+      emitFog(builder);
+    }
+  } else {
+    emitClipping(builder);
+  }
+
+  /* Set cursor to main function so that instructions will be emitted
+   * in the correct location */
+  builder.setCursor(m_entryPoint.mainFunc);
+  m_ioMap.emitIoVarDefaults(builder);
+
+  return true;
+}
+
+
+bool Converter::finalize(ir::Builder& builder, ShaderType shaderType) {
+  if (m_entryPoint.needsWrapper) {
+    // Adjust current 'main' function
+    auto wrapped = m_entryPoint.mainFunc;
+    builder.add(ir::Op::DebugName(wrapped, "main_wrapped"));
+    builder.setCursor(ir::SsaDef());
+
+    // Emit wrapper function that calls the main entry point first
+    auto wrapper = builder.add(ir::Op::Function(ir::ScalarType::eVoid));
+    auto call = builder.add(ir::Op::FunctionCall(ir::ScalarType::eVoid, wrapped));
+    builder.add(ir::Op::FunctionEnd());
+
+    // Rewrite entry point to point to the 'new' main function
+    builder.rewriteOp(m_entryPoint.def, ir::Op(builder.getOp(m_entryPoint.def)).setOperand(0u, wrapper));
+    m_entryPoint.mainFunc = wrapper;
+
+    // Put all the finalization code after the wrapper call
+    builder.setCursor(call);
+  }
+
+  // Emit debug name for the actual entry point function
+  builder.add(ir::Op::DebugName(m_entryPoint.mainFunc, "main"));
+
+  if (shaderType == ShaderType::ePixel && getShaderInfo().getVersion().first == 1u) {
+    /* Shader model 1 doesn't have special color output registers.
+     * Instead, it simply outputs what was in Temp register 0 (r0) at the end. */
+    auto value = m_regFile.emitTempLoad(builder, 0u,
+      Swizzle::identity(), WriteMask(ComponentBit::eAll), ir::ScalarType::eF32);
+
+    if (!m_ioMap.emitColorStore(builder, value))
+      return false;
+  }
+
+  if (shaderType == ShaderType::ePixel) {
+    auto color = m_ioMap.getColorValue(builder);
+    auto alpha = builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, color, builder.makeConstant(3u)));
+    auto alphaTest = builder.add(ir::Op::FunctionCall(ir::ScalarType::eBool, m_alphaTestFunction).addParam(alpha));
+
+    auto discardIf = builder.add(ir::Op::ScopedIf(ir::SsaDef(),
+      builder.add(ir::Op::BNot(ir::ScalarType::eBool, alphaTest))));
+    builder.add(ir::Op::Demote());
+    auto discardEndIf = builder.add(ir::Op::ScopedEndIf(discardIf));
+    builder.rewriteOp(discardIf, ir::Op(builder.getOp(discardIf)).setOperand(0u, discardEndIf));
+
+    if (m_fogFunction) {
+      dxbc_spv_assert(m_fogInput);
+
+      /* if (fogEnabled) { ... */
+      auto fogEnabled = builder.add(ir::Op::InputLoad(ir::ScalarType::eBool,
+        m_fogInput, builder.makeConstant(uint32_t(ir::LegacyFogLayout::eFogEnable))));
+      auto fogEnabledIf = builder.add(ir::Op::ScopedIf(ir::SsaDef(), fogEnabled));
+
+      /* Alpha is left untouched by fog calculations */
+      auto rgb = builder.add(ir::Op::CompositeConstruct(ir::BasicType(ir::ScalarType::eF32, 3u),
+        builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, color, builder.makeConstant(0u))),
+        builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, color, builder.makeConstant(1u))),
+        builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, color, builder.makeConstant(2u)))));
+
+      auto rgbWithFog = builder.add(ir::Op::FunctionCall(
+        ir::BasicType(ir::ScalarType::eF32, 3u), m_fogFunction).addParam(rgb));
+
+      auto colorWithFog = builder.add(ir::Op::CompositeConstruct(ir::BasicType(ir::ScalarType::eF32, 4u),
+        builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, rgbWithFog, builder.makeConstant(0u))),
+        builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, rgbWithFog, builder.makeConstant(1u))),
+        builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, rgbWithFog, builder.makeConstant(2u))),
+        alpha));
+
+      if (!m_ioMap.emitColorStore(builder, colorWithFog))
+        return false;
+
+      /* } */
+      auto fogEnabledIfEnd = builder.add(ir::Op::ScopedEndIf(fogEnabledIf));
+      builder.rewriteOp(fogEnabledIf, ir::Op(builder.getOp(fogEnabledIf))
+        .setOperand(0u, fogEnabledIfEnd));
+    }
+  } else {
+    auto position = m_ioMap.getPositionValue(builder);
+    builder.add(
+      ir::Op::FunctionCall(ir::ScalarType::eVoid, m_clippingFunction)
+      .addParam(position)
+    );
+  }
+
+  m_ioMap.finalize(builder);
+  return true;
+}
+
+
+bool Converter::initParser(Parser& parser, util::ByteReader reader) {
+  if (!reader) {
+    Logger::err("No code chunk found in shader.");
+    return false;
+  }
+
+  if (!(parser = Parser(reader))) {
+    Logger::err("Failed to parse code chunk.");
+    return false;
+  }
+
+  return true;
+}
+
+
+ir::SsaDef Converter::emitSharedConstants(ir::Builder& builder) {
+  auto input = builder.add(ir::Op::DclInputBuiltIn(
+    ir::makeLegacyTextureStageType(MaxSamplerCountPs), getEntryPoint(),
+    ir::BuiltIn::eLegacyTextureStage, ir::InterpolationMode::eFlat));
+
+  if (m_options.includeDebugNames) {
+    static const std::array<std::pair<ir::LegacyTextureStageLayout, const char*>, 4u> s_names = {{
+      { ir::LegacyTextureStageLayout::eBumpMat0,    "bump_mat0" },
+      { ir::LegacyTextureStageLayout::eBumpMat1,    "bump_mat1" },
+      { ir::LegacyTextureStageLayout::eBumpScale,   "bump_lscale" },
+      { ir::LegacyTextureStageLayout::eBumpOffset,  "bump_loffset" },
+    }};
+
+    builder.add(ir::Op::DebugName(input, "texture_stages"));
+
+    for (const auto& e : s_names)
+      builder.add(ir::Op::DebugMemberName(input, uint32_t(e.first), e.second));
+  }
+
+  return input;
+}
+
+
+ir::SsaDef Converter::applyBumpMapping(ir::Builder& builder, uint32_t stageIdx, ir::SsaDef src0, ir::SsaDef src1) {
+  /*
+   * dst.x = src0.x + D3DTSS_BUMPENVMAT00(stage n) * src1.x
+   *                + D3DTSS_BUMPENVMAT10(stage n) * src1.y
+   *
+   * dst.y = src0.y + D3DTSS_BUMPENVMAT01(stage n) * src1.x
+   *                + D3DTSS_BUMPENVMAT11(stage n) * src1.y
+   */
+
+  auto type = builder.getOp(src0).getType().getBaseType(0u);
+  auto scalarType = type.getBaseType();
+  dxbc_spv_assert(scalarType == builder.getOp(src1).getType().getBaseType(0u).getBaseType());
+
+  /* Load bump matrix */
+  auto bumpEnvMat0 = builder.add(ir::Op::InputLoad(ir::BasicType(ir::ScalarType::eF32, 2u), m_psSharedData,
+    builder.makeConstant(stageIdx, uint32_t(ir::LegacyTextureStageLayout::eBumpMat0))));
+  auto bumpEnvMat1 = builder.add(ir::Op::InputLoad(ir::BasicType(ir::ScalarType::eF32, 2u), m_psSharedData,
+    builder.makeConstant(stageIdx, uint32_t(ir::LegacyTextureStageLayout::eBumpMat1))));
+
+  if (scalarType != ir::ScalarType::eF32) {
+    bumpEnvMat0 = builder.add(ir::Op::ConsumeAs(ir::BasicType(scalarType, 2u), bumpEnvMat0));
+    bumpEnvMat1 = builder.add(ir::Op::ConsumeAs(ir::BasicType(scalarType, 2u), bumpEnvMat1));
+  }
+
+  std::array<ir::SsaDef, 2> components = {};
+
+  for (uint32_t i = 0u; i < components.size(); i++) {
+    auto src1r = ir::extractFromVector(builder, src1, 0u);
+    auto bumpEnv0 = ir::extractFromVector(builder, bumpEnvMat0, i);
+    auto bumped0 = builder.add(emitFMul(scalarType, bumpEnv0, src1r));
+
+    auto src1g = ir::extractFromVector(builder, src1, 1u);
+    auto bumpEnv1 = ir::extractFromVector(builder, bumpEnvMat1, i);
+    auto bumped1 = builder.add(emitFMul(scalarType, bumpEnv1, src1g));
+
+    auto bumpedSum = ir::extractFromVector(builder, src0, i);
+    bumpedSum = builder.add(ir::Op::FAdd(scalarType, bumpedSum, bumped0));
+    bumpedSum = builder.add(ir::Op::FAdd(scalarType, bumpedSum, bumped1));
+
+    components[i] = bumpedSum;
+  }
+
+  return buildVector(builder, scalarType, components.size(), components.data());
+}
+
+
+ir::SsaDef Converter::normalizeVector(ir::Builder& builder, ir::SsaDef def) {
+  auto type = builder.getOp(def).getType().getBaseType(0u);
+  auto scalarType = type.getBaseType();
+  uint32_t vecSize = type.getVectorSize();
+  auto lengthSquared = builder.add(emitFDot(scalarType, def, def));
+  auto lengthInv = builder.add(ir::Op::FRsq(scalarType, lengthSquared));
+
+  // Clamp inverse length in case the vector is 0
+  if (m_options.fastFloatEmulation) {
+    lengthInv = builder.add(ir::Op::FMin(scalarType, lengthInv,
+      ir::makeTypedConstant(builder, scalarType, std::numeric_limits<float>::max())));
+  }
+
+  return builder.add(emitFMul(type, def, broadcastScalar(builder, lengthInv, WriteMask((1u << vecSize) - 1u))));
+}
+
+
+ir::SsaDef Converter::emitComparison(ir::Builder& builder, ir::SsaDef a, ir::SsaDef b, ComparisonMode comparisonMode) {
+  switch (comparisonMode) {
+    case ComparisonMode::eNever:
+      return builder.makeConstant(false);
+      break;
+    case ComparisonMode::eGreaterThan:
+      return builder.add(ir::Op::FGt(ir::ScalarType::eBool, a, b));
+      break;
+    case ComparisonMode::eEqual:
+      return builder.add(ir::Op::FEq(ir::ScalarType::eBool, a, b));
+      break;
+    case ComparisonMode::eGreaterEqual:
+      return builder.add(ir::Op::FGe(ir::ScalarType::eBool, a, b));
+      break;
+    case ComparisonMode::eLessThan:
+      return builder.add(ir::Op::FLt(ir::ScalarType::eBool, a, b));
+      break;
+    case ComparisonMode::eNotEqual:
+      return builder.add(ir::Op::FNe(ir::ScalarType::eBool, a, b));
+      break;
+    case ComparisonMode::eLessEqual:
+      return builder.add(ir::Op::FLe(ir::ScalarType::eBool, a, b));
+      break;
+    case ComparisonMode::eAlways:
+      return builder.makeConstant(true);
+      break;
+
+    default:
+      Logger::warn("Invalid comparison mode: '", uint32_t(comparisonMode), "'");
+      return builder.makeConstant(true);
+  }
+}
+
+
+bool Converter::handleComment(ir::Builder& builder, const Instruction& op) {
+  /* The comment is always at the start of the shader from what we've seen,
+   * so no need to get extra clever here. */
+  if (m_options.includeDebugNames && op.getOpCode() == OpCode::eComment && !m_ctab) {
+    auto ctabReader = util::ByteReader(op.getCommentData(), op.getCommentDataSize());
+    m_ctab = ConstantTable(ctabReader);
+
+    m_resources.emitConstantNames(builder, m_ctab);
+  }
+
+  return true;
+}
+
+
+bool Converter::handleDef(ir::Builder& builder, const Instruction& op) {
+  /* def instructions define so-called immediate constants.
+   * Immediate instructions take precedence over constants set using API methods. */
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(op.hasImm());
+  auto dst = op.getDst();
+  auto imm = op.getImm();
+
+  m_resources.emitImmediateConstant(builder, dst.getRegisterType(), dst.getIndex(), imm);
+
+  return true;
+}
+
+
+bool Converter::handleDcl(ir::Builder& builder, const Instruction& op) {
+  auto dst = op.getDst();
+  switch (dst.getRegisterType()) {
+    case RegisterType::eSampler:
+      return m_resources.handleDclSampler(builder, op);
+
+    case RegisterType::eAttributeOut:
+    case RegisterType::eOutput:
+    case RegisterType::eInput:
+    case RegisterType::eTexture:
+    case RegisterType::ePixelTexCoord:
+    case RegisterType::eMiscType:
+    case RegisterType::eColorOut:
+      return m_ioMap.handleDclIoVar(builder, op);
+
+    default:
+      dxbc_spv_unreachable();
+      return false;
+  }
+}
+
+
+bool Converter::handleMov(ir::Builder& builder, const Instruction& op) {
+  /* Mov always moves data from a float register to another float register.
+   * There's just one exception: mova moves data from a float register to an address register
+   * and rounds the float (RTN) in the process.
+   * On SM1.1 mova doesn't exist and the regular mov has that responsibility. */
+
+  const auto& dst = op.getDst();
+  const auto& src = op.getSrc(0u);
+
+  dxbc_spv_assert(op.getSrcCount() == 1u);
+  dxbc_spv_assert(op.hasDst());
+
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+
+  /* Even when writing the address register, we need to load it as a float to round properly. */
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  auto value = loadSrcModified(builder, op, src, writeMask, scalarType);
+
+  if (!value)
+    return false;
+
+  /* Mova writes to the address register. On <= SM2.1 mov *can* write to the address register (which only exists for VS). */
+  if (dst.getRegisterType() == RegisterType::eAddr && getShaderInfo().getType() == ShaderType::eVertex) {
+    uint32_t componentCount = util::popcnt(uint8_t(writeMask));
+    util::small_vector<ir::SsaDef, 4u> components;
+    for (auto _ : writeMask) {
+      auto componentIndex = components.size();
+      auto scalarValue = ir::extractFromVector(builder, value, componentIndex);
+
+      ir::SsaDef roundedValue;
+      if (getShaderInfo().getVersion().first < 2 && getShaderInfo().getVersion().second < 2)
+        /* Contrary to what the documentation says, we need to floor here. */
+        roundedValue = builder.add(ir::Op::FRound(scalarType, scalarValue, ir::RoundMode::eNegativeInf));
+      else
+        roundedValue = builder.add(ir::Op::FRound(scalarType, scalarValue, ir::RoundMode::eNearestEven));
+
+      components.push_back(builder.add(ir::Op::ConvertFtoI(ir::ScalarType::eI32, roundedValue)));
+    }
+    value = buildVector(builder, ir::ScalarType::eI32, componentCount, components.data());
+  }
+
+  return storeDstModifiedPredicated(builder, op, dst, value);
+}
+
+
+bool Converter::handleCompare(ir::Builder& builder, const Instruction& op) {
+  /* All instructions handled here will operate on float vectors of any kind. */
+  auto opCode = op.getOpCode();
+
+  dxbc_spv_assert(op.getSrcCount() == 2u);
+  dxbc_spv_assert(op.hasDst());
+
+  /* Instruction type */
+  const auto& dst = op.getDst();
+
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  /* Load source operands */
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), writeMask, scalarType);
+  if (!src0 || !src1)
+    return false;
+
+  util::small_vector<ir::SsaDef, 4u> components;
+  for (auto _ : writeMask) {
+    /* It is done per-component. */
+    auto index = components.size();
+    auto src0c = ir::extractFromVector(builder, src0, index);
+    auto src1c = ir::extractFromVector(builder, src1, index);
+
+    ir::SsaDef cond;
+    if (opCode == OpCode::eSlt)
+      cond = builder.add(ir::Op::FLt(ir::ScalarType::eBool, src0c, src1c));
+    else
+      cond = builder.add(ir::Op::FGe(ir::ScalarType::eBool, src0c, src1c));
+
+    components.push_back(builder.add(ir::Op::Select(scalarType, cond,
+      makeTypedConstant(builder, scalarType, 1.0f),
+      makeTypedConstant(builder, scalarType, 0.0f))));
+  }
+  auto result = buildVector(builder, scalarType, components.size(), components.data());
+
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleArithmetic(ir::Builder& builder, const Instruction& op) {
+  /* All instructions handled here will operate on float vectors of any kind. */
+  auto opCode = op.getOpCode();
+
+  dxbc_spv_assert(op.getSrcCount());
+
+  dxbc_spv_assert(op.hasDst());
+
+  /* Instruction type */
+  const auto& dst = op.getDst();
+
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+
+  bool isPartialPrecision = dst.isPartialPrecision();
+  switch (opCode) {
+    /* Exp & Log are explicitly full-precision instructions. */
+    case OpCode::eExp:
+    case OpCode::eLog:  isPartialPrecision = false; break;
+    /* LogP is an explicitly partial-precision instruction. */
+    case OpCode::eLogP: isPartialPrecision = true;  break;
+    default: break;
+  }
+
+  auto scalarType = isPartialPrecision ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+  auto vectorType = makeVectorType(scalarType, writeMask);
+
+  /* Load source operands */
+  util::small_vector<ir::SsaDef, 3u> src;
+
+  for (uint32_t i = 0u; i < op.getSrcCount(); i++) {
+    auto value = loadSrcModified(builder, op, op.getSrc(i), writeMask, scalarType);
+
+    if (!value)
+      return false;
+
+    src.push_back(value);
+  }
+
+  ir::Op result = [this, &builder, opCode, vectorType, &src] {
+    switch (opCode) {
+      case OpCode::eAdd:        return ir::Op::FAdd(vectorType, src.at(0u), src.at(1u));
+      case OpCode::eSub:        return ir::Op::FSub(vectorType, src.at(0u), src.at(1u));
+      case OpCode::eExp:        return ir::Op::FExp2(vectorType, src.at(0u));
+      case OpCode::eFrc:        return ir::Op::FFract(vectorType, src.at(0u));
+      case OpCode::eLog:
+      case OpCode::eLogP:       return ir::Op::FLog2Legacy(vectorType, src.at(0u));
+      case OpCode::eMax:        return ir::Op::FMax(vectorType, src.at(0u), src.at(1u));
+      case OpCode::eMin:        return ir::Op::FMin(vectorType, src.at(0u), src.at(1u));
+      case OpCode::eMul:        return emitFMul(vectorType, src.at(0u), src.at(1u));
+      case OpCode::eRcp:        return ir::Op::FRcp(vectorType, src.at(0u));
+      case OpCode::eRsq:        return ir::Op::FRsq(vectorType, builder.add(ir::Op::FAbs(vectorType, src.at(0u))));
+      case OpCode::eAbs:        return ir::Op::FAbs(vectorType, src.at(0u));
+      case OpCode::eSgn:        return ir::Op::FSgn(vectorType, src.at(0u));
+      case OpCode::eMad:        return emitFMad(vectorType, src.at(0u), src.at(1u), src.at(2u));
+      default: break;
+    }
+
+    dxbc_spv_unreachable();
+    return ir::Op();
+  } ();
+
+  auto resultDef = builder.add(std::move(result));
+
+  if (m_options.fastFloatEmulation) {
+    /* makeTypedConstant correctly handles the conversion to F16 if necessary. */
+
+    switch (opCode) {
+      case OpCode::eRcp:
+      case OpCode::eRsq:
+      case OpCode::eExp:
+        resultDef = builder.add(ir::Op::FMin(vectorType, resultDef,
+          ir::makeTypedConstant(builder, vectorType, std::numeric_limits<float>::max())));
+        break;
+
+      case OpCode::eLog:
+      case OpCode::eLogP:
+        resultDef = builder.add(ir::Op::FMax(vectorType, resultDef,
+          ir::makeTypedConstant(builder, vectorType, -std::numeric_limits<float>::max())));
+        break;
+
+      default: break;
+    }
+  }
+
+  return storeDstModifiedPredicated(builder, op, dst, resultDef);
+}
+
+
+bool Converter::handleDot(ir::Builder& builder, const Instruction& op) {
+  /* Dp2/3/4 take two vector operands, produce a scalar, and replicate
+   * that in all components included in the destination write mask.
+   * Dp2Add takes a third vector operand and adds it.
+   * (dst0) Result
+   * (src0) First vector
+   * (src1) Second vector */
+  auto opCode = op.getOpCode();
+
+  dxbc_spv_assert((opCode == OpCode::eDp2Add && op.getSrcCount() == 3u) || op.getSrcCount() == 2u);
+  dxbc_spv_assert(op.hasDst());
+
+  /* The opcode determines which source components to read,
+   * since the write mask can be literally anything. */
+  auto readMask = [opCode] {
+    switch (opCode) {
+      case OpCode::eDp2Add: return util::makeWriteMaskForComponents(2u);
+      case OpCode::eDp3: return util::makeWriteMaskForComponents(3u);
+      case OpCode::eDp4: return util::makeWriteMaskForComponents(4u);
+      default: break;
+    }
+
+    dxbc_spv_unreachable();
+    return WriteMask();
+  } ();
+
+  /* Load source vectors and pass them to the internal dot instruction as they are */
+  const auto& dst = op.getDst();
+
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  auto vectorA = loadSrcModified(builder, op, op.getSrc(0u), readMask, scalarType);
+  auto vectorB = loadSrcModified(builder, op, op.getSrc(1u), readMask, scalarType);
+
+  ir::SsaDef result = {};
+
+  if (opCode == OpCode::eDp2Add) {
+    /* src2 needs to have a replicate swizzle, so just get the first component. */
+    result = builder.add(emitFDotAdd(scalarType, vectorA, vectorB,
+      loadSrcModified(builder, op, op.getSrc(2u), ComponentBit::eX, scalarType)));
+  } else {
+    result = builder.add(emitFDot(scalarType, vectorA, vectorB));
+  }
+
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+  result = broadcastScalar(builder, result, writeMask);
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleLit(ir::Builder& builder, const Instruction& op) {
+  /* Calculates lighting coefficients from two dot products and an exponent. */
+  const auto& dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+  auto src = loadSrcModified(builder, op, op.getSrc(0u), util::makeWriteMaskForComponents(4u), scalarType);
+
+  auto srcX = ir::extractFromVector(builder, src, 0u);
+  auto srcY = ir::extractFromVector(builder, src, 1u);
+  auto srcW = ir::extractFromVector(builder, src, 3u);
+
+  /* power = clamp(src.w, -127.9961, 127.9961) */
+  auto power = builder.add(ir::Op::FClamp(scalarType, srcW,
+    builder.makeConstant(-127.9961f), builder.makeConstant(127.9961f)));
+
+  auto zeroFConst = ir::makeTypedConstant(builder, scalarType, 0.0f);
+  auto oneFConst = ir::makeTypedConstant(builder, scalarType, 1.0f);
+
+  util::small_vector<ir::SsaDef, 4u> components;
+
+  if (writeMask & ComponentBit::eX) {
+    /* dst.x = 1.0 */
+    components.push_back(oneFConst);
+  }
+
+  if (writeMask & ComponentBit::eY) {
+    /* dst.y = max(0.0, src.x) */
+    components.push_back(builder.add(ir::Op::FMax(scalarType, srcX, zeroFConst)));
+  }
+
+  if (writeMask & ComponentBit::eZ) {
+    /* dst.z = src.x > 0.0 && src.y > 0.0 ? pow(src.y, src.w) : 0.0 */
+
+    auto zTestX = builder.add(ir::Op::FGe(ir::ScalarType::eBool, srcX,zeroFConst));
+    auto zTestY = builder.add(ir::Op::FGe(ir::ScalarType::eBool, srcY, zeroFConst));
+    auto zTest = builder.add(ir::Op::BAnd(ir::ScalarType::eBool, zTestX, zTestY));
+
+    auto dstZ = builder.add(ir::Op::FPow(scalarType, srcY, power));
+
+    components.push_back(builder.add(ir::Op::Select(scalarType, zTest, dstZ, zeroFConst)));
+  }
+
+  if (writeMask & ComponentBit::eW) {
+    /* dst.w = 1.0 */
+    components.push_back(oneFConst);
+  }
+
+  auto result = buildVector(builder, scalarType, components.size(), components.data());
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleMatrixArithmetic(ir::Builder& builder, const Instruction& op) {
+  /* All instructions handled here will operate on float vectors of any kind. */
+  dxbc_spv_assert(op.getSrcCount() == 2);
+  dxbc_spv_assert(op.hasDst());
+
+  auto matrixSize = getMatrixSize(op.getOpCode());
+  dxbc_spv_assert(matrixSize.has_value());
+  uint32_t columnCount = matrixSize.value().first;
+  uint32_t rowCount = matrixSize.value().second;
+
+  /* Build a write mask that determines how many components we'll load. */
+  WriteMask srcMask = util::makeWriteMaskForComponents(columnCount);
+  WriteMask dstMask = util::makeWriteMaskForComponents(rowCount);
+
+  /* Docs say write mask has to be .xyz for m3x3, but clearly that is a lie */
+  auto dst = op.getDst();
+  dst = dst.setWriteMask(dstMask & dst.getWriteMask(m_parser.getShaderInfo()));
+
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  /* Load source operands */
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), srcMask, scalarType);
+  Operand src1Operand = op.getSrc(1u);
+
+  std::array<ir::SsaDef, 4u> components = { };
+  for (uint32_t i = 0u; i < rowCount; i++) {
+    /* Load matrix column */
+    auto src1iOperand = src1Operand.withIndex(src1Operand.getIndex() + i);
+    auto src1 = loadSrcModified(builder, op, src1iOperand, srcMask, scalarType);
+
+    /* Calculate vector component */
+    components[i] = builder.add(emitFDot(scalarType, src0, src1));
+  }
+
+  auto result = buildVector(builder, scalarType, rowCount, components.data());
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleBem(ir::Builder& builder, const Instruction& op) {
+  /* Apply a fake bump environment-map transform. */
+  dxbc_spv_assert(op.getSrcCount() == 2u);
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(m_psSharedData);
+
+  auto dst = op.getDst();
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  /* Dst register index determines the bumpmapping stage index. */
+  auto stageIdx = dst.getIndex();
+
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+  /* Write mask must be .xy */
+  dxbc_spv_assert(writeMask == WriteMask(ComponentBit::eX | ComponentBit::eY));
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), writeMask, scalarType);
+
+  auto result = applyBumpMapping(builder, stageIdx, src0, src1);
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleTexCoord(ir::Builder& builder, const Instruction& op) {
+  /* Reads texcoord data */
+  const auto& dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  if (getShaderInfo().getVersion().first >= 2 || getShaderInfo().getVersion().second >= 4) {
+    /* TexCrd (SM 1.4) */
+    auto src = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+    return storeDstModifiedPredicated(builder, op, dst, src);
+
+  } else {
+    /* TexCoord (SM 1.1 - 1.3) */
+    ir::BasicType vectorType = makeVectorType(scalarType, writeMask);
+    auto src = m_ioMap.emitTexCoordLoad(builder, op, op.getDst().getIndex(), writeMask, Swizzle::identity(), scalarType);
+
+    /* Saturate */
+    src = builder.add(ir::Op::FClamp(vectorType, src,
+      makeTypedConstant(builder, vectorType, 0.0f),
+      makeTypedConstant(builder, vectorType, 1.0f)));
+
+    /* w = 1.0 */
+    if (writeMask & ComponentBit::eW)
+      src = insertIntoVector(builder, src, 3u, ir::makeTypedConstant(builder, scalarType, 1.0f));
+
+    return storeDstModifiedPredicated(builder, op, dst, src);
+  }
+}
+
+
+ir::SsaDef Converter::emitTexMatMul(ir::Builder& builder, const Instruction& op) {
+  const uint32_t rows = op.getOpCode() == OpCode::eTexM3x2Tex
+    || op.getOpCode() == OpCode::eTexM3x2Depth
+    ? 2u : 3u;
+
+  auto dst = op.getDst();
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+  auto src0 = op.getSrc(0u);
+  auto tn = loadSrcModified(builder, op, src0, util::makeWriteMaskForComponents(3u), scalarType);
+
+  std::array<ir::SsaDef, 3u> components = { };
+  uint32_t lastIndex = dst.getIndex();
+  for (uint32_t i = 0u; i < rows; i++) {
+    auto tmi = m_ioMap.emitTexCoordLoad(builder, op, lastIndex + i - rows + 1u, util::makeWriteMaskForComponents(3u), Swizzle::identity(), scalarType);
+    components[i] = builder.add(emitFDot(scalarType, tmi, tn));
+  }
+
+  return buildVector(builder, scalarType, rows, components.data());
+}
+
+
+bool Converter::handleTextureSample(ir::Builder& builder, const Instruction& op) {
+  ir::SsaDef result = ir::SsaDef();
+  auto dst = op.getDst();
+  auto opCode = op.getOpCode();
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+  Swizzle swizzle = Swizzle::identity();
+
+  switch (opCode) {
+    case OpCode::eTexLd: {
+      /* Regular texture sampling instruction */
+      uint32_t samplerIdx;
+      ir::SsaDef texCoord;
+      ir::SsaDef lodBias = ir::SsaDef();
+      ir::SsaDef lod = ir::SsaDef();
+
+      if (getShaderInfo().getType() == ShaderType::eVertex)
+        lod = builder.makeConstant(0u);
+
+      if (getShaderInfo().getVersion().first <= 1u) {
+        dxbc_spv_assert(getShaderInfo().getType() == ShaderType::ePixel);
+        samplerIdx = dst.getIndex();
+        if (getShaderInfo().getVersion().second >= 4u) {
+          /* texld - ps_1_4 */
+          auto src0 = op.getSrc(0u);
+          texCoord = loadSrcModified(builder, op, src0, ComponentBit::eAll, scalarType);
+        } else {
+          /* tex - ps_1_1 - ps_1_3 */
+          /* The destination register index decides the sampler and texture coord index. */
+          texCoord = m_ioMap.emitTexCoordLoad(builder, op, samplerIdx, ComponentBit::eAll, Swizzle::identity(), scalarType);
+
+          /* D3DTTFF_PROJECTED only impacts the ps_1_1 - ps_1_3 tex instruction. */
+          texCoord = m_resources.projectTexCoord(builder, samplerIdx, texCoord, true);
+        }
+      } else {
+        /* texld - sm_2_0 and up */
+        auto src0 = op.getSrc(0u);
+        auto src1 = op.getSrc(1u);
+
+        if (getShaderInfo().getVersion().first >= 3u)
+          swizzle = src1.getSwizzle(getShaderInfo());
+
+        texCoord = loadSrcModified(builder, op, src0, ComponentBit::eAll, scalarType);
+        samplerIdx = src1.getIndex();
+
+        switch (op.getTexLdMode()) {
+          case TexLdMode::eProject:
+            texCoord = m_resources.projectTexCoord(builder, samplerIdx, texCoord, false);
+            break;
+          case TexLdMode::eBias:
+            lodBias = builder.add(ir::Op::CompositeExtract(scalarType, texCoord, builder.makeConstant(3u)));
+            break;
+          default: break;
+        }
+      }
+
+      result = m_resources.emitSample(builder, samplerIdx, texCoord, lod, lodBias, ir::SsaDef(), ir::SsaDef(), scalarType);
+    } break;
+
+    case OpCode::eTexLdl: {
+      /* Sample with explicit LOD */
+      auto src0 = op.getSrc(0u);
+      auto src1 = op.getSrc(1u);
+
+      if (getShaderInfo().getVersion().first >= 3u)
+        swizzle = src1.getSwizzle(getShaderInfo());
+
+      auto texCoord = loadSrcModified(builder, op, src0, ComponentBit::eAll, scalarType);
+      uint32_t samplerIdx = src1.getIndex();
+      auto lod = builder.add(ir::Op::CompositeExtract(scalarType, texCoord, builder.makeConstant(3u)));
+      result = m_resources.emitSample(builder, samplerIdx, texCoord, lod, ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), scalarType);
+    } break;
+
+    case OpCode::eTexLdd: {
+      /* Sample with explicit derivatives */
+      auto src0 = op.getSrc(0u);
+      auto src1 = op.getSrc(1u);
+
+      if (getShaderInfo().getVersion().first >= 3u)
+        swizzle = src1.getSwizzle(getShaderInfo());
+
+      auto src2 = op.getSrc(2u);
+      auto src3 = op.getSrc(3u);
+      auto texCoord = loadSrcModified(builder, op, src0, ComponentBit::eAll, scalarType);
+      uint32_t samplerIdx = src1.getIndex();
+      auto dx = loadSrcModified(builder, op, src2, ComponentBit::eAll, scalarType);
+      auto dy = loadSrcModified(builder, op, src3, ComponentBit::eAll, scalarType);
+      result = m_resources.emitSample(builder, samplerIdx, texCoord, ir::SsaDef(), ir::SsaDef(), dx, dy, scalarType);
+    } break;
+
+    case OpCode::eTexReg2Ar:
+    case OpCode::eTexReg2Gb:
+    case OpCode::eTexReg2Rgb: {
+      /* Sample with custom values used as texture coords (SM 1) */
+      Swizzle texCoordSwizzle = Swizzle::identity();
+      switch (opCode) {
+        case OpCode::eTexReg2Ar:  texCoordSwizzle = Swizzle(Component::eW, Component::eX, Component::eX, Component::eX); break;
+        case OpCode::eTexReg2Gb:  texCoordSwizzle = Swizzle(Component::eY, Component::eZ, Component::eZ, Component::eZ); break;
+        case OpCode::eTexReg2Rgb: texCoordSwizzle = Swizzle(Component::eX, Component::eY, Component::eZ, Component::eZ); break;
+        default: dxbc_spv_unreachable(); break;
+      }
+
+      auto src0 = op.getSrc(0u);
+      auto texCoord = loadSrcModified(builder, op, src0, ComponentBit::eAll, scalarType);
+      texCoord = swizzleVector(builder, texCoord, texCoordSwizzle, ComponentBit::eAll);
+      uint32_t samplerIdx = dst.getIndex();
+
+      result = m_resources.emitSample(builder, samplerIdx, texCoord, ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), scalarType);
+    } break;
+
+
+    case OpCode::eTexM3x2Tex: {
+      auto texCoord = emitTexMatMul(builder, op);
+      /* TexM3x2Tex does a matrix multiplication and use the result as texture coordinate. */
+      result = m_resources.emitSample(builder, dst.getIndex(), texCoord, ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), scalarType);
+    } break;
+
+
+    case OpCode::eTexM3x3Tex: {
+      auto texCoord = emitTexMatMul(builder, op);
+      /* TexM3x3Tex does a matrix multiplication and use the result as texture coordinate. */
+      result = m_resources.emitSample(builder, dst.getIndex(), texCoord, ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), scalarType);
+    } break;
+
+
+    case OpCode::eTexM3x2Depth: {
+      auto texCoord = emitTexMatMul(builder, op);
+      /* TexM3x2Depth doesn't actually sample. */
+      auto z = ir::extractFromVector(builder, texCoord, 0u);
+      auto w = ir::extractFromVector(builder, texCoord, 1u);
+      auto isZero = builder.add(ir::Op::FEq(ir::ScalarType::eBool, w, builder.makeConstantZero(scalarType)));
+      auto depth = builder.add(ir::Op::Select(scalarType, isZero,
+        makeTypedConstant(builder, scalarType, 1.0f),
+        builder.add(ir::Op::FDiv(scalarType, z, w))));
+
+      /* We store depth, not the destination register */
+      return m_ioMap.emitDepthStore(builder, op, depth);
+      /* Docs: After running texm3x2depth, register t(m+1) is no longer available for use in the shader. */
+    }
+
+
+    case OpCode::eTexM3x3: {
+      /* TexM3x3 doesn't actually sample. It just does the matrix multiplication and stores the result. */
+      result = emitTexMatMul(builder, op);
+      /* TexM3x3 is defined to return a 4d vector with w being 1.0. emitTexMatMul only returns a 3d vector. */
+      std::array<ir::SsaDef, 4u> components = {
+        ir::extractFromVector(builder, result, 0u),
+        ir::extractFromVector(builder, result, 1u),
+        ir::extractFromVector(builder, result, 2u),
+        makeTypedConstant(builder, scalarType, 1.0f)
+      };
+      dxbc_spv_assert(builder.getOp(components[0u]).getType().getBaseType(0u).getBaseType() == scalarType);
+      result = ir::buildVector(builder, scalarType, components.size(), components.data());
+    } break;
+
+
+    case OpCode::eTexM3x3Spec:
+    case OpCode::eTexM3x3VSpec: {
+      /* TexM3x3Spec / TexM3x3VSpec do a matrix multiplication and use the result as the normal vector
+       * in a reflection calculation. */
+      auto normal = emitTexMatMul(builder, op);
+
+      ir::SsaDef eyeRay;
+      if (opCode == OpCode::eTexM3x3VSpec) {
+        uint32_t lastIndex = dst.getIndex();
+        /* VSpec -> Create eye ray from .w of last 3 tex coords (m, m-1, m-2) */
+        std::array<ir::SsaDef, 3u> eyeRayComponents = { };
+        for (uint32_t i = 0u; i < eyeRayComponents.size(); i++)
+          eyeRayComponents[i] = m_ioMap.emitTexCoordLoad(builder, op, lastIndex + i - 2u, WriteMask(ComponentBit::eW), Swizzle::identity(), scalarType);
+
+        eyeRay = buildVector(builder, scalarType, eyeRayComponents.size(), eyeRayComponents.data());
+      } else {
+        /* Spec -> Get eye ray from src[1] */
+        eyeRay = loadSrcModified(builder, op, op.getSrc(1u), util::makeWriteMaskForComponents(3u), scalarType);
+      }
+
+      eyeRay = normalizeVector(builder, eyeRay);
+      normal = normalizeVector(builder, normal);
+
+      /* 2*[(N*E)/(N*N)]*N - E */
+      auto vectorType = ir::BasicType(scalarType, 3u);
+
+      auto nDotE = builder.add(emitFDot(scalarType, normal, eyeRay));
+      auto nDotN = builder.add(emitFDot(scalarType, normal, normal));
+      auto dotDiv = builder.add(ir::Op::FDiv(scalarType, nDotE, nDotN));
+      auto twoDotDiv = builder.add(emitFMul(scalarType, makeTypedConstant(builder, scalarType, 2.0f), dotDiv));
+      auto texCoord = builder.add(emitFMul(vectorType, normal, broadcastScalar(builder, twoDotDiv, util::makeWriteMaskForComponents(3u))));
+      texCoord = builder.add(ir::Op::FSub(vectorType, texCoord, eyeRay));
+
+      /* The sampling function requires a vec4. */
+      std::array<ir::SsaDef, 4u> texCoordComponents = {
+        builder.add(ir::Op::CompositeExtract(scalarType, texCoord, builder.makeConstant(0u))),
+        builder.add(ir::Op::CompositeExtract(scalarType, texCoord, builder.makeConstant(1u))),
+        builder.add(ir::Op::CompositeExtract(scalarType, texCoord, builder.makeConstant(2u))),
+        makeTypedConstant(builder, scalarType, 0.0f),
+      };
+      texCoord = buildVector(builder, scalarType, texCoordComponents.size(), texCoordComponents.data());
+
+      result = m_resources.emitSample(builder, dst.getIndex(), texCoord, ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), scalarType);
+    } break;
+
+
+    case OpCode::eTexDp3Tex: {
+      /* Calculate a dot product of the texcoord data and src0 (and optionally use that for 1D texture lookup) */
+      auto src0 = op.getSrc(0u);
+      auto m = m_ioMap.emitTexCoordLoad(builder, op, dst.getIndex(), util::makeWriteMaskForComponents(3u), Swizzle::identity(), scalarType);
+      auto n = loadSrcModified(builder, op, src0, util::makeWriteMaskForComponents(3u), scalarType);
+      auto dot = builder.add(emitFDot(scalarType, m, n));
+
+      /* Sample texture at register index of dst using (dot, 0, 0, 0) as coordinates */
+      std::array<ir::SsaDef, 4u> texCoordComponents = {
+        dot,
+        makeTypedConstant(builder, scalarType, 0.0f),
+        makeTypedConstant(builder, scalarType, 0.0f),
+        makeTypedConstant(builder, scalarType, 0.0f),
+      };
+      auto texCoord = buildVector(builder, scalarType, texCoordComponents.size(), texCoordComponents.data());
+      result = m_resources.emitSample(builder, dst.getIndex(), texCoord, ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), scalarType);
+    } break;
+
+
+    case OpCode::eTexDp3: {
+      /* Calculate a dot product of the texcoord data and src0 */
+      auto src0 = op.getSrc(0u);
+      auto m = m_ioMap.emitTexCoordLoad(builder, op, dst.getIndex(), util::makeWriteMaskForComponents(3u), Swizzle::identity(), scalarType);
+      auto n = loadSrcModified(builder, op, src0, util::makeWriteMaskForComponents(3u), scalarType);
+      auto dot = builder.add(emitFDot(scalarType, m, n));
+
+      /* Replicates the dot product to all four color channels. Doesn't actually sample. */
+      result = broadcastScalar(builder, dot, util::makeWriteMaskForComponents(4u));
+    } break;
+
+    case OpCode::eTexBem:
+    case OpCode::eTexBemL: {
+      /* Apply a fake bump environment-map transform
+       * texbem(l) t(m), t(n) */
+      uint32_t samplerIdx = dst.getIndex();
+      auto texCoord = m_ioMap.emitTexCoordLoad(builder, op, samplerIdx, ComponentBit::eAll, Swizzle::identity(), scalarType);
+
+      auto src0Mask = util::makeWriteMaskForComponents(2u + uint32_t(opCode == OpCode::eTexBemL));
+      auto src0 = loadSrcModified(builder, op, op.getSrc(0u), src0Mask, scalarType);
+
+      dxbc_spv_assert(getShaderInfo().getVersion().first < 2u);
+      /* The projection (/.w) happens before this... */
+      texCoord = m_resources.projectTexCoord(builder, samplerIdx, texCoord, true);
+
+      auto bumpMappedTexCoord = applyBumpMapping(builder, samplerIdx, texCoord, src0);
+
+      /* Insert it back into the original tex coord, so we have a z and w component in case we need them. */
+      std::array<ir::SsaDef, 4u> texCoordComponents = {};
+      texCoordComponents[0] = ir::extractFromVector(builder, bumpMappedTexCoord, 0u);
+      texCoordComponents[1] = ir::extractFromVector(builder, bumpMappedTexCoord, 1u);
+      texCoordComponents[2] = ir::extractFromVector(builder, texCoord, 2u);
+      texCoordComponents[3] = ir::extractFromVector(builder, texCoord, 3u);
+      texCoord = buildVector(builder, scalarType, texCoordComponents.size(), texCoordComponents.data());
+
+      result = m_resources.emitSample(builder, samplerIdx, texCoord, ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), ir::SsaDef(), scalarType);
+
+      if (opCode == OpCode::eTexBemL) {
+        /* Additionally does luminance correction
+         * m = dst index
+         * n = src0 index
+         * = sampled(t(m)) * (t(n).b * D3DTSS_BUMPENVLSCALE(stage m) + D3DTSS_BUMPENVLOFFSET(stage m)) */
+        auto bumpEnvLScale = builder.add(ir::Op::InputLoad(ir::ScalarType::eF32,
+          m_psSharedData, builder.makeConstant(samplerIdx, uint32_t(ir::LegacyTextureStageLayout::eBumpScale))));
+        auto bumpEnvLOffset = builder.add(ir::Op::InputLoad(ir::ScalarType::eF32,
+          m_psSharedData, builder.makeConstant(samplerIdx, uint32_t(ir::LegacyTextureStageLayout::eBumpOffset))));
+
+        if (scalarType != ir::ScalarType::eF32) {
+          bumpEnvLScale = builder.add(ir::Op::ConsumeAs(scalarType, bumpEnvLScale));
+          bumpEnvLOffset = builder.add(ir::Op::ConsumeAs(scalarType, bumpEnvLOffset));
+        }
+
+        auto scale = builder.add(ir::Op::CompositeExtract(scalarType, src0, builder.makeConstant(2u)));
+        scale = builder.add(emitFMad(scalarType, scale, bumpEnvLScale, bumpEnvLOffset));
+        scale = builder.add(ir::Op::FClamp(scalarType, scale,
+          ir::makeTypedConstant(builder, scalarType, 0.0f),
+          ir::makeTypedConstant(builder, scalarType, 1.0f)));
+
+        std::array<ir::SsaDef, 4u> scaledComponents = {};
+
+        for (uint32_t i = 0u; i < 4u; i++) {
+          auto resultComponent = builder.add(ir::Op::CompositeExtract(scalarType, result, builder.makeConstant(i)));
+          scaledComponents[i] = builder.add(emitFMul(scalarType, resultComponent, scale));
+        }
+
+        result = buildVector(builder, scalarType, scaledComponents.size(), scaledComponents.data());
+      }
+    } break;
+
+    default: {
+      Logger::err("OpCode ", op.getOpCode(), " is not supported by handleTextureSample.");
+      dxbc_spv_unreachable();
+      return false;
+    } break;
+  }
+
+  /* The sampling functions return an unswizzled vec4 that
+   * hasn't applied the write mask yet. So do that now. */
+  dxbc_spv_assert(result);
+
+  result = ir::swizzleVector(builder, result, swizzle, dst.getWriteMask(getShaderInfo()));
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleTexKill(ir::Builder& builder, const Instruction& op) {
+  /* Demotes if any of the first 3 components are less than 0.0. */
+  dxbc_spv_assert(op.hasDst());
+  ir::SsaDef dst;
+
+  auto writeMask = op.getDst().getWriteMask(getShaderInfo());
+  auto [versionMajor, versionMinor] = getShaderInfo().getVersion();
+
+  /* For Shader Model 1 this operates on the first three components,
+   * otherwise we need to take the full write mask into account */
+  if (versionMajor <= 1u)
+    writeMask &= ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ;
+
+  if (versionMajor <= 1u && versionMinor <= 3u) {
+    dst = m_ioMap.emitTexCoordLoad(builder,
+      op,
+      op.getDst().getIndex(),
+      writeMask,
+      Swizzle::identity(),
+      ir::ScalarType::eF32);
+  } else {
+    /* Yes, we're loading the dst as a src here. That's not a mistake. */
+    dst = loadSrc(builder, op, op.getDst(), writeMask, Swizzle::identity(), ir::ScalarType::eF32);
+  }
+
+  ir::SsaDef minVal = { };
+
+  for (auto c : writeMask) {
+    ir::SsaDef texCoordComponent = ir::extractFromVector(builder, dst, uint32_t(util::componentFromBit(c)));
+
+    if (!minVal)
+      minVal = texCoordComponent;
+    else
+      minVal = builder.add(ir::Op::FMin(builder.getOp(texCoordComponent).getType(), texCoordComponent, minVal));
+  }
+
+  auto cond = builder.add(ir::Op::FLt(ir::ScalarType::eBool, minVal, builder.makeConstant(0.0f)));
+  auto ifDef = builder.add(ir::Op::ScopedIf(ir::SsaDef(), cond));
+  builder.add(ir::Op::Demote());
+  auto endIf = builder.add(ir::Op::ScopedEndIf(ifDef));
+  builder.rewriteOp(ifDef, ir::Op(builder.getOp(ifDef)).setOperand(0u, endIf));
+  return true;
+}
+
+
+bool Converter::handleTexDepth(ir::Builder& builder, const Instruction& op) {
+  /* Writes the fragment depth */
+
+  /* It always uses temporary register r5, which is encoded as a destination operand. */
+  auto val = loadSrc(builder, op, op.getDst(), ComponentBit::eX | ComponentBit::eY, Swizzle::identity(), ir::ScalarType::eF32);
+  auto r = builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, val, builder.makeConstant(0u)));
+  auto g = builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, val, builder.makeConstant(1u)));
+
+  /* depth = r5.r / r5.g */
+  auto depth = builder.add(ir::Op::FDiv(ir::ScalarType::eF32, r, g));
+  return m_ioMap.emitDepthStore(builder, op, depth);
+}
+
+
+ir::SsaDef Converter::loadSrc(ir::Builder& builder, const Instruction& op, const Operand& operand, WriteMask mask, Swizzle swizzle, ir::ScalarType type) {
+  auto loadDef = ir::SsaDef();
+
+  dxbc_spv_assert(!operand.hasRelativeAddressing()
+    || operand.getRegisterType() == RegisterType::eInput
+    || operand.getRegisterType() == RegisterType::eConst
+    || operand.getRegisterType() == RegisterType::eConst2
+    || operand.getRegisterType() == RegisterType::eConst3
+    || operand.getRegisterType() == RegisterType::eConst4
+    || (operand.getRegisterType() == RegisterType::eOutput && getShaderInfo().getType() == ShaderType::eVertex));
+
+  switch (operand.getRegisterType()) {
+    case RegisterType::eInput:
+    case RegisterType::ePixelTexCoord:
+    case RegisterType::eMiscType:
+      loadDef = m_ioMap.emitLoad(builder, op, operand, mask, swizzle, type);
+      break;
+
+    case RegisterType::eAddr:
+    /* case RegisterType::eTexture: Same Value */
+      if (getShaderInfo().getType() == ShaderType::eVertex) {
+        /* RegisterType::eAddr */
+        logOpError(op, "Address register cannot be loaded as a regular source register.");
+      } else if (getShaderInfo().getVersion().first == 1u && getShaderInfo().getVersion().second <= 3u) {
+        /* Texture registers act as special purpose temp registers in PS 1.1 - PS 1.3. */
+        loadDef = m_regFile.emitTextureRegLoad(builder,
+          operand.getIndex(),
+          swizzle,
+          mask,
+          type);
+      } else {
+        loadDef = m_ioMap.emitLoad(builder, op, operand, mask, swizzle, type); /* RegisterType::eTexture */
+      }
+      break;
+
+    case RegisterType::eTemp:
+      loadDef = m_regFile.emitTempLoad(builder,
+        operand.getIndex(),
+        swizzle,
+        mask,
+        type);
+      break;
+
+    case RegisterType::ePredicate:
+      logOpError(op, "Predicate cannot be loaded as a regular source register.");
+      break;
+
+    case RegisterType::eConst:
+    case RegisterType::eConst2:
+    case RegisterType::eConst3:
+    case RegisterType::eConst4:
+    case RegisterType::eConstInt:
+    case RegisterType::eConstBool:
+      loadDef = m_resources.emitConstantLoad(builder, operand, mask, type);
+      break;
+
+    default:
+      break;
+  }
+
+  if (!loadDef) {
+    auto name = makeRegisterDebugName(operand.getRegisterType(), 0u, WriteMask());
+    logOpError(op, "Failed to load operand: ", name);
+    return loadDef;
+  }
+
+  return loadDef;
+}
+
+
+bool Converter::handleExpP(ir::Builder& builder, const Instruction& op) {
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(op.getSrcCount() == 1u);
+  auto dst = op.getDst();
+  auto info = m_parser.getShaderInfo();
+  WriteMask writeMask = dst.getWriteMask(info);
+  /* src0 has to have a replicate swizzle, so just load x. */
+  util::small_vector<ir::SsaDef, 4u> components;
+
+  ir::ScalarType scalarType;
+
+  if (info.getVersion().first >= 2u) {
+    scalarType = ir::ScalarType::eMinF16;
+
+    auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, scalarType);
+
+    for (auto _ : writeMask) {
+      auto value = builder.add(ir::Op::FExp2(scalarType, src0));
+
+      if (m_options.fastFloatEmulation) {
+        /* If FP16 is used, the constant will be rounded down accordingly */
+        value = builder.add(ir::Op::FMin(scalarType, value,
+          ir::makeTypedConstant(builder, scalarType, std::numeric_limits<float>::max())));
+      }
+
+      components.push_back(value);
+    }
+  } else {
+    /* According to the docs, only .z is actually computed with min precision. */
+    scalarType = ir::ScalarType::eF32;
+    auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, scalarType);
+
+    /* dst.x = pow(2.0, floor(src0)) */
+    if (writeMask & ComponentBit::eX) {
+      auto value = builder.add(ir::Op::FExp2(scalarType, builder.add(
+        ir::Op::FRound(scalarType, src0, ir::RoundMode::eNegativeInf))));
+
+      if (m_options.fastFloatEmulation) {
+        value = builder.add(ir::Op::FMin(scalarType, value,
+          ir::makeTypedConstant(builder, scalarType, std::numeric_limits<float>::max())));
+      }
+
+      components.push_back(value);
+    }
+
+    /* dst.y = src0 - floor(src0) = fract(src0) */
+    if (writeMask & ComponentBit::eY)
+      components.push_back(builder.add(ir::Op::FFract(scalarType, src0)));
+
+    /* dst.z = pow(2.0, src0) as partial precision */
+    if (writeMask & ComponentBit::eZ) {
+      auto input = builder.add(ir::Op::ConsumeAs(ir::ScalarType::eMinF16, src0));
+      auto value = builder.add(ir::Op::FExp2(ir::ScalarType::eMinF16, input));
+
+      if (m_options.fastFloatEmulation) {
+        /* If FP16 is used, the constant will be rounded down accordingly */
+        value = builder.add(ir::Op::FMin(ir::ScalarType::eMinF16, value,
+          ir::makeTypedConstant(builder, ir::ScalarType::eMinF16, std::numeric_limits<float>::max())));
+      }
+
+      components.push_back(builder.add(ir::Op::ConsumeAs(scalarType, value)));
+    }
+
+    /* dst.w = 1.0 */
+    if (writeMask & ComponentBit::eW)
+      components.push_back(makeTypedConstant(builder, scalarType, 1.0f));
+  }
+
+  auto result = ir::buildVector(builder, scalarType, components.size(), components.data());
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleLrp(ir::Builder& builder, const Instruction& op) {
+  dxbc_spv_assert(op.getSrcCount() == 3u);
+  dxbc_spv_assert(op.hasDst());
+
+  auto dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), writeMask, scalarType);
+  auto src2 = loadSrcModified(builder, op, op.getSrc(2u), writeMask, scalarType);
+
+  auto type = makeVectorType(scalarType, writeMask);
+
+  /* dest = src0 * (src1 - src2) + src2 */
+  auto result = builder.add(ir::Op::FSub(type, src1, src2));
+  result = builder.add(emitFMul(type, src0, result));
+  result = builder.add(ir::Op::FAdd(type, result, src2));
+
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleSelect(ir::Builder& builder, const Instruction& op) {
+  dxbc_spv_assert(op.getSrcCount() == 3u);
+  dxbc_spv_assert(op.hasDst());
+
+  auto dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  if (op.getOpCode() == OpCode::eCnd && getShaderInfo().getVersion().first <= 1u && getShaderInfo().getVersion().second < 4u) {
+    /* Cnd on SM<1.4 compares everything to r0.a. Attempting to use a different register for source 0 or a different
+     * swizzle makes D3D9 reject the shader on SM<1.4. It similarly rejects the shader when you try to use a different
+     * write mask than .rgba, .rgb or .a.
+     * On 1.4+ it compares per component and it's a lot more flexible. */
+    auto src0Register = op.getSrc(0u);
+    if (src0Register.getIndex() != 0u
+      || src0Register.getRegisterType() != RegisterType::eTemp
+      || src0Register.getSwizzle(getShaderInfo()) != Swizzle(Component::eW))
+      return false;
+
+    if (writeMask != WriteMask(ComponentBit::eAll)
+      && writeMask != WriteMask(ComponentBit::eW)
+      && writeMask != WriteMask(ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ))
+      return false;
+  }
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), writeMask, scalarType);
+  auto src2 = loadSrcModified(builder, op, op.getSrc(2u), writeMask, scalarType);
+
+  util::small_vector<ir::SsaDef, 4u> components;
+  for (auto _ : writeMask) {
+    uint32_t componentIndex = components.size();
+
+    auto conditionComponent = ir::extractFromVector(builder, src0, componentIndex);
+    auto option1Component = ir::extractFromVector(builder, src1, componentIndex);
+    auto option2Component = ir::extractFromVector(builder, src2, componentIndex);
+
+    ir::SsaDef conditionBool;
+    if (op.getOpCode() == OpCode::eCmp) {
+      /* Cmp compares to 0.0 */
+      conditionBool = builder.add(ir::Op::FGe(ir::ScalarType::eBool, conditionComponent, makeTypedConstant(builder, scalarType, 0.0f)));
+    } else if (op.getOpCode() == OpCode::eCnd) {
+      /* Cnd compares to 0.5 */
+      conditionBool = builder.add(ir::Op::FGt(ir::ScalarType::eBool, conditionComponent, makeTypedConstant(builder, scalarType, 0.5f)));
+    } else {
+      Logger::err("OpCode ", op.getOpCode(), " is not supported by handleSelect.");
+      dxbc_spv_unreachable();
+      return false;
+    }
+
+    components.push_back(builder.add(ir::Op::Select(scalarType, conditionBool, option1Component, option2Component)));
+  }
+
+  auto result = ir::buildVector(builder, scalarType, components.size(), components.data());
+
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleNrm(ir::Builder& builder, const Instruction& op) {
+  dxbc_spv_assert(op.getSrcCount() == 1u);
+  dxbc_spv_assert(op.hasDst());
+
+  auto dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+  auto vectorType = makeVectorType(scalarType, writeMask);
+
+  /* For some godforsaken reason this doesn't actually normalize the vector given
+   * by the write mask, but divides everything in the write mask (even .w) by the
+   * length of the .xyz vector of the source instead. */
+  auto xyz = loadSrcModified(builder, op, op.getSrc(0u),
+    util::makeWriteMaskForComponents(3u), scalarType);
+
+  auto scale = builder.add(ir::Op::FRsq(scalarType,
+    builder.add(emitFDot(scalarType, xyz, xyz))));
+
+  if (m_options.fastFloatEmulation) {
+    scale = builder.add(ir::Op::FMin(scalarType, scale,
+      ir::makeTypedConstant(builder, scalarType, std::numeric_limits<float>::max())));
+  }
+
+  auto src = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+  auto result = builder.add(emitFMul(vectorType, src, broadcastScalar(builder, scale, writeMask)));
+
+  if (m_options.fastFloatEmulation) {
+    auto vectorType = ir::makeVectorType(scalarType, writeMask);
+    result = builder.add(ir::Op::FClamp(vectorType, result,
+      ir::makeTypedConstant(builder, vectorType, -std::numeric_limits<float>::max()),
+      ir::makeTypedConstant(builder, vectorType,  std::numeric_limits<float>::max())));
+  }
+
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleSinCos(ir::Builder& builder, const Instruction& op) {
+  /* dst.x = cos(src)
+   * dst.y = sin(src)
+   * Before PS 3_0, shaders had to provide specific consts as src1 and src2. */
+  dxbc_spv_assert(op.getSrcCount() == (getShaderInfo().getVersion().first == 3u ? 1u : 3u));
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(op.getSrc(0u).getSwizzle(getShaderInfo()) == Swizzle(op.getSrc(0u).getSwizzle(getShaderInfo()).x()));
+
+  auto dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+
+  auto scalarType = ir::ScalarType::eF32;
+  auto val = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, scalarType);
+
+  dxbc_spv_assert((writeMask & (ComponentBit::eZ | ComponentBit::eW)) == WriteMask());
+
+  util::small_vector<ir::SsaDef, 2u> components = { };
+  if (writeMask & ComponentBit::eX)
+    components.push_back(builder.add(ir::Op::FCos(scalarType, val)));
+  if (writeMask & ComponentBit::eY)
+    components.push_back(builder.add(ir::Op::FSin(scalarType, val)));
+
+  auto vec = buildVector(builder, scalarType, components.size(), components.data());
+  return storeDstModifiedPredicated(builder, op, dst, vec);
+}
+
+
+bool Converter::handlePow(ir::Builder& builder, const Instruction& op) {
+  /* abs(src0)^src1 */
+  dxbc_spv_assert(op.getSrcCount() == 2u);
+  dxbc_spv_assert(op.hasDst());
+
+  auto dst = op.getDst();
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  WriteMask writeMask = dst.getWriteMask(getShaderInfo());
+
+  /* The swizzles must be replicate swizzles. */
+  dxbc_spv_assert(op.getSrc(0u).getSwizzle(getShaderInfo()) == Swizzle(op.getSrc(0u).getSwizzle(getShaderInfo()).x()));
+  dxbc_spv_assert(op.getSrc(1u).getSwizzle(getShaderInfo()) == Swizzle(op.getSrc(1u).getSwizzle(getShaderInfo()).x()));
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), ComponentBit::eX, scalarType);
+
+  auto absSrc0 = builder.add(ir::Op::FAbs(scalarType, src0));
+  auto val = builder.add(emitFPow(scalarType, absSrc0, src1));
+
+  if (m_options.fastFloatEmulation) {
+    // If exponent is 0, promote result to 1 to avoid generating NaNs in some cases
+    val = builder.add(ir::Op::Select(scalarType,
+      builder.add(ir::Op::FNe(ir::ScalarType::eBool, src1, builder.makeConstantZero(scalarType))),
+      val, makeTypedConstant(builder, scalarType, 1.0f)));
+  }
+
+  auto vec = broadcastScalar(builder, val, writeMask);
+  return storeDstModifiedPredicated(builder, op, dst, vec);
+}
+
+
+bool Converter::handleDst(ir::Builder& builder, const Instruction& op) {
+  /* Calculates a distance vector */
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(op.getSrcCount() == 2u);
+  auto dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eAll, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), ComponentBit::eAll, scalarType);
+  util::small_vector<ir::SsaDef, 4u> components = { };
+
+  if (writeMask & ComponentBit::eX) {
+    /* dst.x = 1.0 */
+    components.push_back(makeTypedConstant(builder, scalarType, 1.0f));
+  }
+  if (writeMask & ComponentBit::eY) {
+    /* dst.y = src0.y * src1.y */
+    auto src0y = builder.add(ir::Op::CompositeExtract(scalarType, src0, builder.makeConstant(1u)));
+    auto src1y = builder.add(ir::Op::CompositeExtract(scalarType, src1, builder.makeConstant(1u)));
+    components.push_back(builder.add(emitFMul(scalarType, src0y, src1y)));
+  }
+  if (writeMask & ComponentBit::eZ) {
+    /* dst.z = src0.z */
+    auto src0z = builder.add(ir::Op::CompositeExtract(scalarType, src0, builder.makeConstant(2u)));
+    components.push_back(src0z);
+  }
+  if (writeMask & ComponentBit::eW) {
+    /* dst.w = src1.w */
+    auto src1w = builder.add(ir::Op::CompositeExtract(scalarType, src1, builder.makeConstant(3u)));
+    components.push_back(src1w);
+  }
+
+  auto result = buildVector(builder, scalarType, components.size(), components.data());
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleDerivatives(ir::Builder& builder, const Instruction& op) {
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(op.getSrcCount() == 1u);
+
+  auto dst = op.getDst();
+
+  /* Derivatives cannot support FP16 in SPIR-V */
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+  auto scalarType = ir::ScalarType::eF32;
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+  auto type = makeVectorType(scalarType, writeMask);
+
+  auto result = builder.add(op.getOpCode() == OpCode::eDsX
+    ? ir::Op::DerivX(type, src0, ir::DerivativeMode::eDefault)
+    : ir::Op::DerivY(type, src0, ir::DerivativeMode::eDefault));
+
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleCrs(ir::Builder& builder, const Instruction& op) {
+  /* crs dst, src0, src1
+   * dest.x = src0.y * src1.z - src0.z * src1.y;
+   * dest.y = src0.z * src1.x - src0.x * src1.z;
+   * dest.z = src0.x * src1.y - src0.y * src1.x;
+   *
+   * src0 & src1 must have the default swizzle.
+   * Dst must have one of the following write masks: .x | .y | .z | .xy | .xz | .yz | .xyz.
+   */
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(op.getSrcCount() == 2u);
+  auto dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ, scalarType);
+
+  auto src0x = builder.add(ir::Op::CompositeExtract(scalarType, src0, builder.makeConstant(0u)));
+  auto src0y = builder.add(ir::Op::CompositeExtract(scalarType, src0, builder.makeConstant(1u)));
+  auto src0z = builder.add(ir::Op::CompositeExtract(scalarType, src0, builder.makeConstant(2u)));
+  auto src1x = builder.add(ir::Op::CompositeExtract(scalarType, src1, builder.makeConstant(0u)));
+  auto src1y = builder.add(ir::Op::CompositeExtract(scalarType, src1, builder.makeConstant(1u)));
+  auto src1z = builder.add(ir::Op::CompositeExtract(scalarType, src1, builder.makeConstant(2u)));
+
+  util::small_vector<ir::SsaDef, 4u> components;
+  if (writeMask & ComponentBit::eX) {
+    auto a = builder.add(emitFMul(scalarType, src0y, src1z));
+    auto b = builder.add(emitFMul(scalarType, src0z, src1y));
+    components.push_back(builder.add(ir::Op::FSub(scalarType, a, b)));
+  }
+  if (writeMask & ComponentBit::eY) {
+    auto a = builder.add(emitFMul(scalarType, src0z, src1x));
+    auto b = builder.add(emitFMul(scalarType, src0x, src1z));
+    components.push_back(builder.add(ir::Op::FSub(scalarType, a, b)));
+  }
+  if (writeMask & ComponentBit::eZ) {
+    auto a = builder.add(emitFMul(scalarType, src0x, src1y));
+    auto b = builder.add(emitFMul(scalarType, src0y, src1x));
+    components.push_back(builder.add(ir::Op::FSub(scalarType, a, b)));
+  }
+  auto res = composite(builder, makeVectorType(scalarType, writeMask), components.data(), Swizzle::identity(), writeMask);
+  return storeDstModifiedPredicated(builder, op, dst, res);
+}
+
+
+bool Converter::handleSetP(ir::Builder& builder, const Instruction& op) {
+  /* Assigns the result of a comparison to the predicate register */
+  dxbc_spv_assert(op.hasDst());
+  dxbc_spv_assert(op.getSrcCount() == 2u);
+  auto dst = op.getDst();
+  WriteMask writeMask = dst.getWriteMask(m_parser.getShaderInfo());
+  auto scalarType = dst.isPartialPrecision() ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32;
+
+  auto src0 = loadSrcModified(builder, op, op.getSrc(0u), writeMask, scalarType);
+  auto src1 = loadSrcModified(builder, op, op.getSrc(1u), writeMask, scalarType);
+
+  util::small_vector<ir::SsaDef, 4u> components;
+  for (auto _ : writeMask) {
+    /* The comparison is done for each component separately. */
+    ir::SsaDef src0c = ir::extractFromVector(builder, src0, uint32_t(components.size()));
+    ir::SsaDef src1c = ir::extractFromVector(builder, src1, uint32_t(components.size()));
+
+    auto comparison = emitComparison(builder, src0c, src1c, op.getComparisonMode());
+    components.push_back(comparison);
+  }
+
+  auto result = composite(builder, makeVectorType(ir::ScalarType::eBool, writeMask), components.data(), Swizzle::identity(), writeMask);
+  return storeDstModifiedPredicated(builder, op, dst, result);
+}
+
+
+bool Converter::handleIf(ir::Builder& builder, const Instruction& op) {
+  ir::SsaDef cond;
+
+  if (op.getOpCode() == OpCode::eIf) {
+    cond = loadSrc(builder, op, op.getSrc(0u), ComponentBit::eX, op.getSrc(0u).getSwizzle(getShaderInfo()), ir::ScalarType::eBool);
+    if (op.getSrc(0u).getModifier() == OperandModifier::eNot) {
+      cond = builder.add(ir::Op::BNot(ir::ScalarType::eBool, cond));
+    } else if (op.getSrc(0u).getModifier() != OperandModifier::eNone) {
+      return logOpError(op, "Unknown if condition modifier: ", uint32_t(op.getSrc(0u).getModifier()));
+    }
+  } else if (op.getOpCode() == OpCode::eIfC) {
+    ir::SsaDef src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, ir::ScalarType::eF32);
+    ir::SsaDef src1 = loadSrcModified(builder, op, op.getSrc(1u), ComponentBit::eX, ir::ScalarType::eF32);
+    cond = emitComparison(builder, src0, src1, op.getComparisonMode());
+  } else {
+    Logger::err("OpCode ", op.getOpCode(), " is not supported by handleControlFlowIf");
+    dxbc_spv_unreachable();
+    return false;
+  }
+
+  auto ifDef = builder.add(ir::Op::ScopedIf(ir::SsaDef(), cond));
+  m_controlFlow.push(ifDef);
+  return true;
+}
+
+
+bool Converter::handleElse(ir::Builder& builder, const Instruction& op) {
+  auto [construct, type] = m_controlFlow.getConstruct(builder);
+
+  if (type != ir::OpCode::eScopedIf)
+    return logOpError(op, "'Else' occurred outside of 'If'.");
+
+  builder.add(ir::Op::ScopedElse(construct->def));
+  return true;
+}
+
+
+bool Converter::handleEndIf(ir::Builder& builder, const Instruction& op) {
+  auto [construct, type] = m_controlFlow.getConstruct(builder);
+
+  if (type != ir::OpCode::eScopedIf)
+    return logOpError(op, "'EndIf' occurred outside of 'If'.");
+
+  auto constructEnd = builder.add(ir::Op::ScopedEndIf(construct->def));
+  builder.rewriteOp(construct->def, ir::Op(builder.getOp(construct->def)).setOperand(0u, constructEnd));
+
+  m_controlFlow.pop();
+  return true;
+}
+
+
+bool Converter::handleBreak(ir::Builder& builder, const Instruction& op) {
+  auto construct = m_controlFlow.getBreakConstruct(builder);
+
+  if (construct == nullptr)
+    return logOpError(op, "'Break' occurred outside of 'Loop' or 'Rep'.");
+
+  if (op.getOpCode() == OpCode::eBreak) {
+    /* Break unconditionally */
+    builder.add(ir::Op::ScopedLoopBreak(construct->def));
+    return true;
+  } else if (op.getOpCode() == OpCode::eBreakP) {
+    /* Break if the predicate is true */
+    /* It **must** have a replicate swizzle, so just load X. */
+    auto cond = m_regFile.emitPredicateLoad(builder, op.getDst().getPredicateSwizzle(), ComponentBit::eX);
+    auto breakIf = builder.add(ir::Op::ScopedIf(ir::SsaDef(), cond));
+    builder.add(ir::Op::ScopedLoopBreak(construct->def));
+    auto breakEndIf = builder.add(ir::Op::ScopedEndIf(breakIf));
+    builder.rewriteOp(breakIf, ir::Op(builder.getOp(breakIf)).setOperand(0u, breakEndIf));
+    return true;
+  } else if (op.getOpCode() == OpCode::eBreakC) {
+    /* Break based on the comparison */
+    auto src0 = loadSrcModified(builder, op, op.getSrc(0u), ComponentBit::eX, ir::ScalarType::eF32);
+    auto src1 = loadSrcModified(builder, op, op.getSrc(1u), ComponentBit::eX, ir::ScalarType::eF32);
+    auto cond = emitComparison(builder, src0, src1, op.getComparisonMode());
+    auto breakIf = builder.add(ir::Op::ScopedIf(ir::SsaDef(), cond));
+    builder.add(ir::Op::ScopedLoopBreak(construct->def));
+    auto breakEndIf = builder.add(ir::Op::ScopedEndIf(breakIf));
+    builder.rewriteOp(breakIf, ir::Op(builder.getOp(breakIf)).setOperand(0u, breakEndIf));
+    return true;
+  } else {
+    dxbc_spv_unreachable();
+    Logger::err("handleBreak can't handle opcode '", op.getOpCode(), "'");
+    return false;
+  }
+}
+
+
+bool Converter::handleLoop(ir::Builder& builder, const Instruction& op) {
+  /* For-Loop with a loop counter that can be used for relative addressing */
+  dxbc_spv_assert(op.getSrcCount() >= 1u);
+
+  /* Assume that modifiers aren't supported here. We only implement them for floats right now. */
+  dxbc_spv_assert(op.getSrc(0u).getModifier() == OperandModifier::eNone);
+
+  auto src0 = loadSrc(builder, op, op.getSrc(0u),
+    ComponentBit::eX | ComponentBit::eY | ComponentBit::eZ,
+    op.getSrc(0u).getSwizzle(getShaderInfo()), ir::ScalarType::eI32);
+
+  /* Load loop parameters. Iteration count is treated as unsigned on native. */
+  auto iterationCount = ir::extractFromVector(builder, src0, 0u);
+  iterationCount = builder.add(ir::Op::ConsumeAs(ir::ScalarType::eU32, iterationCount));
+
+  auto initialValue = ir::extractFromVector(builder, src0, 1u);
+  auto stepSize = ir::extractFromVector(builder, src0, 2u);
+
+  /* Set up loop counter */
+  auto loopCounter = builder.add(ir::Op::DclTmp(ir::ScalarType::eI32, m_entryPoint.def));
+  builder.add(ir::Op::TmpStore(loopCounter, initialValue));
+
+  /* We can't actually use the loop counter as an exit condition because the
+   * step size may be 0. Set up a temporary variable for the actual iteration
+   * count instead and decrement it until it reaches zero. */
+  auto iterCounter = builder.add(ir::Op::DclTmp(ir::ScalarType::eU32, m_entryPoint.def));
+  builder.add(ir::Op::TmpStore(iterCounter, iterationCount));
+
+  /* Begin loop */
+  auto loopDef = builder.add(ir::Op::ScopedLoop(ir::SsaDef()));
+  auto& loop = m_controlFlow.push(loopDef);
+
+  /* Loop step: Exit condition first */
+  auto iterIndex = builder.add(ir::Op::TmpLoad(ir::ScalarType::eU32, iterCounter));
+
+  auto breakCondition = builder.add(ir::Op::IEq(ir::ScalarType::eBool, iterIndex, builder.makeConstant(0u)));
+  auto breakIf = builder.add(ir::Op::ScopedIf(ir::SsaDef(), breakCondition));
+  builder.add(ir::Op::ScopedLoopBreak(loopDef));
+  auto breakEndIf = builder.add(ir::Op::ScopedEndIf(breakIf));
+  builder.rewriteOp(breakIf, ir::Op(builder.getOp(breakIf)).setOperand(0u, breakEndIf));
+
+  /* Decrement iteration counter by 1. This is not visible to the shader,
+   * so we don't need to wait until the end of the loop. */
+  iterIndex = builder.add(ir::Op::ISub(ir::ScalarType::eU32, iterIndex, builder.makeConstant(1u)));
+  builder.add(ir::Op::TmpStore(iterCounter, iterIndex));
+
+  loop.loopStep = stepSize;
+  loop.loopCounter = loopCounter;
+  loop.exposeCounter = true;
+  return true;
+}
+
+
+bool Converter::handleEndLoop(ir::Builder &builder, const Instruction &op) {
+  auto [construct, type] = m_controlFlow.getConstruct(builder);
+
+  if (type != ir::OpCode::eScopedLoop)
+    return logOpError(op, "'EndLoop' occurred outside of 'Loop' or 'Loop' is straddling 'If'.");
+
+  auto loopCounterVal = builder.add(ir::Op::TmpLoad(ir::ScalarType::eI32, construct->loopCounter));
+  loopCounterVal = builder.add(ir::Op::IAdd(ir::ScalarType::eI32, loopCounterVal, construct->loopStep));
+  builder.add(ir::Op::TmpStore(construct->loopCounter, loopCounterVal));
+
+  auto constructEnd = builder.add(ir::Op::ScopedEndLoop(construct->def));
+  builder.rewriteOp(construct->def, ir::Op(builder.getOp(construct->def)).setOperand(0u, constructEnd));
+
+  m_controlFlow.pop();
+  return true;
+}
+
+
+bool Converter::handleRep(ir::Builder& builder, const Instruction& op) {
+  /* Loop that does n repetitions (src0) and doesn't expose the current counter to the application. */
+  dxbc_spv_assert(op.getSrcCount() >= 1u);
+
+  /* Assume that modifiers aren't supported here. We only implement them for floats right now. */
+  dxbc_spv_assert(op.getSrc(0u).getModifier() == OperandModifier::eNone);
+
+  auto iterationCount = loadSrc(builder, op, op.getSrc(0u),
+    ComponentBit::eX, op.getSrc(0u).getSwizzle(getShaderInfo()),
+    ir::ScalarType::eU32);
+
+  /* Set up iteration counter */
+  auto iterCounter = builder.add(ir::Op::DclTmp(ir::ScalarType::eU32, m_entryPoint.def));
+  builder.add(ir::Op::TmpStore(iterCounter, iterationCount));
+
+  auto loopDef = builder.add(ir::Op::ScopedLoop(ir::SsaDef()));
+  auto& loop = m_controlFlow.push(loopDef);
+
+  /* Exit condition */
+  auto iterIndex = builder.add(ir::Op::TmpLoad(ir::ScalarType::eU32, iterCounter));
+
+  auto breakCondition = builder.add(ir::Op::IEq(ir::ScalarType::eBool, iterIndex, builder.makeConstant(0u)));
+  auto breakIf = builder.add(ir::Op::ScopedIf(ir::SsaDef(), breakCondition));
+  builder.add(ir::Op::ScopedLoopBreak(loopDef));
+  auto breakEndIf = builder.add(ir::Op::ScopedEndIf(breakIf));
+  builder.rewriteOp(breakIf, ir::Op(builder.getOp(breakIf)).setOperand(0u, breakEndIf));
+
+  /* Decrement iteration counter right away, no need to
+   * wait since it's not shader-visible. */
+  iterIndex = builder.add(ir::Op::ISub(ir::ScalarType::eU32, iterIndex, builder.makeConstant(1u)));
+  builder.add(ir::Op::TmpStore(iterCounter, iterIndex));
+
+  loop.loopStep = ir::SsaDef();
+  loop.loopCounter = ir::SsaDef();
+  return true;
+}
+
+
+bool Converter::handleEndRep(ir::Builder &builder, const Instruction &op) {
+  auto [construct, type] = m_controlFlow.getConstruct(builder);
+
+  if (type != ir::OpCode::eScopedLoop)
+    return logOpError(op, "'EndRep' occurred outside of 'Rep' or 'Rep' is straddling 'If'.");
+
+  auto constructEnd = builder.add(ir::Op::ScopedEndLoop(construct->def));
+  builder.rewriteOp(construct->def, ir::Op(builder.getOp(construct->def)).setOperand(0u, constructEnd));
+
+  m_controlFlow.pop();
+  return true;
+}
+
+
+bool Converter::handleLabel(ir::Builder& builder, const Instruction& op) {
+  if (!op.hasDst() || op.getDst().getRegisterType() != RegisterType::eLabel)
+    return logOpError(op, "'Label' operand missing or not a label");
+
+  builder.setCursor(m_regFile.getOrDeclareLabel(builder, op.getDst()));
+  return true;
+}
+
+
+bool Converter::handleCall(ir::Builder& builder, const Instruction& op) {
+  const auto& target = op.getSrc(0u);
+
+  if (!target || target.getRegisterType() != RegisterType::eLabel)
+    return logOpError(op, "'Call' label missing or not a label");
+
+  auto fn = m_regFile.getOrDeclareLabel(builder, target);
+  auto ifCall = ir::SsaDef();
+
+  if (op.getOpCode() == OpCode::eCallNz) {
+    auto condReg = op.getSrc(1u);
+    auto cond = loadSrc(builder, op, condReg, ComponentBit::eX, condReg.getSwizzle(getShaderInfo()), ir::ScalarType::eBool);
+
+    if (condReg.getModifier() == OperandModifier::eNot)
+      cond = builder.add(ir::Op::BNot(ir::ScalarType::eBool, cond));
+    else if (condReg.getModifier() != OperandModifier::eNone)
+      return logOpError(op, "Unknown callnz condition modifier: ", uint32_t(condReg.getModifier()));
+
+    ifCall = builder.add(ir::Op::ScopedIf(ir::SsaDef(), cond));
+  }
+
+  builder.add(ir::Op::FunctionCall(ir::ScalarType::eVoid, fn));
+
+  if (ifCall) {
+    builder.rewriteOp(ifCall, ir::Op(builder.getOp(ifCall)).setOperand(0u,
+      builder.add(ir::Op::ScopedEndIf(ifCall))));
+  }
+
+  return true;
+}
+
+
+bool Converter::handleRet(ir::Builder& builder) {
+  // Need to wrap the main function so that we have a valid
+  // place to put all the output stores and processing.
+  m_entryPoint.needsWrapper = true;
+
+  builder.add(ir::Op::Return());
+  return true;
+}
+
+
+ir::SsaDef Converter::applySrcModifiers(ir::Builder& builder, ir::SsaDef def, const Instruction& instruction, const Operand& operand, WriteMask mask) {
+  auto modifiedDef = def;
+
+  const auto& op = builder.getOp(def);
+  auto type = op.getType().getBaseType(0u);
+  bool isUnknown = type.isUnknownType();
+  bool partialPrecision = instruction.hasDst() && instruction.getDst().isPartialPrecision();
+
+  if (!type.isFloatType()) {
+    type = ir::BasicType(partialPrecision ? ir::ScalarType::eMinF16 : ir::ScalarType::eF32, type.getVectorSize());
+    modifiedDef = builder.add(ir::Op::ConsumeAs(type, modifiedDef));
+  }
+
+  auto mod = operand.getModifier();
+
+  switch (mod) {
+    case OperandModifier::eAbs: /* abs(r) */
+    case OperandModifier::eAbsNeg: /* -abs(r) */
+      modifiedDef = builder.add(ir::Op::FAbs(type, modifiedDef));
+
+      if (mod == OperandModifier::eAbsNeg)
+        modifiedDef = builder.add(ir::Op::FNeg(type, modifiedDef));
+      break;
+
+    case OperandModifier::eBias: { /* r - 0.5 */
+      auto halfConst = ir::makeTypedConstant(builder, type, 0.5f);
+      modifiedDef = builder.add(ir::Op::FSub(type, modifiedDef, halfConst));
+    } break;
+
+    case OperandModifier::eBiasNeg: { /* 0.5 - r */
+      auto halfConst = ir::makeTypedConstant(builder, type, 0.5f);
+      modifiedDef = builder.add(ir::Op::FSub(type, halfConst, modifiedDef));
+    } break;
+
+    case OperandModifier::eSign: { /* fma(r, 2.0, -1.0) */
+      auto twoConst = ir::makeTypedConstant(builder, type, 2.0f);
+      auto minusOneConst = ir::makeTypedConstant(builder, type, -1.0f);
+      modifiedDef = builder.add(ir::Op::FMad(type, modifiedDef, twoConst, minusOneConst));
+    } break;
+
+    case OperandModifier::eSignNeg: { /* fma(r, -2.0, 1.0) */
+      auto minusTwoConst = ir::makeTypedConstant(builder, type, -2.0f);
+      auto oneConst = ir::makeTypedConstant(builder, type, 1.0f);
+      modifiedDef = builder.add(ir::Op::FMad(type, modifiedDef, minusTwoConst, oneConst));
+    } break;
+
+    case OperandModifier::eComp: { /* 1.0 - r */
+      ir::SsaDef oneConst = ir::makeTypedConstant(builder, type, 1.0f);
+      modifiedDef = builder.add(ir::Op::FSub(type, oneConst, modifiedDef));
+    } break;
+
+    case OperandModifier::eX2: { /* r * 2.0 */
+      ir::SsaDef twoConst = ir::makeTypedConstant(builder, type, 2.0f);
+      modifiedDef = builder.add(ir::Op::FMul(type, modifiedDef, twoConst));
+    } break;
+
+    case OperandModifier::eX2Neg: { /* r * -2.0 */
+      ir::SsaDef minusTwoConst = ir::makeTypedConstant(builder, type, -2.0f);
+      modifiedDef = builder.add(ir::Op::FMul(type, modifiedDef, minusTwoConst));
+    } break;
+
+    case OperandModifier::eDz:
+    case OperandModifier::eDw: {
+      /* r.xy / r.z OR r.xy / r.w
+       * Z & W are undefined afterward according to the docs so we implement it as r.xyzw / r.z (or r.w).
+       * The Dz and Dw modifiers divide by either the Z or the W component.
+       * They can only be applied to SM1.4 TexLd & TexCrd instructions.
+       * Both of those only accept a texture coord register as argument and that is always
+       * a float vec4. */
+      uint32_t fullVec4ComponentIndex = mod == OperandModifier::eDz ? 2u : 3u;
+      uint32_t componentIndex = 0u;
+
+      for (auto c : mask) {
+        if (util::componentFromBit(c) == Component(fullVec4ComponentIndex))
+          break;
+
+        componentIndex++;
+      }
+
+      auto indexConst = builder.makeConstant(componentIndex);
+      auto zComp = builder.add(ir::Op::CompositeExtract(type.getBaseType(), modifiedDef, indexConst));
+      auto zCompVec = ir::broadcastScalar(builder, zComp, mask);
+      modifiedDef = builder.add(ir::Op::FDiv(type, modifiedDef, zCompVec));
+    } break;
+
+    case OperandModifier::eNeg: /* -r */
+      modifiedDef = builder.add(ir::Op::FNeg(type, modifiedDef));
+    break;
+
+    case OperandModifier::eNone:
+      break;
+
+    default:
+      Logger::log(LogLevel::eError, "Unknown source register modifier: ", uint32_t(mod));
+      break;
+  }
+
+  if (isUnknown) {
+    type = ir::BasicType(ir::ScalarType::eUnknown, type.getVectorSize());
+    modifiedDef = builder.add(ir::Op::ConsumeAs(type, modifiedDef));
+  }
+
+  return modifiedDef;
+}
+
+
+ir::SsaDef Converter::loadSrcModified(ir::Builder& builder, const Instruction& op, const Operand& operand, WriteMask mask, ir::ScalarType type) {
+  Swizzle swizzle = operand.getSwizzle(getShaderInfo());
+  Swizzle originalSwizzle = swizzle;
+  WriteMask originalMask = mask;
+  /* If the modifier divides by one of the components, that component needs to be loaded. */
+
+  /* Dz & Dw need to get applied before the swizzle!
+   * So if those are used, we load the whole vector and swizzle afterward. */
+  bool hasPreSwizzleModifier = operand.getModifier() == OperandModifier::eDz || operand.getModifier() == OperandModifier::eDw;
+  if (hasPreSwizzleModifier) {
+    mask = WriteMask(ComponentBit::eAll);
+    swizzle = Swizzle::identity();
+  }
+
+  auto value = loadSrc(builder, op, operand, mask, swizzle, type);
+  auto modified = applySrcModifiers(builder, value, op, operand, mask);
+
+  if (hasPreSwizzleModifier) {
+    modified = swizzleVector(builder, modified, originalSwizzle, originalMask);
+  }
+
+  return modified;
+}
+
+
+bool Converter::storeDst(ir::Builder& builder, const Instruction& op, const Operand& operand, ir::SsaDef predicateVec, ir::SsaDef value) {
+  WriteMask writeMask = operand.getWriteMask(getShaderInfo());
+
+  switch (operand.getRegisterType()) {
+    case RegisterType::ePredicate:
+      dxbc_spv_assert(op.getOpCode() == OpCode::eSetP);
+      return m_regFile.emitStore(builder, operand, writeMask, predicateVec, value);
+
+    case RegisterType::eTemp:
+    case RegisterType::eAddr:
+      return m_regFile.emitStore(builder, operand, writeMask, predicateVec, value);
+
+    case RegisterType::eOutput:
+    case RegisterType::eRasterizerOut:
+    case RegisterType::eAttributeOut:
+    case RegisterType::eColorOut:
+    case RegisterType::eDepthOut:
+      return m_ioMap.emitStore(builder, op, operand, writeMask, predicateVec, value);
+
+    default: {
+      auto name = makeRegisterDebugName(operand.getRegisterType(), 0u, writeMask);
+      logOpError(op, "Unhandled destination operand: ", name);
+    } return false;
+  }
+}
+
+
+ir::SsaDef Converter::applyDstModifiers(ir::Builder& builder, ir::SsaDef def, const Operand& operand) {
+  ir::Op op = builder.getOp(def);
+  auto type = op.getType().getBaseType(0u);
+  int8_t shift = operand.getShift();
+
+  /* Handle unknown type */
+  if (type.isUnknownType() && (shift != 0 || operand.isSaturated())) {
+    type = ir::BasicType(ir::ScalarType::eF32, type.getVectorSize());
+    def = builder.add(ir::Op::ConsumeAs(type, def));
+  }
+
+  /* Apply shift */
+  if (shift != 0) {
+    dxbc_spv_assert(type.isFloatType());
+
+    float shiftAmount = shift < 0
+            ? 1.0f / (1 << -shift)
+            : float(1 << shift);
+
+    def = builder.add(ir::Op::FMul(type, def, makeTypedConstant(builder, type, shiftAmount)));
+  }
+
+  /* Saturate dst */
+  if (operand.isSaturated()) {
+    dxbc_spv_assert(type.isFloatType());
+
+    def = builder.add(ir::Op::FClamp(type, def,
+      makeTypedConstant(builder, type, 0.0f),
+      makeTypedConstant(builder, type, 1.0f)));
+  }
+
+  return def;
+}
+
+
+bool Converter::storeDstModifiedPredicated(ir::Builder& builder, const Instruction& op, const Operand& operand, ir::SsaDef value) {
+  value = applyDstModifiers(builder, value, operand);
+
+  ir::SsaDef predicate = ir::SsaDef();
+  if (operand.isPredicated()) {
+    /* Make sure we're not trying to load more predicate components than we can write. */
+    WriteMask writeMask = operand.getWriteMask(getShaderInfo());
+
+    /* Load predicate */
+    predicate = m_regFile.emitPredicateLoad(builder, operand.getPredicateSwizzle(), writeMask);
+
+    /* Apply predicate modifier */
+    if (operand.getPredicateModifier() == OperandModifier::eNot) {
+      ir::BasicType predicateType = builder.getOp(predicate).getType().getBaseType(0u);
+      predicate = builder.add(ir::Op::BNot(predicateType, predicate));
+    } else if (operand.getPredicateModifier() != OperandModifier::eNone) {
+      Logger::log(LogLevel::eError, "Unknown predicate modifier: ", uint32_t(operand.getPredicateModifier()));
+      return false;
+    }
+  }
+
+  return storeDst(builder, op, operand, predicate, value);
+}
+
+ir::SsaDef Converter::emitAlphaTestInput(ir::Builder& builder) {
+  auto input = builder.add(ir::Op::DclInputBuiltIn(
+    ir::makeLegacyAlphaTestType(), m_entryPoint.def,
+    ir::BuiltIn::eLegacyAlphaTest, ir::InterpolationMode::eFlat));
+
+  if (m_options.includeDebugNames) {
+    static const std::array<std::pair<ir::LegacyAlphaTestLayout, const char*>, 3u> s_names = {{
+      { ir::LegacyAlphaTestLayout::eAlphaCompareOp, "compareOp" },
+      { ir::LegacyAlphaTestLayout::eAlphaPrecision, "precisionBits" },
+      { ir::LegacyAlphaTestLayout::eAlphaRef,       "alphaRef" },
+    }};
+
+    builder.add(ir::Op::DebugName(input, "alphaTest"));
+
+    for (const auto& e : s_names)
+      builder.add(ir::Op::DebugMemberName(input, uint32_t(e.first), e.second));
+  }
+
+  return input;
+}
+
+
+void Converter::emitAlphaTest(ir::Builder& builder) {
+  auto alphaParam = builder.add(ir::Op::DclParam(ir::ScalarType::eF32));
+
+  /* Function returns true if alpha test passes */
+  m_alphaTestFunction = builder.add(ir::Op::Function(ir::ScalarType::eBool)
+    .addOperand(alphaParam));
+
+  if (m_options.includeDebugNames) {
+    builder.add(ir::Op::DebugName(alphaParam, "alpha"));
+    builder.add(ir::Op::DebugName(m_alphaTestFunction, "alphaTest"));
+  }
+
+  /* Declare alpha test inputs */
+  auto alphaTestInput = emitAlphaTestInput(builder);
+
+  /* The lower 8 bits of the alpha ref contain the actual reference value
+   * from the API, the upper bits store the accuracy bit count minus 8.
+   * So if we want 12 bits of accuracy (i.e. 0-4095), that value will be 4. */
+  auto alpha = builder.add(ir::Op::ParamLoad(ir::ScalarType::eF32, m_alphaTestFunction, alphaParam));
+
+  auto alphaComparisonMode = builder.add(ir::Op::InputLoad(ir::ScalarType::eU32, alphaTestInput,
+    builder.makeConstant(uint32_t(ir::LegacyAlphaTestLayout::eAlphaCompareOp))));
+
+  auto needsCompare = builder.add(ir::Op::ULt(ir::ScalarType::eBool, alphaComparisonMode,
+    builder.makeConstant(uint32_t(AlphaTestComparisonMode::eAlways))));
+
+  /* if (alphaComparisonMode < ALWAYS) { */
+  auto ifCompare = builder.add(ir::Op::ScopedIf(ir::SsaDef(), needsCompare));
+
+  auto alphaPrecision = builder.add(ir::Op::InputLoad(ir::ScalarType::eU32, alphaTestInput,
+    builder.makeConstant(uint32_t(ir::LegacyAlphaTestLayout::eAlphaPrecision))));
+
+  auto alphaRef = builder.add(ir::Op::InputLoad(ir::ScalarType::eU32, alphaTestInput,
+    builder.makeConstant(uint32_t(ir::LegacyAlphaTestLayout::eAlphaRef))));
+
+  /* Int Precision */
+  /* Adjust alpha ref to the given range */
+  auto alphaRefInt = builder.add(ir::Op::IOr(ir::ScalarType::eU32,
+    builder.add(ir::Op::IShl(ir::ScalarType::eU32, alphaRef, alphaPrecision)),
+    builder.add(ir::Op::UShr(ir::ScalarType::eU32, alphaRef, builder.add(ir::Op::ISub(ir::ScalarType::eU32, builder.makeConstant(8u), alphaPrecision))))));
+
+  /* Convert alpha ref to float since we'll do the comparison based on that */
+  alphaRefInt = builder.add(ir::Op::ConvertItoF(ir::ScalarType::eF32, alphaRefInt));
+
+  /* Adjust alpha to the given range and round */
+  auto alphaFactor = builder.add(ir::Op::ISub(ir::ScalarType::eU32,
+    builder.add(ir::Op::IShl(ir::ScalarType::eU32, builder.makeConstant(256u), alphaPrecision)),
+    builder.makeConstant(1u)));
+  alphaFactor = builder.add(ir::Op::ConvertItoF(ir::ScalarType::eF32, alphaFactor));
+
+  auto alphaInt = builder.add(ir::Op::FRound(ir::ScalarType::eF32,
+    builder.add(ir::Op::FMul(ir::ScalarType::eF32, alpha, alphaFactor)), ir::RoundMode::eNearestEven));
+
+  /* Float Precision */
+  auto alphaRefFloat = builder.add(ir::Op::FDiv(ir::ScalarType::eF32,
+  builder.add(ir::Op::ConvertItoF(ir::ScalarType::eF32, alphaRef)),
+  builder.makeConstant(255.0f)));
+
+  /* Pick the precision */
+  auto useIntPrecision = builder.add(ir::Op::ULe(ir::ScalarType::eBool, alphaPrecision, builder.makeConstant(8u)));
+  alpha = builder.add(ir::Op::Select(ir::ScalarType::eF32, useIntPrecision, alphaInt, alpha));
+  alphaRef = builder.add(ir::Op::Select(ir::ScalarType::eF32, useIntPrecision, alphaRefInt, alphaRefFloat));
+
+  /* Perform comparison and return result */
+  auto switchDef = builder.add(ir::Op::ScopedSwitch(ir::SsaDef(), alphaComparisonMode));
+
+  static const std::array<std::pair<AlphaTestComparisonMode, ir::OpCode>, 6u> s_ops = {{
+    { AlphaTestComparisonMode::eLess,           ir::OpCode::eFLt },
+    { AlphaTestComparisonMode::eEqual,          ir::OpCode::eFEq },
+    { AlphaTestComparisonMode::eLessOrEqual,    ir::OpCode::eFLe },
+    { AlphaTestComparisonMode::eGreater,        ir::OpCode::eFGt },
+    { AlphaTestComparisonMode::eNotEqual,       ir::OpCode::eFNe },
+    { AlphaTestComparisonMode::eGreaterOrEqual, ir::OpCode::eFGe },
+  }};
+
+  for (const auto& op : s_ops) {
+    builder.add(ir::Op::ScopedSwitchCase(switchDef, uint32_t(op.first)));
+    builder.add(ir::Op::Return(ir::ScalarType::eBool, builder.add(
+      ir::Op(op.second, ir::ScalarType::eBool).addOperands(alpha, alphaRef))));
+  }
+
+  /* AlphaTestComparisonMode::eNever. We already handled eAlways. */
+  builder.add(ir::Op::ScopedSwitchDefault(switchDef));
+  builder.add(ir::Op::Return(ir::ScalarType::eBool, builder.makeConstant(false)));
+
+  auto switchEnd = builder.add(ir::Op::ScopedEndSwitch(switchDef));
+  builder.rewriteOp(switchDef, ir::Op(builder.getOp(switchDef)).setOperand(0u, switchEnd));
+
+  /* } */
+  auto ifCompareEnd = builder.add(ir::Op::ScopedEndIf(ifCompare));
+  builder.rewriteOp(ifCompare, ir::Op(builder.getOp(ifCompare)).setOperand(0u, ifCompareEnd));
+  builder.add(ir::Op::Return(ir::ScalarType::eBool, builder.makeConstant(true)));
+  builder.add(ir::Op::FunctionEnd());
+}
+
+
+ir::SsaDef Converter::emitFogInput(ir::Builder& builder) {
+  auto input = builder.add(ir::Op::DclInputBuiltIn(
+    ir::makeLegacyFogType(), m_entryPoint.def,
+    ir::BuiltIn::eLegacyFog, ir::InterpolationMode::eFlat));
+
+  if (m_options.includeDebugNames) {
+    static const std::array<std::pair<ir::LegacyFogLayout, const char*>, 7u> s_names = {{
+      { ir::LegacyFogLayout::eFogEnable,  "enable"      },
+      { ir::LegacyFogLayout::eFogUseZ,    "useZ"        },
+      { ir::LegacyFogLayout::eFogMode,    "mode"        },
+      { ir::LegacyFogLayout::eFogColor,   "color"       },
+      { ir::LegacyFogLayout::eFogScale,   "distScale"   },
+      { ir::LegacyFogLayout::eFogEnd,     "distEnd"     },
+      { ir::LegacyFogLayout::eFogDensity, "density"     },
+    }};
+
+    builder.add(ir::Op::DebugName(input, "fog"));
+
+    for (const auto& e : s_names)
+      builder.add(ir::Op::DebugMemberName(input, uint32_t(e.first), e.second));
+  }
+
+  return input;
+}
+
+
+void Converter::emitFog(ir::Builder& builder) {
+  dxbc_spv_assert(getShaderInfo().getType() == ShaderType::ePixel);
+
+  auto vec3Type = ir::BasicType(ir::ScalarType::eF32, 3u);
+
+  auto colorParam = builder.add(ir::Op::DclParam(vec3Type));
+  auto functionOp = ir::Op::Function(vec3Type).addOperand(colorParam);
+
+  m_fogFunction = builder.add(functionOp);
+
+  if (m_options.includeDebugNames) {
+    builder.add(ir::Op::DebugName(m_fogFunction, "calculateFog"));
+    builder.add(ir::Op::DebugName(colorParam, "oColor"));
+  }
+
+  auto position = m_ioMap.getPositionValue(builder);
+  auto color = builder.add(ir::Op::ParamLoad(ir::BasicType(ir::ScalarType::eF32, 3u), m_fogFunction, colorParam));
+
+  /* Read fog parameters */
+  auto fogUseZ = builder.add(ir::Op::InputLoad(ir::ScalarType::eBool,
+    m_fogInput, builder.makeConstant(uint32_t(ir::LegacyFogLayout::eFogUseZ))));
+
+  auto fogMode = builder.add(ir::Op::InputLoad(ir::ScalarType::eU32,
+    m_fogInput, builder.makeConstant(uint32_t(ir::LegacyFogLayout::eFogMode))));
+
+  auto fogColor = builder.add(ir::Op::InputLoad(ir::BasicType(ir::ScalarType::eF32, 3u),
+    m_fogInput, builder.makeConstant(uint32_t(ir::LegacyFogLayout::eFogColor))));
+
+  auto fogScale = builder.add(ir::Op::InputLoad(ir::ScalarType::eF32,
+    m_fogInput, builder.makeConstant(uint32_t(ir::LegacyFogLayout::eFogScale))));
+
+  auto fogEnd = builder.add(ir::Op::InputLoad(ir::ScalarType::eF32,
+    m_fogInput, builder.makeConstant(uint32_t(ir::LegacyFogLayout::eFogEnd))));
+
+  auto fogDensity = builder.add(ir::Op::InputLoad(ir::ScalarType::eF32,
+    m_fogInput, builder.makeConstant(uint32_t(ir::LegacyFogLayout::eFogDensity))));
+
+  /* Actually calculate the fog factor now we have all the vars in-place. */
+  auto z = builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, position, builder.makeConstant(2u)));
+  auto w = builder.add(ir::Op::CompositeExtract(ir::ScalarType::eF32, position, builder.makeConstant(3u)));
+  w = builder.add(ir::Op::FRcp(ir::ScalarType::eF32, w));
+
+  /* W fog is not influenced by Z at all, Z fog is not in world space */
+  auto depth = builder.add(ir::Op::Select(ir::ScalarType::eF32, fogUseZ, z, w));
+
+  /* There are a few different fog formulas for the user to choose. */
+  auto fogFactorTmp = builder.add(ir::Op::DclTmp(ir::ScalarType::eF32, getEntryPoint()));
+  auto fogModeSwitch = builder.add(ir::Op::ScopedSwitch(ir::SsaDef(), fogMode));
+
+  for (uint32_t i = 0u; i <= uint32_t(FogMode::eLinear); i++) {
+    ir::SsaDef fogFactor;
+    auto mode = FogMode(i);
+
+    if (mode == FogMode::eNone)
+      builder.add(ir::Op::ScopedSwitchDefault(fogModeSwitch));
+    else
+      builder.add(ir::Op::ScopedSwitchCase(fogModeSwitch, i));
+
+    switch (mode) {
+      default:
+      /* vFog */
+      case FogMode::eNone: {
+        fogFactor = m_ioMap.getFogValue(builder);
+      } break;
+
+      /* (end - d) / (end - start) */
+      case FogMode::eLinear: {
+        fogFactor = builder.add(ir::Op::FSub(ir::ScalarType::eF32, fogEnd, depth));
+        fogFactor = builder.add(ir::Op::FMulLegacy(ir::ScalarType::eF32, fogFactor, fogScale));
+      } break;
+
+      /* 1 / (e^(d * density)) */
+      case FogMode::eExp:
+      /* 1 / (e^((d * density)^2)) */
+      case FogMode::eExp2: {
+        fogFactor = builder.add(ir::Op::FMulLegacy(ir::ScalarType::eF32, depth, fogDensity));
+
+        if (mode == FogMode::eExp2)
+          fogFactor = builder.add(ir::Op::FMulLegacy(ir::ScalarType::eF32, fogFactor, fogFactor));
+
+        /* Provides the rcp. */
+        /* 1 / (e^x) = 1 / (2^((1 / ln(2)) * x)) = 2^(-1.442695041 * x)*/
+        constexpr float Ln2Rcp = -1.442695041f;
+        fogFactor = builder.add(ir::Op::FMul(ir::ScalarType::eF32, fogFactor, builder.makeConstant(Ln2Rcp)));
+        fogFactor = builder.add(ir::Op::FExp2(ir::ScalarType::eF32, fogFactor));
+      } break;
+    }
+
+    builder.add(ir::Op::TmpStore(fogFactorTmp, fogFactor));
+    builder.add(ir::Op::ScopedSwitchBreak(fogModeSwitch));
+  }
+
+  auto fogModeSwitchEnd = builder.add(ir::Op::ScopedEndSwitch(fogModeSwitch));
+  builder.rewriteOp(fogModeSwitch, ir::Op(builder.getOp(fogModeSwitch)).setOperand(0u, fogModeSwitchEnd));
+
+  /* Fog factor controls 'the visibility' of the original color of the pixel. So a fog
+   * factor of 0 means 100% fog and a fog factor of 1 means no fog at all and the original
+   * color is completely visible. It's called that way because the D3D9 docs call it that.
+   * Clamp fog factor in such a way that nan gets flushed to 1 instead of 0. */
+  auto fogFactor = builder.add(ir::Op::TmpLoad(ir::ScalarType::eF32, fogFactorTmp));
+  fogFactor = builder.add(ir::Op::FMin(ir::ScalarType::eF32, fogFactor, builder.makeConstant(1.0f)));
+  fogFactor = builder.add(ir::Op::FMax(ir::ScalarType::eF32, fogFactor, builder.makeConstant(0.0f)));
+
+  /* Calculate the color of the pixel with fog in pixel shaders and return that. */
+  dxbc_spv_assert(color);
+
+  auto fogFact3 = broadcastScalar(builder, fogFactor,
+    util::makeWriteMaskForComponents(3u));
+
+  auto diff = builder.add(ir::Op::FSub(vec3Type, color, fogColor));
+  auto scaledDiff = builder.add(ir::Op::FMul(vec3Type, diff, fogFact3));
+  auto finalColor = builder.add(ir::Op::FAdd(vec3Type, fogColor, scaledDiff));
+
+  builder.add(ir::Op::Return(vec3Type, finalColor));
+  builder.add(ir::Op::FunctionEnd());
+}
+
+
+ir::SsaDef Converter::emitClippingInput(ir::Builder& builder) {
+  auto input = builder.add(ir::Op::DclInputBuiltIn(
+    ir::makeLegacyClipPlaneType(), m_entryPoint.def,
+    ir::BuiltIn::eLegacyClipPlanes));
+
+  if (m_options.includeDebugNames) {
+    builder.add(ir::Op::DebugName(input, "clipPlanes"));
+    builder.add(ir::Op::DebugMemberName(input, uint32_t(ir::LegacyClipPlaneLayout::eClipPlaneCount), "count"));
+
+    for (uint32_t i = 0u; i < MaxClipPlanes; i++) {
+      builder.add(ir::Op::DebugMemberName(input, uint32_t(ir::LegacyClipPlaneLayout::eClipPlane0) + i,
+        (std::string("plane") + std::to_string(i)).c_str()));
+    }
+  }
+
+  return input;
+}
+
+
+void Converter::emitClipping(ir::Builder& builder) {
+  auto clipPlanes = emitClippingInput(builder);
+
+  auto vec4Type = ir::BasicType(ir::ScalarType::eF32, 4u);
+
+  auto positionParam = builder.add(ir::Op::DclParam(vec4Type));
+  auto returnType = ir::BasicType(ir::ScalarType::eF32, 4u);
+
+  auto functionOp = ir::Op::Function(returnType)
+      .addOperand(positionParam);
+
+  m_clippingFunction = builder.add(functionOp);
+
+  if (getOptions().includeDebugNames) {
+    builder.add(ir::Op::DebugName(m_clippingFunction, "clipping"));
+    builder.add(ir::Op::DebugName(positionParam, "position"));
+  }
+
+  // Always consider clip planes enabled when doing GPL by forcing 6 for the quick value.
+  auto clipPlaneCount = builder.add(ir::Op::InputLoad(ir::ScalarType::eU32, clipPlanes,
+    builder.makeConstant(uint32_t(ir::LegacyClipPlaneLayout::eClipPlaneCount))));
+  auto position = builder.add(ir::Op::ParamLoad(vec4Type, m_clippingFunction, positionParam));
+
+  for (uint32_t i = 0u; i < MaxClipPlanes; i++) {
+    auto dist = builder.add(emitFDot(ir::ScalarType::eF32, position,
+      builder.add(ir::Op::InputLoad(vec4Type, clipPlanes, builder.makeConstant(
+        uint32_t(ir::LegacyClipPlaneLayout::eClipPlane0) + i)))));
+
+    auto clipPlaneEnabled = builder.add(ir::Op::ULt(ir::ScalarType::eBool, builder.makeConstant(i), clipPlaneCount));
+    auto value = builder.add(ir::Op::Select(ir::ScalarType::eF32, clipPlaneEnabled, dist, builder.makeConstant(0.0f)));
+    m_ioMap.emitClipPlaneStore(builder, i, value);
+  }
+
+  builder.add(ir::Op::FunctionEnd());
+}
+
+
+void Converter::emitFloatModes(ir::Builder& builder) {
+  builder.add(ir::Op::SetFpMode(getEntryPoint(), ir::ScalarType::eF32,
+    ir::OpFlag::eNoSz, ir::RoundMode::eNearestEven, ir::DenormMode::eFlush));
+
+  builder.add(ir::Op::SetFpMode(getEntryPoint(), ir::ScalarType::eF16,
+    ir::OpFlag::eNoSz, ir::RoundMode::eNearestEven, ir::DenormMode::ePreserve));
+}
+
+
+ir::SsaDef Converter::calculateAddress(
+            ir::Builder&            builder,
+            RegisterType            registerType,
+            Swizzle                 swizzle,
+            uint32_t                baseAddress,
+            ir::ScalarType          type) {
+  auto loopCounter = m_controlFlow.getLoopCounter();
+  auto relativeOffset = m_regFile.emitAddressLoad(builder, registerType, swizzle, loopCounter);
+
+  ir::SsaDef baseAddressDef = builder.makeConstant(int32_t(baseAddress));
+  ir::SsaDef address = builder.add(ir::Op::IAdd(ir::ScalarType::eI32, baseAddressDef, relativeOffset));
+
+  if (type != ir::ScalarType::eI32)
+    address = builder.add(ir::Op::Cast(type, address));
+
+  return address;
+}
+
+
+void Converter::logOp(LogLevel severity, const Instruction& op) const {
+  Disassembler::Options options = { };
+  options.indent = false;
+  options.lineNumbers = false;
+
+  Disassembler disasm(options, getShaderInfo());
+  auto instruction = disasm.disassembleOp(op, m_ctab);
+
+  Logger::log(severity, "Line ", m_instructionCount, ": ", instruction);
+}
+
+
+std::string Converter::makeRegisterDebugName(RegisterType type, uint32_t index, WriteMask mask) const {
+  auto shaderInfo = getShaderInfo();
+
+  std::stringstream name;
+  name << UnambiguousRegisterType { type, shaderInfo.getType(), shaderInfo.getVersion().first };
+
+  const ConstantInfo* constantInfo = nullptr;
+  if (type == RegisterType::eConst
+    || type == RegisterType::eConst2
+    || type == RegisterType::eConst3
+    || type == RegisterType::eConst4
+    || type == RegisterType::eConstInt
+    || type == RegisterType::eConstBool
+    || type == RegisterType::eSampler
+    || (type == RegisterType::eTexture
+      && shaderInfo.getVersion().first == 1u
+      && shaderInfo.getVersion().second < 4u))
+    constantInfo = m_ctab.findConstantInfo(type, index);
+
+  if (constantInfo != nullptr && m_options.includeDebugNames) {
+    name << "_" << constantInfo->name;
+    if (constantInfo->count > 1u) {
+      name << index - constantInfo->index;
+    }
+  } else {
+    if (type == RegisterType::eMiscType) {
+      name << MiscTypeIndex(index);
+    } else if (type == RegisterType::eRasterizerOut) {
+      name << RasterizerOutIndex(index);
+    } else if (type != RegisterType::eLoop && type != RegisterType::ePredicate) {
+      name << index;
+    }
+
+    if (mask && mask != WriteMask(ComponentBit::eAll)) {
+      name << "_" << mask;
+    }
+  }
+
+  return name.str();
+}
+
+}

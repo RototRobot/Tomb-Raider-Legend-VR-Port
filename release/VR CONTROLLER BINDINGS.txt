@@ -1,0 +1,136 @@
+================================================================
+  Tomb Raider: Legend VR - Controller Bindings
+================================================================
+
+The VR controllers send the game's normal keyboard and mouse controls.
+The keyboard and mouse continue to work at the same time.
+
+
+HP REVERB G2 / OCULUS TOUCH
+----------------------------
+Left stick                  Move Lara (W / A / S / D)
+Left stick short click      Pause; menu back (Escape)
+Left stick double click     Recenter the VR view
+Left stick long click       Use health pack (Home)
+
+Right stick                 Turn the camera (mouse movement)
+Right stick short click     Switch weapons (End)
+Right stick long click      Use binoculars (Page Down)
+
+Left trigger                Action / interact / pull grapple (E)
+Right trigger               Fire (left mouse); menu select (Enter)
+Left grip                   Throw grapple (Q)
+Right grip                  Combat lock-on (G)
+
+Right A                     Jump / surface (Space); menu select (Enter)
+Right B                     Dive (F); menu back (Escape)
+Left X                      Accurate/free aim (Z)
+Left Y short press          Grenade / flare (K)
+Left Y long press           Personal light / flashlight (Delete)
+Left Y held                 Board mode: flick Lara over (board_god_hand)
+
+
+VALVE INDEX CONTROLLERS
+-----------------------
+Left joystick               Move Lara (W / A / S / D)
+Left joystick short click   Pause; menu back (Escape)
+Left joystick double click  Recenter the VR view
+Right joystick              Turn the camera (mouse movement)
+Right joystick click        Switch weapons (End)
+
+Left trigger                Action / interact / pull grapple (E)
+Right trigger               Fire (left mouse); menu select (Enter)
+Left grip                   Throw grapple (Q)
+Right grip                  Combat lock-on (G)
+
+Right A                     Jump / surface (Space); menu select (Enter)
+Right B                     Dive (F); menu back (Escape)
+Left A                      Accurate/free aim (Z)
+Left B short press          Grenade / flare (K)
+Left B long press           Personal light / flashlight (Delete)
+Left B held                 Board mode: flick Lara over (board_god_hand)
+Left trackpad click         Use health pack (Home)
+Right trackpad click        Use binoculars (Page Down)
+
+
+ORIGINAL WINDOWS MIXED REALITY CONTROLLERS
+------------------------------------------
+Left joystick               Move Lara (W / A / S / D)
+Left joystick short click   Pause; menu back (Escape)
+Left joystick double click  Recenter the VR view
+Left joystick long click    Use health pack (Home)
+
+Right joystick              Turn the camera (mouse movement)
+Right joystick short click  Switch weapons (End)
+Right joystick long click   Use binoculars (Page Down)
+
+Left trigger                Action / interact / pull grapple (E)
+Right trigger               Fire (left mouse); menu select (Enter)
+Left grip                   Throw grapple (Q)
+Right grip                  Combat lock-on (G)
+
+Right trackpad click        Jump / surface (Space); menu select (Enter)
+Left trackpad click         Dive (F); menu back (Escape)
+Left application/menu       Accurate/free aim (Z)
+Right menu short press      Grenade / flare (K)
+Right menu long press       Personal light / flashlight (Delete)
+Right menu held             Board mode: flick Lara over (board_god_hand)
+
+
+MENU CONTROLS
+-------------
+Left stick                  Navigate (arrow keys)
+Jump button                 Select (Enter)
+Right trigger               Select (Enter)
+Dive button                 Back (Escape)
+Pause button                Back (Escape)
+
+The same SteamVR action set remains active in gameplay and menus. This avoids
+the separate menu-binding set that some controllers left completely unbound.
+
+
+OPTIONAL IMMERSIVE MODE
+-----------------------
+Set this in trlvr.ini and restart the game:
+
+    [controls]
+    immersive_controls = 1
+
+FIRST PERSON (also set [vr] first_person = 1, first_person_tracked_hands = 1)
+The grips become your hands; changes from the tables above:
+  * Pistols: grip at a hip to draw (akimbo draws both); grip there again to
+    holster. Grip over a shoulder to draw or swap to the long gun; the other
+    hand on its foregrip holds it two-handed.
+  * Belt: grab the grapple (fling and let go to throw) or the binoculars
+    (bring them to your face). Pouches: grenade/flare at the front of the belt
+    (fling to throw), medipack on the right chest (bring it to your mouth).
+  * Personal light: left grip at the left chest.
+  * Action trigger: precision aim with guns out, otherwise Action (E). With the
+    grapple attached, hold a trigger and pull your hand back to yank.
+  * Climbing: grip ledges, vines, chains and bars; pull to move, pull down
+    with both hands to climb up.
+  * X, Y long press and right stick long press are not used (the gestures
+    above replace them). The right stick turns smoothly or in snaps
+    (turn_mode). left_handed = 1 swaps the triggers' roles.
+
+THIRD PERSON
+The full button layout above still works. In addition a floating gear cross
+of the game's own item icons sits in front of you: grip an icon to use it,
+grip its centre handle to move the cross. The left grip at the left chest
+toggles the light.
+
+In first person, pause menu > VR Holster Setup places the holsters, belt
+gear and pouches for your body: hold each item where you want it and pull the
+trigger.
+
+
+NOTES
+-----
+* A long press is approximately 0.65 seconds.
+* F1 on the keyboard recentres the view. Double-clicking the left stick does
+  the same from every supplied VR controller binding.
+* If the long-press actions do not appear, SteamVR may have retained an older
+  or custom binding. Open SteamVR > Settings > Controllers > Manage Controller
+  Bindings and select/reset to the supplied Tomb Raider: Legend VR binding.
+* Tutorial and contextual prompts translate the game's coloured keyboard token
+  to the matching VR control name. Normal prose is left untouched.

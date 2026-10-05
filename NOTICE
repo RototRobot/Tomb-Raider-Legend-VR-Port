@@ -1,0 +1,11 @@
+Tomb Raider: Legend VR mod
+Copyright 2026 Rototrobot
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository also contains third-party code under its own licences
+(DXVK: zlib/libpng; OpenVR: BSD 3-Clause; TRAWindowed: MIT). See
+THIRD_PARTY_NOTICES.md.
+
+Tomb Raider: Legend is a trademark of its owners. This project is an
+unofficial fan modification and contains no game data.

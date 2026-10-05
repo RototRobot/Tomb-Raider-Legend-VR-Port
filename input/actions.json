@@ -1,0 +1,70 @@
+{
+  "default_bindings": [
+    { "controller_type": "hpmotioncontroller",     "binding_url": "bindings_hpmotioncontroller.json" },
+    { "controller_type": "oculus_touch",           "binding_url": "bindings_oculus_touch.json" },
+    { "controller_type": "holographic_controller", "binding_url": "bindings_holographic_controller.json" },
+    { "controller_type": "knuckles",               "binding_url": "bindings_knuckles.json" }
+  ],
+
+  "actions": [
+    { "name": "/actions/gameplay/in/move",       "type": "vector2" },
+    { "name": "/actions/gameplay/in/look",       "type": "vector2" },
+
+    { "name": "/actions/gameplay/in/jump",       "type": "boolean" },
+    { "name": "/actions/gameplay/in/interact",   "type": "boolean" },
+    { "name": "/actions/gameplay/in/dive",       "type": "boolean" },
+    { "name": "/actions/gameplay/in/fire",       "type": "boolean" },
+    { "name": "/actions/gameplay/in/grapple",    "type": "boolean" },
+    { "name": "/actions/gameplay/in/grenade",    "type": "boolean" },
+    { "name": "/actions/gameplay/in/aim",        "type": "boolean" },
+    { "name": "/actions/gameplay/in/lockon",     "type": "boolean" },
+    { "name": "/actions/gameplay/in/weapon",     "type": "boolean" },
+    { "name": "/actions/gameplay/in/pause",      "type": "boolean" },
+
+    { "name": "/actions/gameplay/in/medkit",     "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/light",      "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/flick",      "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/binoculars", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/recentre",   "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/gear_tuning", "type": "boolean", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/hand_left",  "type": "pose", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/hand_right", "type": "pose", "requirement": "optional" },
+    { "name": "/actions/gameplay/out/haptic_left",  "type": "vibration", "requirement": "optional" },
+    { "name": "/actions/gameplay/out/haptic_right", "type": "vibration", "requirement": "optional" }
+  ],
+
+  "action_sets": [
+    { "name": "/actions/gameplay", "usage": "single" }
+  ],
+
+  "localization": [
+    {
+      "language_tag": "en_US",
+
+      "/actions/gameplay": "Tomb Raider: Legend",
+
+      "/actions/gameplay/in/move": "Move (W A S D)",
+      "/actions/gameplay/in/look": "Turn the camera (mouse)",
+      "/actions/gameplay/in/jump": "Jump / surface (Space)",
+      "/actions/gameplay/in/interact": "Action / interact / pull grapple (E)",
+      "/actions/gameplay/in/dive": "Dive (F)",
+      "/actions/gameplay/in/fire": "Fire (left mouse)",
+      "/actions/gameplay/in/grapple": "Throw grapple (Q)",
+      "/actions/gameplay/in/grenade": "Grenade / flare (K)",
+      "/actions/gameplay/in/aim": "Accurate aim (Z)",
+      "/actions/gameplay/in/lockon": "Combat lock-on (G)",
+      "/actions/gameplay/in/weapon": "Switch weapons (End)",
+      "/actions/gameplay/in/pause": "Pause (Esc)",
+      "/actions/gameplay/in/medkit": "Health pack (Home)",
+      "/actions/gameplay/in/light": "Personal light (Delete)",
+      "/actions/gameplay/in/flick": "Board finger flick (Y held)",
+      "/actions/gameplay/in/binoculars": "Binoculars (Page Down)",
+      "/actions/gameplay/in/recentre": "Recentre the view",
+      "/actions/gameplay/in/gear_tuning": "Gear placement mode (developer)",
+      "/actions/gameplay/in/hand_left": "Left hand grip pose",
+      "/actions/gameplay/in/hand_right": "Right hand grip pose",
+      "/actions/gameplay/out/haptic_left": "Left handhold cue",
+      "/actions/gameplay/out/haptic_right": "Right handhold cue"
+    }
+  ]
+}

@@ -1,0 +1,220 @@
+================================================================
+  Tomb Raider: Legend  --  VR mod          PREVIEW 1 (testers)
+================================================================
+
+This is an early preview for testers. Expect rough edges. Please report what
+you find (see REPORTING PROBLEMS at the end) -- the logs make most problems
+fixable without needing your PC.
+
+WHAT YOU NEED
+-------------
+  * Tomb Raider: Legend for PC -- the Steam or the GOG release
+  * SteamVR and a PC VR headset with tracked controllers
+    (tested on HP Reverb G2; Oculus Touch, Index and WMR bindings included)
+
+The original game files are not modified. The mod adds files beside trl.exe,
+and its launcher writes a separate patched copy named trl_vr.exe.
+
+
+------------------------------------------------------------
+1. PREPARE THE GAME
+------------------------------------------------------------
+Run Tomb Raider: Legend normally once, reach the main menu, then quit.
+
+Open the game's Setup dialog and turn OFF:
+
+    Next Generation Content     (its renderer gives a black scene in VR)
+    Fullscreen Effects          (flat-screen post effects smear the two eyes)
+
+Depth of Field is switched off by the mod itself (trlvr.ini, depth_of_field).
+Anti-aliasing (FSAA) may stay on; the mod limits it to a VR-friendly level.
+
+
+------------------------------------------------------------
+2. INSTALL
+------------------------------------------------------------
+Copy everything inside
+
+    Main - Copy these into the base game folder
+
+into the folder containing trl.exe. Steam's default is:
+
+    C:\Program Files (x86)\Steam\steamapps\common\Tomb Raider Legend
+
+GOG RELEASE: GOG ships its own D3D9.dll (a compatibility wrapper) in the game
+folder. Rename it first, for example to D3D9.dll.gog-dxwrapper, then copy the
+mod's files in. Rename it back to uninstall.
+
+Any other d3d9.dll in the folder belongs to another graphics mod; move it
+aside -- two D3D9 mods cannot load under the same filename.
+
+
+------------------------------------------------------------
+3. HOW TO START
+------------------------------------------------------------
+STEAM: right-click the game > Properties > Launch Options and enter
+
+    "C:\Program Files (x86)\Steam\steamapps\common\Tomb Raider Legend\trlvr_launcher.exe" %command%
+
+(adjust the path if the game is elsewhere), then start SteamVR and launch the
+game from Steam as usual.
+
+GOG: start SteamVR, then run trlvr_launcher.exe from the game folder (make a
+shortcut to it if you like).
+
+The launcher makes trl_vr.exe, a large-address-aware copy of the game: this
+2006 32-bit game otherwise runs out of memory at headset resolution.
+
+On first start the mod writes trlvr.ini (your settings) and trlvr.log beside
+the game. Settings are read at start-up: quit the game, edit, start again.
+
+
+------------------------------------------------------------
+4. MODES -- THIRD PERSON BY DEFAULT, FIRST PERSON OPTIONAL
+------------------------------------------------------------
+A fresh install plays in THIRD PERSON with the classic VR gamepad layout
+(below). That is the safest mode and the place to start.
+
+FIRST PERSON IMMERSIVE (recommended for testers once you are settled):
+open trlvr.ini and set
+
+    [vr]
+    first_person = 1
+    first_person_tracked_hands = 1
+
+    [controls]
+    immersive_controls = 1
+
+You then see through Lara's eyes with your own tracked hands:
+  * Pistols: reach to a hip and lift to draw; hold the gun back at the hip to
+    holster. Reach over a shoulder and grip to swap to the long gun.
+  * Gear: grapple, binoculars and light hang on your belt -- grab them with
+    either hand. Grenades/flares and medipacks are chest pouches.
+  * Climbing: grip a ledge, vine, chain or bar with your hands and pull your
+    body along it. Pull down with both hands to climb up onto a ledge.
+    Alternate hands quickly to shimmy fast. One-hand catches: grab the hold
+    (or set auto_secure_catch = 1 to have them secured for you).
+  * Crouch for real to crouch. Jumping off a chain goes where you look.
+  * Pause menu > "VR Holster Setup" (the old Widescreen entry) places the
+    holsters, gear and pouches where they suit your body.
+
+Other camera options (third person, immersive controls on):
+    third_person_mode = classic | shoulder | board
+  board = Lara a few inches tall on a tabletop world; with board_god_hand = 1
+  you can pick her up, stand her on your palm and flick her over (hold Y).
+
+Optional body:  first_person_body = full   (whole body instead of hands only)
+
+
+------------------------------------------------------------
+VR CONTROLLERS (classic layout)
+------------------------------------------------------------
+    Left stick                 move
+    Left stick click           pause / back (Esc)
+    Left stick double click    recenter the VR view
+    Left stick long press      use health pack
+    Right stick                turn
+    Right stick click          switch weapons
+    Right stick long press     binoculars
+    Left trigger               action / interact / pull grapple
+    Right trigger              fire; select in menus
+    Left grip                  throw grapple
+    Right grip                 combat lock-on
+    A                          jump / surface; select in menus
+    B                          dive / crouch / roll; back in menus
+    X                          accurate aim
+    Y short press              grenade / flare
+    Y long press               personal light
+
+A long press is 0.65 seconds. VR CONTROLLER BINDINGS.txt has the per-headset
+details. If SteamVR keeps an old custom binding, open SteamVR > Settings >
+Controllers > Manage Controller Bindings and pick the supplied one.
+
+Keyboard: F1 recentres the view. The game's own keys still work.
+
+
+------------------------------------------------------------
+PERFORMANCE
+------------------------------------------------------------
+Aim for a steady frame rate rather than the highest resolution:
+
+  * SteamVR > Settings > Video > per-application resolution for the game.
+    Restart the game after changing it. 100% first; 80% if it struggles.
+  * If 90 fps is out of reach, SteamVR's per-application throttling at a
+    fixed half rate with Motion Smoothing usually feels smoother than a
+    frame rate that keeps jumping.
+  * trlvr.ini, [vr]:
+      msaa = 4                       anti-aliasing cap: 0 (off), 2, 4 or 8
+      first_person_object_culling = frustum   (open = draw everything)
+      terrain_culling = frustum                (open = draw every terrain strip)
+    The "open" settings exist only in case something visibly pops in or
+    vanishes; they cost a lot of CPU. In game, F2 switches object culling and
+    Shift+F2 terrain culling for a quick comparison.
+  * Turning off Water Effects, Reflections and Shadows in the Setup dialog
+    gives a little more headroom on slower PCs.
+
+The mod writes a "perf:" line to trlvr.log every 5 seconds. If an area runs
+badly, mention roughly where and when -- the log says why.
+
+
+------------------------------------------------------------
+SETTINGS WORTH KNOWING (trlvr.ini)
+------------------------------------------------------------
+Every setting has a short explanation in the file itself. Missing settings
+are added on start-up; values you chose are never replaced.
+
+  [vr]  first_person, first_person_tracked_hands, first_person_body
+        third_person_mode       classic / shoulder / board
+        comfort_vignette        off / jumps / full (darkens the view edge)
+        physical_crouch         crouch for real to crouch
+        auto_secure_catch       1 = one-hand catches secure themselves
+        first_person_no_spread  shots go exactly where the gun points
+        ui_scale, hud_follow    size and head-follow of the HUD
+        depth_of_field          off / on / game
+  [controls]
+        immersive_controls      gestures, holsters, hand climbing
+        left_handed             swap the main hand
+        pistol_mode             akimbo / single
+        aim_mode                hand / hands / hands_head
+        turn_mode               smooth / snap  (snap_turn_degrees)
+
+To start over with all defaults, rename trlvr.ini and start the game once.
+
+
+------------------------------------------------------------
+KNOWN LIMITATIONS
+------------------------------------------------------------
+  * Next Generation Content is not supported (black scene). Keep it off.
+  * Water reflections and the full-screen water effect are skipped (they only
+    exist for one eye), so deep water looks flatter than on a monitor.
+  * Changing anti-aliasing in the in-game options crashes the game. Change it
+    in the Setup dialog before starting instead.
+  * Cinematics play in third person on a world-locked view.
+  * Some original wet-rock "sheen" decals flicker by view angle -- the flat
+    game does the same.
+
+
+------------------------------------------------------------
+REPORTING PROBLEMS
+------------------------------------------------------------
+Please describe what happened and roughly when, and send these files from the
+game folder (whichever exist):
+
+    trlvr.log            this session
+    trlvr.log.prev       the session before (kept when you relaunch)
+    trlvr_crash.dmp      written if the game crashes (and .prev)
+    trl_vr_d3d9.log      the graphics backend log
+
+A screenshot from the SteamVR mirror helps with anything visual.
+
+
+------------------------------------------------------------
+UNINSTALL
+------------------------------------------------------------
+Clear the Steam launch option (Steam) and remove these files from the game
+folder; GOG: rename D3D9.dll.gog-dxwrapper back to D3D9.dll.
+
+    d3d9.dll   d3d9_dxvk.dll   openvr_api.dll   trlvr_launcher.exe
+    trlvr_actions.json   bindings_*.json
+    trlvr.ini   trlvr.log*   trlvr_crash.dmp*   trl_vr.exe
+    trlvr_launcher.log   trl_vr_d3d9.log

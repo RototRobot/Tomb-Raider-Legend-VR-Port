@@ -1,0 +1,102 @@
+{
+  "controller_type": "holographic_controller",
+  "description": "Tomb Raider: Legend VR -- original Windows Mixed Reality controllers (trackpads)",
+  "name": "Tomb Raider: Legend VR",
+  "bindings": {
+    "/actions/gameplay": {
+      "poses": [
+        { "output": "/actions/gameplay/in/hand_left", "path": "/user/hand/left/pose/grip" },
+        { "output": "/actions/gameplay/in/hand_right", "path": "/user/hand/right/pose/grip" }
+      ],
+      "haptics": [
+        { "output": "/actions/gameplay/out/haptic_left", "path": "/user/hand/left/output/haptic" },
+        { "output": "/actions/gameplay/out/haptic_right", "path": "/user/hand/right/output/haptic" }
+      ],
+      "sources": [
+        {
+          "path": "/user/hand/left/input/joystick",
+          "mode": "joystick",
+          "inputs": {
+            "position": { "output": "/actions/gameplay/in/move" }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/joystick",
+          "mode": "complex_button",
+          "parameters": { "long_press_delay": "0.65", "long_press_expiry": "3.0" },
+          "inputs": {
+            "single": { "output": "/actions/gameplay/in/pause" },
+            "double": { "output": "/actions/gameplay/in/recentre" },
+            "long":   { "output": "/actions/gameplay/in/medkit" }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/joystick",
+          "mode": "joystick",
+          "inputs": {
+            "position": { "output": "/actions/gameplay/in/look" }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/joystick",
+          "mode": "complex_button",
+          "parameters": { "long_press_delay": "0.65", "long_press_expiry": "3.0" },
+          "inputs": {
+            "single": { "output": "/actions/gameplay/in/weapon" },
+            "double": { "output": "/actions/gameplay/in/gear_tuning" },
+            "long":   { "output": "/actions/gameplay/in/binoculars" }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/trigger",
+          "mode": "trigger",
+          "inputs": { "click": { "output": "/actions/gameplay/in/interact" } }
+        },
+        {
+          "path": "/user/hand/right/input/trigger",
+          "mode": "trigger",
+          "inputs": { "click": { "output": "/actions/gameplay/in/fire" } }
+        },
+        {
+          "path": "/user/hand/left/input/grip",
+          "mode": "button",
+          "inputs": { "click": { "output": "/actions/gameplay/in/grapple" } }
+        },
+        {
+          "path": "/user/hand/right/input/grip",
+          "mode": "button",
+          "inputs": { "click": { "output": "/actions/gameplay/in/lockon" } }
+        },
+        {
+          "path": "/user/hand/right/input/trackpad",
+          "mode": "button",
+          "inputs": { "click": { "output": "/actions/gameplay/in/jump" } }
+        },
+        {
+          "path": "/user/hand/left/input/trackpad",
+          "mode": "button",
+          "inputs": { "click": { "output": "/actions/gameplay/in/dive" } }
+        },
+        {
+          "path": "/user/hand/left/input/application_menu",
+          "mode": "button",
+          "inputs": { "click": { "output": "/actions/gameplay/in/aim" } }
+        },
+        {
+          "path": "/user/hand/right/input/application_menu",
+          "mode": "button",
+          "inputs": { "click": { "output": "/actions/gameplay/in/flick" } }
+        },
+        {
+          "path": "/user/hand/right/input/application_menu",
+          "mode": "complex_button",
+          "parameters": { "long_press_delay": "0.65", "long_press_expiry": "3.0" },
+          "inputs": {
+            "single": { "output": "/actions/gameplay/in/grenade" },
+            "long":   { "output": "/actions/gameplay/in/light" }
+          }
+        }
+      ]
+    }
+  }
+}

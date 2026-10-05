@@ -1,0 +1,28 @@
+# Build output
+/build/
+/dist/
+/dxvk-trlvr/build-win32/
+*.obj
+*.pdb
+*.ilk
+*.exp
+
+# Developer notes and research -- not needed to build or use the mod
+/HANDOVER.md
+/FINDINGS.md
+/HAND_TUNING.md
+/CONTROLS_IMMERSIVE.md
+/research/
+/.research-deps/
+
+# Runtime output from test runs
+*.log
+*.dmp
+*.prev
+trlvr.ini
+
+# Tooling caches
+__pycache__/
+*.pyc
+.vs/
+.vscode/
