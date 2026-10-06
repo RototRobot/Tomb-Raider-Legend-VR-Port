@@ -102,6 +102,12 @@ namespace trlvr
         };
         bool g_gear_tuning = false;
         bool g_gear_request = false;
+        // Hand calibration corrections; reloaded with the hand offsets.
+        bool g_hand_correction_loaded = false;
+        bool g_hand_correction_valid[2] = { false, false };
+        float g_hand_correction[2][12]{};
+        const wchar_t* kHandCorrectionKeys[2] = {
+            L"hand_calibration_left", L"hand_calibration_right" };
         bool g_gear_menu_request = false;
         int g_gear_step = 0;
         bool g_gear_placed[TuneGearCount]{};
@@ -452,6 +458,7 @@ namespace trlvr
         {
             wchar_t path[MAX_PATH]{};
             ini_path(path);
+            g_hand_correction_loaded = false;
             for (int hand = 0; hand < 2; ++hand)
                 for (int axis = 0; axis < 3; ++axis)
                 {
@@ -747,6 +754,86 @@ namespace trlvr
         WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
         log("tune: grip aim pitch %+.1f, yaw %+.1f degrees %s", pitch_degrees,
             yaw_degrees, ok ? "saved to trlvr.ini" : "FAILED to save");
+        return ok;
+    }
+
+    bool tune_hand_correction(bool left, float out[12])
+    {
+        const int hand = left ? 0 : 1;
+        if (!g_hand_correction_loaded)
+        {
+            g_hand_correction_loaded = true;
+            wchar_t path[MAX_PATH]{};
+            ini_path(path);
+            for (int h = 0; h < 2; ++h)
+            {
+                g_hand_correction_valid[h] = false;
+                wchar_t text[512]{};
+                GetPrivateProfileStringW(L"vr", kHandCorrectionKeys[h], L"",
+                                         text, _countof(text), path);
+                float values[12]{};
+                const wchar_t* p = text;
+                int n = 0;
+                for (; n < 12; ++n)
+                {
+                    wchar_t* end = nullptr;
+                    values[n] = wcstof(p, &end);
+                    if (end == p || !std::isfinite(values[n]))
+                        break;
+                    p = end;
+                }
+                // Rotation entries are at most 1; the translation is a
+                // correction of centimetres, never more than half a metre.
+                bool ok = n == 12;
+                for (int i = 0; ok && i < 12; ++i)
+                    ok = fabsf(values[i]) <= (i < 9 ? 1.01f : 0.5f);
+                if (ok)
+                {
+                    for (int i = 0; i < 12; ++i)
+                        g_hand_correction[h][i] = values[i];
+                    g_hand_correction_valid[h] = true;
+                }
+                else if (text[0])
+                    log("tune: [vr] %S ignored (needs 12 numbers: a "
+                        "rotation and a translation of at most 0.5 m)",
+                        kHandCorrectionKeys[h]);
+            }
+            log("tune: hand calibration left %s, right %s",
+                g_hand_correction_valid[0] ? "saved" : "default",
+                g_hand_correction_valid[1] ? "saved" : "default");
+        }
+        if (!g_hand_correction_valid[hand])
+            return false;
+        if (out)
+            for (int i = 0; i < 12; ++i)
+                out[i] = g_hand_correction[hand][i];
+        return true;
+    }
+
+    bool tune_set_hand_correction(bool left, const float in[12])
+    {
+        const int hand = left ? 0 : 1;
+        tune_hand_correction(left, nullptr);
+        wchar_t path[MAX_PATH]{};
+        ini_path(path);
+        wchar_t text[512]{};
+        if (in)
+        {
+            for (int i = 0; i < 12; ++i)
+                if (!std::isfinite(in[i]) ||
+                    fabsf(in[i]) > (i < 9 ? 1.01f : 0.5f))
+                    return false;
+            size_t used = 0;
+            for (int i = 0; i < 12; ++i)
+                used += swprintf_s(text + used, _countof(text) - used,
+                                   i ? L" %.6f" : L"%.6f", in[i]);
+            for (int i = 0; i < 12; ++i)
+                g_hand_correction[hand][i] = in[i];
+        }
+        g_hand_correction_valid[hand] = in != nullptr;
+        const bool ok = WritePrivateProfileStringW(L"vr",
+            kHandCorrectionKeys[hand], in ? text : nullptr, path) != 0;
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
         return ok;
     }
 

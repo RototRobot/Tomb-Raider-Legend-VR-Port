@@ -22,6 +22,11 @@ namespace trlvr
 
         // Offset from the head origin, in metres.
         float offset_x, offset_y, offset_z;
+
+        // Eye-to-head rotation (OpenVR axes, row-major). Identity on most
+        // headsets; canted displays (Pimax and others) turn each eye outward,
+        // and the tangents above are measured about that turned axis.
+        float rot[3][3];
     };
 
     bool vr_init();
@@ -177,6 +182,30 @@ namespace trlvr
     bool vr_controller_grip_offset(bool left, Mat4* metres);
     // The grip pose in the head frame, like vr_controller_head_pose.
     bool vr_controller_grip_head_pose(bool left, Mat4* grip_to_head);
+
+    // Hand calibration (pause menu "Hand Calibration", user 2026-10-06:
+    // Quest testers' hands did not line up with their controllers). Lara's
+    // hands are held in a fixed pose in front of the player -- guns forward,
+    // thumbs up -- and the player brings each controller to where it should
+    // sit in that hand and squeezes its grip. The difference becomes a rigid
+    // correction in that controller's grip frame, applied inside
+    // vr_controller_grip_head_pose, so hands, guns, aim and grab zones all
+    // follow it. Saved to [vr] hand_calibration_left/_right.
+    void vr_hand_calibration_request_from_menu();
+    bool vr_hand_calibration_menu_pending();
+    void vr_hand_calibration_clear_menu_request();
+    // Fixes the reference pose in front of the current head. False (and
+    // logged) without grip poses for both hands.
+    bool vr_hand_calibration_begin();
+    void vr_hand_calibration_cancel(const char* reason);
+    bool vr_hand_calibration_active();
+    bool vr_hand_calibration_locked(bool left);
+    // Lock one hand where its controller is now. True when it locked; the
+    // second hand saves both and ends calibration.
+    bool vr_hand_calibration_lock(bool left);
+    // The SteamVR grip pose without any calibration (head frame, game
+    // units): where the palm really is, for the calibration guide.
+    bool vr_controller_grip_uncorrected_head_pose(bool left, Mat4* out);
     bool vr_substitute_c0_for_eye(const float* in_regs16, float* out_regs16, Eye eye);
 
     // Remember what the game asked for and what we uploaded instead, so a

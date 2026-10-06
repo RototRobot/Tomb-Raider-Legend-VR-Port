@@ -34,4 +34,9 @@ namespace trlvr
     // Default-pool targets the submit path owns; released before a device
     // Reset (which fails while any exist) and re-made on demand.
     void vr_submit_release_targets();
+
+    // A short message panel in front of the player for a few seconds, for
+    // menu actions that cannot start (user 2026-10-06: a tester's holster
+    // setup "did nothing" with no way to tell why).
+    void vr_submit_notice(const wchar_t* title, const wchar_t* body);
 }

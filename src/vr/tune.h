@@ -38,6 +38,12 @@ namespace trlvr
     bool tune_grip_aim(float* pitch_degrees, float* yaw_degrees);
     bool tune_set_grip_aim(float pitch_degrees, float yaw_degrees);
     bool tune_save_hand_calibration(bool left, const float in[9]);
+    // Pause-menu hand calibration (2026-10-06): a rigid correction in each
+    // controller's grip frame, row-major 3x3 rotation then translation in
+    // metres (12 values), saved as [vr] hand_calibration_left/_right.
+    // False when none is saved. F5 reloads. Setting null clears it.
+    bool tune_hand_correction(bool left, float out[12]);
+    bool tune_set_hand_correction(bool left, const float in[12]);
     bool tune_hand_debug_enabled();
     bool tune_hand_debug_selected_left();
     bool tune_hand_debug_rotation_mode();

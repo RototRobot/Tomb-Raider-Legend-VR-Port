@@ -5,6 +5,7 @@
 #include "tune.h"
 #include "ui_space.h"
 #include "vr_input.h"
+#include "vr_session.h"
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -74,6 +75,7 @@ namespace trlvr
             { "Auto Target", {}, false },
             { "Gear Cross", {}, false },
             { "Grip over your Shoulder", {}, false },
+            { "Right Stick Double", {}, false },
         };
 
         GameUtf8String* label(const char* text)
@@ -133,6 +135,8 @@ namespace trlvr
                 return first ? "Auto Target" : "Right Grip";
             if (any(key, "Escape", "Esc"))
                 return "Left Stick";
+            if (same(key, "Tab"))
+                return "Right Stick Double";
             if (same(key, "End"))
                 return third ? "Gear Cross"
                      : first ? "Grip over your Shoulder" : "Right Stick";
@@ -194,15 +198,38 @@ namespace trlvr
             return changed ? changed : original;
         }
 
-        // The pause menu's Widescreen toggle (useless in VR, the mod sizes
-        // the view) becomes "VR Holster Setup" (user, 2026-10-04): its text
-        // is swapped in the string table while the pause menu is up, and
-        // RenderG2_SetWideScreen (0x0040CA30; the toggle at 0x00426990
-        // calls it with !current) keeps the current value and asks for
-        // gear placement instead.
+        // Pause-menu takeovers. Labels are swapped in the game's string table
+        // (localstr_get 0x004E43C0 reads [0x01111EE4][id]) while a level is
+        // running -- the only menu there is the pause menu -- and restored in
+        // the front end, so the main menu keeps its own entries:
+        //   Widescreen (useless in VR, the mod sizes the view) -> "VR Holster
+        //     Setup" (user, 2026-10-04). RenderG2_SetWideScreen (0x0040CA30;
+        //     the toggle at 0x00426990 calls it with !current) keeps the
+        //     value and asks for gear placement instead.
+        //   Display -> "VR Settings", and Next Generation Content (an
+        //     unsupported renderer in VR) -> "Hand Calibration" (user,
+        //     2026-10-06); menucommand_PcSwitchNextgenContent (0x004E5560)
+        //     asks for hand calibration instead of switching.
+        // Every matching string is swapped: the first build took only the
+        // first "Next Generation Content" (string 59) and the pause menu kept
+        // its retail text, so the menu draws another copy (user test
+        // 2026-10-06).
+        struct LabelSwap
+        {
+            int kind;
+            int id;
+            const char* original;
+        };
+        const char* kSwapNames[3] = {
+            "Widescreen", "Display", "Next Generation Content" };
         char g_holster_label[] = "VR Holster Setup";
-        int g_wide_id = -2;              // -2 not searched, -1 none
-        const char* g_wide_original = nullptr;
+        char g_settings_label[] = "VR Settings";
+        char g_calibration_label[] = "Hand Calibration";
+        char* const kSwapLabels[3] = {
+            g_holster_label, g_settings_label, g_calibration_label };
+        LabelSwap g_swaps[16]{};
+        int g_swap_count = 0;
+        bool g_labels_searched = false;
 
         const char** string_table(int* count)
         {
@@ -223,45 +250,92 @@ namespace trlvr
             }
         }
 
-        void holster_label(bool pause)
+        // IsFrontEnd (0x004E5980): the game state at 0x010E5868 is 6 in
+        // the front end.
+        bool in_level()
         {
+            __try
+            {
+                return *reinterpret_cast<const volatile int*>(0x010E5868) != 6;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        // Which takeover a lower-cased table string is: Widescreen, the
+        // exact word Display, or a short Next Generation string (longer
+        // ones are its help and restart texts).
+        int label_kind(const char* lower, size_t n)
+        {
+            if (n <= 20 && strstr(lower, "wide") && strstr(lower, "screen"))
+                return 0;
+            if (strcmp(lower, "display") == 0)
+                return 1;
+            if (n <= 46 && strstr(lower, "next") && strstr(lower, "gen"))
+                return 2;
+            return -1;
+        }
+
+        void find_labels(const char** table, int count)
+        {
+            g_labels_searched = true;
+            for (int id = 0; id < count && id < 20000; ++id)
+            {
+                const char* s = table[id];
+                if (!s || IsBadStringPtrA(s, 48))
+                    continue;
+                char lower[48]{};
+                const size_t n = strnlen(s, 47);
+                if (n >= 47)
+                    continue;
+                for (size_t i = 0; i < n; ++i)
+                    lower[i] = (char)tolower((unsigned char)s[i]);
+                const int kind = label_kind(lower, n);
+                if (kind < 0 || g_swap_count >= (int)_countof(g_swaps))
+                    continue;
+                g_swaps[g_swap_count++] = { kind, id, s };
+                log("menu: %s is string %d \"%s\"; shown as \"%s\" in the "
+                    "pause menu", kSwapNames[kind], id, s, kSwapLabels[kind]);
+            }
+            for (int kind = 0; kind < 3; ++kind)
+            {
+                bool found = false;
+                for (int i = 0; i < g_swap_count; ++i)
+                    found = found || g_swaps[i].kind == kind;
+                if (!found)
+                    log("menu: no \"%s\" string found; that pause-menu entry "
+                        "keeps its retail text", kSwapNames[kind]);
+            }
+        }
+
+        // VR labels in a level, retail labels in the front end.
+        void update_labels()
+        {
+            if (!config().immersive_controls)
+                return;
             int count = 0;
             const char** table = string_table(&count);
             if (!table || count <= 0)
                 return;
+            const bool vr = in_level();
             __try
             {
-                if (g_wide_id == -2)
+                if (!g_labels_searched)
+                    find_labels(table, count);
+                for (int i = 0; i < g_swap_count; ++i)
                 {
-                    g_wide_id = -1;
-                    for (int id = 0; id < count && id < 20000; ++id)
-                    {
-                        const char* s = table[id];
-                        if (!s || IsBadStringPtrA(s, 32))
-                            continue;
-                        char lower[32]{};
-                        const size_t n = strnlen(s, 31);
-                        for (size_t i = 0; i < n; ++i)
-                            lower[i] = (char)tolower((unsigned char)s[i]);
-                        if (n <= 20 && strstr(lower, "wide") &&
-                            strstr(lower, "screen"))
-                        {
-                            g_wide_id = id;
-                            g_wide_original = s;
-                            log("menu: Widescreen is string %d \"%s\"; "
-                                "shown as \"%s\" in the pause menu", id, s,
-                                g_holster_label);
-                            break;
-                        }
-                    }
+                    const LabelSwap& swap = g_swaps[i];
+                    const char* label = kSwapLabels[swap.kind];
+                    if (swap.id < 0 || swap.id >= count)
+                        continue;
+                    const char* want = vr ? label : swap.original;
+                    if (table[swap.id] != want &&
+                        (table[swap.id] == label ||
+                         table[swap.id] == swap.original))
+                        table[swap.id] = want;
                 }
-                if (g_wide_id < 0 || g_wide_id >= count)
-                    return;
-                const char* want = pause ? g_holster_label : g_wide_original;
-                if (want && table[g_wide_id] != want &&
-                    (table[g_wide_id] == g_holster_label ||
-                     table[g_wide_id] == g_wide_original))
-                    table[g_wide_id] = want;
             }
             __except(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -286,8 +360,24 @@ namespace trlvr
                 log("menu: widescreen request ignored -- kept off in VR "
                     "(each eye is about square)");
             }
-            if (g_wide_menu_setup && ui_pause_menu_active() && on)
+            // The menu entry flips a game value (its On/Off) and calls this
+            // through 0x004525D0 with the new value, so presses alternate
+            // on/off. Reacting to "on" only made every other press do
+            // nothing (tester report 2026-10-06, entry left showing "On").
+            // A call while the pause menu's settings page (screen 2, where
+            // the entry is) is on top is a press (300 ms debounce). Loading
+            // a save from the pause menu re-applies options through here
+            // too, which started holster setup (user 2026-10-06).
+            static ULONGLONG last_press = 0;
+            const ULONGLONG now = GetTickCount64();
+            if (g_wide_menu_setup && ui_pause_menu_active() &&
+                vr_input_top_screen_id() == 2 && now - last_press > 300)
+            {
+                last_press = now;
+                log("menu: VR Holster Setup pressed (widescreen %s "
+                    "requested)", on ? "on" : "off");
                 tune_gear_tuning_request_from_menu();
+            }
             g_set_wide(false);
         }
 
@@ -298,9 +388,46 @@ namespace trlvr
         int __cdecl detour_push_screen(void* menu, void* item, int screen,
                                        const char* text, int control)
         {
-            holster_label(ui_root_screen_id() == 1);
+            update_labels();
             return g_push_screen(menu, item, screen, text, control);
         }
+
+        MenuCommandFn g_switch_nextgen = nullptr;
+
+        // Next Generation Content in a level: hand calibration instead (on
+        // select or left/right). The front end keeps retail.
+        int __cdecl detour_switch_nextgen(void* menu, void* item, int screen,
+                                          const char* text, int control)
+        {
+            if (!config().immersive_controls || !in_level())
+                return g_switch_nextgen(menu, item, screen, text, control);
+            static int reports = 0;
+            if (reports < 4)
+            {
+                ++reports;
+                char shown[64]{};
+                if (text && !IsBadStringPtrA(text, 63))
+                    strncpy_s(shown, text, _TRUNCATE);
+                log("menu: Next Generation entry, control %d, item text "
+                    "\"%s\"", control, shown);
+            }
+            // Select or left/right: on a toggle entry players press either
+            // (retail reacts to 3, 4 and 5 alike).
+            static ULONGLONG last_press = 0;
+            const ULONGLONG now = GetTickCount64();
+            if ((control == 5 || control == 3 || control == 4) &&
+                now - last_press > 300)
+            {
+                last_press = now;
+                vr_hand_calibration_request_from_menu();
+            }
+            return 0;
+        }
+    }
+
+    void input_labels_update()
+    {
+        update_labels();
     }
 
     void input_labels_init()
@@ -318,6 +445,15 @@ namespace trlvr
         hook_install((void*)0x004E4590, (void*)&detour_push_screen,
                      (void**)&g_push_screen, push_sig, sizeof(push_sig),
                      "menucommand_PushScreen (pause-menu holster label)");
+        // mov eax, [esp+14h] / cmp eax, 5 -- two complete instructions.
+        const unsigned char nextgen_sig[] =
+            { 0x8B, 0x44, 0x24, 0x14, 0x83, 0xF8, 0x05 };
+        if (config().immersive_controls)
+            hook_install((void*)0x004E5560, (void*)&detour_switch_nextgen,
+                         (void**)&g_switch_nextgen, nextgen_sig,
+                         sizeof(nextgen_sig),
+                         "menucommand_PcSwitchNextgenContent (pause-menu "
+                         "hand calibration)");
         // mov ecx, [0x010FC914] -- one complete instruction.
         const unsigned char wide_sig[] =
             { 0x8B, 0x0D, 0x14, 0xC9, 0x0F, 0x01 };

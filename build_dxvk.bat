@@ -67,7 +67,9 @@ if not exist "%BUILD%" (
 
 rem Record only the PDB file name in the DLL, not the build machine's
 rem full path (which carries the user name) -- privacy, 2026-10-05.
-meson configure "%BUILD%" -Dcpp_link_args=/PDBALTPATH:%%_PDB%% -Dc_link_args=/PDBALTPATH:%%_PDB%%
+rem b_ndebug as upstream's package-release.sh: asserts off. Left on, every
+rem assert in dxbc-spirv baked its absolute source path into the DLL.
+meson configure "%BUILD%" -Db_ndebug=if-release -Dcpp_link_args=/PDBALTPATH:%%_PDB%% -Dc_link_args=/PDBALTPATH:%%_PDB%%
 if errorlevel 1 goto :fail
 
 echo.

@@ -1,5 +1,5 @@
 ================================================================
-  Tomb Raider: Legend  --  VR mod          PREVIEW 1 (testers)
+  Tomb Raider: Legend  --  VR mod          PREVIEW 2 (testers)
 ================================================================
 
 This is an early preview for testers. Expect rough edges. Please report what
@@ -85,6 +85,10 @@ open trlvr.ini and set
     [controls]
     immersive_controls = 1
 
+  first_person only picks the view you start in: with immersive controls on,
+  long-press the right stick (or press \ on the keyboard) to switch between
+  first and third person at any time in gameplay.
+
 You then see through Lara's eyes with your own tracked hands:
   * Pistols: reach to a hip and lift to draw; hold the gun back at the hip to
     holster. Reach over a shoulder and grip to swap to the long gun.
@@ -93,13 +97,21 @@ You then see through Lara's eyes with your own tracked hands:
   * Climbing: grip a ledge, vine, chain or bar with your hands and pull your
     body along it. Pull down with both hands to climb up onto a ledge.
     Alternate hands quickly to shimmy fast. One-hand catches: grab the hold
-    (or set auto_secure_catch = 1 to have them secured for you).
+    (or set auto_secure_catch = bars or all to have them secured for you).
   * Crouch for real to crouch. Jumping off a chain goes where you look.
-  * Pause menu > "VR Holster Setup" (the old Widescreen entry) places the
-    holsters, gear and pouches where they suit your body.
+  * Pause menu > "VR Settings" (the old Display menu):
+      "VR Holster Setup" (the old Widescreen entry) places the holsters,
+      gear and pouches where they suit your body.
+      "Hand Calibration" (the old Next Generation Content entry) holds
+      Lara's hands out in front of you, guns forward and thumbs up. Move
+      each controller to where it should sit in that hand and squeeze its
+      grip to lock it; locking both saves. Do this first if her hands do
+      not line up with your controllers (common on Quest).
 
 Other camera options (third person, immersive controls on):
-    third_person_mode = classic | shoulder | board
+    third_person_mode = classic | shoulder | board | all
+  (all: the right-stick long press cycles classic, shoulder, board and
+  first person in turn)
   board = Lara a few inches tall on a tabletop world; with board_god_hand = 1
   you can pick her up, stand her on your palm and flick her over (hold Y).
 
@@ -115,6 +127,7 @@ VR CONTROLLERS (classic layout)
     Left stick long press      use health pack
     Right stick                turn
     Right stick click          switch weapons
+    Right stick double click   open the PDA
     Right stick long press     binoculars
     Left trigger               action / interact / pull grapple
     Right trigger              fire; select in menus
@@ -164,10 +177,11 @@ Every setting has a short explanation in the file itself. Missing settings
 are added on start-up; values you chose are never replaced.
 
   [vr]  first_person, first_person_tracked_hands, first_person_body
-        third_person_mode       classic / shoulder / board
+        third_person_mode       classic / shoulder / board / all
         comfort_vignette        off / jumps / full (darkens the view edge)
         physical_crouch         crouch for real to crouch
-        auto_secure_catch       1 = one-hand catches secure themselves
+        auto_secure_catch       off / bars / all: one-hand catches secure
+                                themselves on swing bars, or everywhere
         first_person_no_spread  shots go exactly where the gun points
         ui_scale, hud_follow    size and head-follow of the HUD
         depth_of_field          off / on / game

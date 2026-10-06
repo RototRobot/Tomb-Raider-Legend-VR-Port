@@ -292,12 +292,12 @@ namespace trlvr
         g_terrain_culling_open = config().terrain_culling_open;
         log("cull: terrain culling %s at start (Shift+F2 switches)",
             g_terrain_culling_open ? "open" : "frustum");
-        if (config().first_person)
-            log("cull: first-person object culling %s at start (F2 switches)",
-                g_object_culling_open ? "open" : "frustum");
+        log("cull: first-person object culling %s at start (F2 switches)",
+            g_object_culling_open ? "open" : "frustum");
         void* trampoline = nullptr;
-        if (config().first_person &&
-            hook_install((void*)kCheckInstanceVisibility,
+        // Either starting view: the view can switch live, and the detour
+        // only acts while first person is active.
+        if (hook_install((void*)kCheckInstanceVisibility,
                          (void*)&detour_check_instance_visibility,
                          &trampoline, kPrologue, sizeof(kPrologue),
                          "PIPE3D_CheckInstanceVisibility (first-person gear)"))

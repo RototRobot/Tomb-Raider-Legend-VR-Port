@@ -177,6 +177,9 @@ namespace trlvr
                 info.offset_x = t.m[0][3];
                 info.offset_y = t.m[1][3];
                 info.offset_z = t.m[2][3];
+                for (int row = 0; row < 3; ++row)
+                    for (int col = 0; col < 3; ++col)
+                        info.rot[row][col] = t.m[row][col];
             }
             g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
 
@@ -199,6 +202,12 @@ namespace trlvr
                     i == 0 ? "left " : "right",
                     in.tan_left, in.tan_right, in.tan_top, in.tan_bottom,
                     in.offset_x, in.offset_y, in.offset_z);
+                // Cant: the angle between this eye's forward axis and the head's.
+                const float cant = acosf(fminf(1.0f, fmaxf(-1.0f, in.rot[2][2])))
+                                 * 57.29578f;
+                if (cant > 0.05f)
+                    log("vr: %s eye is canted %.2f degrees from the head axis",
+                        i == 0 ? "left " : "right", cant);
             }
         }
     }
@@ -489,6 +498,7 @@ namespace trlvr
     {
         float offset[3];
         float retail[3];
+        float focus[3];
     };
     SkyCandidate g_sky_last[8];
     int g_sky_last_count = 0;
@@ -554,14 +564,27 @@ namespace trlvr
                 // far sat >= 3600 units from the camera. So: learn only
                 // offsets at least 2500 units away, and never on a frame
                 // where the camera jumped (more than 400 units).
+                // 2026-10-06 (black slab again, shoulder camera walking):
+                // (-130, -118, 3629) passed the distance test. While the
+                // game camera follows Lara rigidly, anything attached to
+                // her also keeps one offset from the camera. Real sky stays
+                // pinned when the camera moves relative to Lara too (orbit,
+                // lag, zoom), so learn only on a frame where the camera-to-
+                // focus vector changed by more than 20 units.
                 const float offset_length = sqrtf(offset[0] * offset[0] +
                                                   offset[1] * offset[1] +
                                                   offset[2] * offset[2]);
+                float orbit = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    orbit += fabsf((retail[k] - focus[k]) -
+                                   (c.retail[k] - c.focus[k]));
+                const bool follows_lara = orbit < 20.0f;
                 if (moved > 10.0f && same(c.offset, offset, 2.0f) &&
-                    (offset_length < 2500.0f || moved > 400.0f))
+                    (offset_length < 2500.0f || moved > 400.0f ||
+                     follows_lara))
                 {
                     static unsigned rejected = 0;
-                    if (rejected++ < 3)
+                    if (rejected++ < 6 && !follows_lara)
                         log("sky: camera-following draw at offset (%.0f, "
                             "%.0f, %.0f) not taken as sky (%s)", offset[0],
                             offset[1], offset[2], offset_length < 2500.0f
@@ -594,6 +617,7 @@ namespace trlvr
                 SkyCandidate& c = g_sky_this[g_sky_this_count++];
                 memcpy(c.offset, offset, sizeof(offset));
                 memcpy(c.retail, retail, sizeof(retail));
+                memcpy(c.focus, focus, sizeof(focus));
             }
         }
         bool pinned = false;
@@ -1618,7 +1642,9 @@ namespace trlvr
         if (dx < 1.0e-4f || dy < 1.0e-4f)
             return false;
         *u = (point[0] / depth - projection.tan_left) / dx;
-        *v = (-point[1] / depth - projection.tan_top) / dy;
+        // Texture v runs down from the up edge, whose tangent OpenVR calls
+        // "bottom" (its top/bottom are backwards; see projection_from_tangents).
+        *v = (projection.tan_bottom - point[1] / depth) / dy;
         return std::isfinite(*u) && std::isfinite(*v);
     }
 
@@ -1656,7 +1682,9 @@ namespace trlvr
         if (dx < 1.0e-4f || dy < 1.0e-4f)
             return false;
         *u = (point[0] / depth - projection.tan_left) / dx;
-        *v = (-point[1] / depth - projection.tan_top) / dy;
+        // Texture v runs down from the up edge, whose tangent OpenVR calls
+        // "bottom" (its top/bottom are backwards; see projection_from_tangents).
+        *v = (projection.tan_bottom - point[1] / depth) / dy;
         return std::isfinite(*u) && std::isfinite(*v);
     }
 
@@ -1685,19 +1713,253 @@ namespace trlvr
         return true;
     }
 
+    namespace
+    {
+        // The SteamVR grip pose in the head frame, before any calibration.
+        bool uncorrected_grip_head_pose(int hand, Mat4* grip_to_head)
+        {
+            if (!g_grip_offset_valid[hand])
+                return false;
+            Mat4 raw;
+            if (!vr_controller_head_pose(hand == 0, &raw))
+                return false;
+            Mat4 offset = g_grip_offset[hand];
+            const float scale = tune_world_scale();
+            for (int axis = 0; axis < 3; ++axis)
+                offset.m[3][axis] *= scale;
+            *grip_to_head = offset * raw;
+            return true;
+        }
+
+        bool g_cal_menu_request = false;
+        bool g_cal_active = false;
+        bool g_cal_locked[2] = { false, false };
+        // The pose each hand is held at, fixed in tracking space when
+        // calibration starts so it does not follow the head.
+        vr::HmdMatrix34_t g_cal_reference[2]{};
+        // Locked this pass, not yet saved: rotation then metres.
+        float g_cal_pending[2][12]{};
+
+        // Where the reference hands sit, metres from the head in its
+        // yaw-only frame: arms out in front, guns level.
+        const float kCalSide = 0.18f, kCalUp = -0.28f, kCalForward = 0.42f;
+
+        // A tracking-space pose in the head frame, composed exactly as
+        // vr_controller_head_pose composes a controller.
+        bool tracking_pose_to_head(const vr::HmdMatrix34_t& pose, Mat4* out)
+        {
+            if (!g_ready || !g_pose_valid)
+                return false;
+            const vr::TrackedDevicePose_t& hmd =
+                g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+            if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+                return false;
+            const float scale = tune_world_scale();
+            *out = rigid_inverse(view_from_pose(&pose.m[0][0], scale)) *
+                   view_from_pose(&hmd.mDeviceToAbsoluteTracking.m[0][0],
+                                  scale);
+            const float move_scale = tune_move_scale();
+            for (int axis = 0; axis < 3; ++axis)
+                out->m[3][axis] *= move_scale;
+            return true;
+        }
+
+        // 12 stored values (rotation, metres) as a grip-frame matrix.
+        Mat4 correction_matrix(const float c[12])
+        {
+            Mat4 k = Mat4::identity();
+            for (int r = 0; r < 3; ++r)
+                for (int col = 0; col < 3; ++col)
+                    k.m[r][col] = c[r * 3 + col];
+            const float scale = tune_world_scale();
+            for (int axis = 0; axis < 3; ++axis)
+                k.m[3][axis] = c[9 + axis] * scale;
+            return k;
+        }
+    }
+
     bool vr_controller_grip_head_pose(bool left, Mat4* grip_to_head)
     {
         const int hand = left ? 0 : 1;
         if (!grip_to_head || !g_grip_offset_valid[hand])
             return false;
-        Mat4 raw;
-        if (!vr_controller_head_pose(left, &raw))
+        // Calibrating: an unlocked hand is held at the reference.
+        if (g_cal_active && !g_cal_locked[hand])
+            return tracking_pose_to_head(g_cal_reference[hand], grip_to_head);
+        Mat4 grip;
+        if (!uncorrected_grip_head_pose(hand, &grip))
             return false;
-        Mat4 offset = g_grip_offset[hand];
+        float c[12]{};
+        if (g_cal_active && g_cal_locked[hand])
+            memcpy(c, g_cal_pending[hand], sizeof(c));
+        else if (!tune_hand_correction(left, c))
+        {
+            *grip_to_head = grip;
+            return true;
+        }
+        *grip_to_head = correction_matrix(c) * grip;
+        return true;
+    }
+
+    bool vr_controller_grip_uncorrected_head_pose(bool left, Mat4* out)
+    {
+        return out && uncorrected_grip_head_pose(left ? 0 : 1, out);
+    }
+
+    void vr_hand_calibration_request_from_menu()
+    {
+        g_cal_menu_request = true;
+        log("vr: hand calibration requested from the pause menu");
+    }
+
+    bool vr_hand_calibration_menu_pending() { return g_cal_menu_request; }
+
+    void vr_hand_calibration_clear_menu_request()
+    {
+        g_cal_menu_request = false;
+    }
+
+    bool vr_hand_calibration_active() { return g_cal_active; }
+
+    bool vr_hand_calibration_locked(bool left)
+    {
+        return g_cal_active && g_cal_locked[left ? 0 : 1];
+    }
+
+    bool vr_hand_calibration_begin()
+    {
+        if (!g_ready || !g_pose_valid)
+            return false;
+        for (int hand = 0; hand < 2; ++hand)
+            if (!g_grip_offset_valid[hand])
+            {
+                log("vr: hand calibration needs SteamVR grip poses; none yet "
+                    "for the %s hand (hand_model 2 and the shipped "
+                    "bindings provide them)", hand ? "right" : "left");
+                return false;
+            }
+        const vr::HmdMatrix34_t& head =
+            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                .mDeviceToAbsoluteTracking;
+        float fx = -head.m[0][2], fz = -head.m[2][2];
+        const float length = sqrtf(fx * fx + fz * fz);
+        if (length < 1.0e-3f)
+            return false;
+        fx /= length;
+        fz /= length;
+        // Target frame in tracking space: right, up, forward.
+        const float target[3][3] = {
+            { -fz, 0.0f, fx }, { 0.0f, 1.0f, 0.0f }, { fx, 0.0f, fz } };
+
+        // The gun's barrel in grip-local terms, as the aim ray uses it
+        // (camera_head barrel_world): the grip aim, its yaw mirrored for
+        // the left hand, else the shared aim offset.
+        float pitch = 0.0f, yaw = 0.0f;
+        const bool grip_aim = config().hand_model == 2 &&
+                              tune_grip_aim(&pitch, &yaw);
+        if (!grip_aim)
+            tune_aim_offset(&pitch, &yaw);
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            const float p = pitch * 0.0174532925f;
+            const float y = (grip_aim && hand == 0 ? -yaw : yaw) *
+                            0.0174532925f;
+            // Engine local (x right, y down, z forward) to OpenVR local
+            // (y up, z back).
+            float fwd[3] = { sinf(y) * cosf(p), sinf(p),
+                             -cosf(y) * cosf(p) };
+            // Up: the grip's own up, square to the barrel -- thumbs up.
+            float up[3] = { -fwd[1] * fwd[0], 1.0f - fwd[1] * fwd[1],
+                            -fwd[1] * fwd[2] };
+            const float ul = sqrtf(up[0] * up[0] + up[1] * up[1] +
+                                   up[2] * up[2]);
+            if (ul < 1.0e-3f)
+                return false;
+            for (float& v : up)
+                v /= ul;
+            const float right[3] = {
+                fwd[1] * up[2] - fwd[2] * up[1],
+                fwd[2] * up[0] - fwd[0] * up[2],
+                fwd[0] * up[1] - fwd[1] * up[0] };
+            const float* local[3] = { right, up, fwd };
+            // Turn the grip's right/up/barrel onto body right/up/forward.
+            vr::HmdMatrix34_t& pose = g_cal_reference[hand];
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    pose.m[i][j] = target[0][i] * local[0][j] +
+                                   target[1][i] * local[1][j] +
+                                   target[2][i] * local[2][j];
+            const float side = hand == 0 ? -kCalSide : kCalSide;
+            for (int i = 0; i < 3; ++i)
+                pose.m[i][3] = head.m[i][3] + target[0][i] * side +
+                               target[1][i] * kCalUp +
+                               target[2][i] * kCalForward;
+        }
+        g_cal_locked[0] = g_cal_locked[1] = false;
+        g_cal_active = true;
+        log("vr: hand calibration started (hands held %.2f m forward, "
+            "%.2f m down, %.2f m apart; barrel pitch %+.1f, yaw %+.1f)",
+            kCalForward, -kCalUp, 2.0f * kCalSide, pitch, yaw);
+        return true;
+    }
+
+    void vr_hand_calibration_cancel(const char* reason)
+    {
+        if (!g_cal_active)
+            return;
+        g_cal_active = false;
+        log("vr: hand calibration cancelled (%s); nothing saved",
+            reason ? reason : "?");
+    }
+
+    bool vr_hand_calibration_lock(bool left)
+    {
+        const int hand = left ? 0 : 1;
+        if (!g_cal_active || g_cal_locked[hand])
+            return false;
+        Mat4 reference, grip;
+        if (!tracking_pose_to_head(g_cal_reference[hand], &reference) ||
+            !uncorrected_grip_head_pose(hand, &grip))
+            return false;
+        // K * grip = reference, so the hand shows exactly here from now on.
+        const Mat4 k = reference * rigid_inverse(grip);
         const float scale = tune_world_scale();
+        if (!(scale > 0.0f))
+            return false;
+        float c[12]{};
+        for (int r = 0; r < 3; ++r)
+            for (int col = 0; col < 3; ++col)
+                c[r * 3 + col] = k.m[r][col];
+        float distance = 0.0f;
         for (int axis = 0; axis < 3; ++axis)
-            offset.m[3][axis] *= scale;
-        *grip_to_head = offset * raw;
+        {
+            c[9 + axis] = k.m[3][axis] / scale;
+            distance += c[9 + axis] * c[9 + axis];
+        }
+        distance = sqrtf(distance);
+        bool finite = true;
+        for (float v : c)
+            finite = finite && std::isfinite(v);
+        if (!finite || distance > 0.5f)
+        {
+            log("vr: %s hand not locked -- the controller is %.2f m from "
+                "the hand (0.5 m at most)", left ? "left" : "right",
+                distance);
+            return false;
+        }
+        const float angle = acosf(fminf(1.0f, fmaxf(-1.0f,
+            0.5f * (c[0] + c[4] + c[8] - 1.0f)))) * 57.29578f;
+        memcpy(g_cal_pending[hand], c, sizeof(c));
+        g_cal_locked[hand] = true;
+        log("vr: %s hand locked: %.1f degrees and %.3f m from the SteamVR "
+            "grip pose", left ? "left" : "right", angle, distance);
+        if (!g_cal_locked[0] || !g_cal_locked[1])
+            return true;
+        const bool saved = tune_set_hand_correction(true, g_cal_pending[0]) &&
+                           tune_set_hand_correction(false, g_cal_pending[1]);
+        g_cal_active = false;
+        log("vr: hand calibration finished; %s", saved
+            ? "saved to trlvr.ini" : "could NOT be saved to trlvr.ini");
         return true;
     }
 
@@ -2032,6 +2294,34 @@ namespace trlvr
         return zoom;
     }
 
+    // Head view space to this eye's view space, the whole rigid transform the
+    // runtime reports, in the game's axes (x right, y down, z forward; OpenVR
+    // is y up, z back, so S = diag(1,-1,-1) on both sides). The offset alone
+    // used to be applied, with y and z in OpenVR's signs: harmless while both
+    // are a fraction of a millimetre, wrong on a headset that reports depth or
+    // cant. Row vectors: v_eye = (v_head - t) * R, with t scaled to game units.
+    static Mat4 eye_from_head(const EyeInfo& in, float scale)
+    {
+        const float sign[3] = { 1.0f, -1.0f, -1.0f };
+        const float t[3] = { in.offset_x * scale, -in.offset_y * scale,
+                             -in.offset_z * scale };
+        Mat4 m = Mat4::identity();
+        // An unread (all-zero) rotation keeps identity.
+        const bool have_rot = in.rot[0][0] != 0.0f || in.rot[1][1] != 0.0f ||
+                              in.rot[2][2] != 0.0f;
+        for (int i = 0; have_rot && i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                m.m[i][j] = sign[i] * in.rot[i][j] * sign[j];
+        for (int j = 0; j < 3; ++j)
+        {
+            float acc = 0.0f;
+            for (int i = 0; i < 3; ++i)
+                acc += t[i] * m.m[i][j];
+            m.m[3][j] = -acc;
+        }
+        return m;
+    }
+
     Mat4 vr_eye_projection(Eye eye, const GameProjection& game)
     {
         const float zoom = binocular_zoom(game);
@@ -2139,9 +2429,8 @@ namespace trlvr
         const float s = movie ? 0.0f
                       : tune_world_scale() * tune_ipd_scale()
                       * camera_stereo_scale() / zoom;
-        Mat4 offset = g_sky_no_eye_offset ? Mat4::identity()
-            : translation(-in.offset_x * s, -in.offset_y * s, -in.offset_z * s);
-        return offset * proj;
+        return (g_sky_no_eye_offset ? Mat4::identity()
+                                    : eye_from_head(in, s)) * proj;
     }
 }
 

@@ -42,7 +42,7 @@
           "parameters": { "long_press_delay": "0.65", "long_press_expiry": "3.0" },
           "inputs": {
             "single": { "output": "/actions/gameplay/in/weapon" },
-            "double": { "output": "/actions/gameplay/in/gear_tuning" }
+            "double": { "output": "/actions/gameplay/in/pda" }
           }
         },
         {

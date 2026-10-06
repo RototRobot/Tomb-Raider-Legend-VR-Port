@@ -383,6 +383,12 @@ namespace trlvr
         bool g_block_combat_reticle = false;
         DWORD g_combat_reticle_time = 0;
         bool g_combat_reticle_accurate = false;
+        // The world point retail would have put its lock-on reticle on
+        // (playerDrawCombatReticle's Vector3, which playerFindTargetPosition
+        // projects to the screen): the auto-target, for the third-person VR
+        // crosshair.
+        float g_lock_target[3] = { 0.0f, 0.0f, 0.0f };
+        DWORD g_lock_target_time = 0;
         unsigned g_gameplay_target_updates = 0;
 
         bool g_first_person_active = false;
@@ -794,6 +800,8 @@ namespace trlvr
 
         bool laras_long_gun_held();
         int retail_combat_state();
+        void climb_anim_watch(void* lara, uintptr_t vtable, bool precarious,
+                              bool first_person = true);
 
         // Both pistols are in hand (akimbo, or single mode with both drawn).
         bool both_pistols_drawn()
@@ -2383,9 +2391,13 @@ namespace trlvr
             void* prompt = nullptr;
         };
 
-        TraversalProbe first_person_traversal_probe()
+        // owner: the instance whose states are read; null = the first-
+        // person Lara (third person passes Lara for the animation log).
+        TraversalProbe first_person_traversal_probe(void* owner = nullptr)
         {
             TraversalProbe result;
+            if (!owner)
+                owner = g_first_person_instance;
             __try
             {
                 // 0x0111713C points to PlayerData::work. PDB layout puts
@@ -2393,7 +2405,7 @@ namespace trlvr
                 // at +4. Verify the owning instance before following states.
                 const unsigned char* player =
                     *reinterpret_cast<unsigned char* const*>(0x0111713C);
-                if (!player || !g_first_person_instance)
+                if (!player || !owner)
                     return result;
                 result.water =
                     *reinterpret_cast<void* const*>(player + 0x804) != nullptr;
@@ -2408,8 +2420,7 @@ namespace trlvr
                     *reinterpret_cast<void* const*>(player + 0xF5C) != nullptr;
 
                 const unsigned char* data = player - 0x70;
-                if (*reinterpret_cast<void* const*>(data) ==
-                    g_first_person_instance)
+                if (*reinterpret_cast<void* const*>(data) == owner)
                 {
                     const unsigned char* state =
                         *reinterpret_cast<unsigned char* const*>(data + 4);
@@ -3369,11 +3380,18 @@ namespace trlvr
                 }
                 g_first_person_bar_hanging = traversal.bar_hanging;
                 g_first_person_state_vtable = traversal.state_vtable;
+                climb_anim_watch(focus, traversal.state_vtable,
+                                 traversal.precarious);
+                // auto_secure_catch: 0 off, 1 swing bars, 2 everything.
+                const bool auto_secure =
+                    config().auto_secure_catch == 2 ||
+                    (config().auto_secure_catch == 1 &&
+                     traversal.bar_hanging);
                 if (traversal.precarious != g_first_person_grip_precarious)
                 {
                     log("first-person: precarious one-hand catch %s",
                         !traversal.precarious ? "ended"
-                        : config().auto_secure_catch
+                        : auto_secure
                             ? "-- securing it automatically (auto_secure_catch)"
                             : "-- grab the hold to secure");
                     g_auto_secure_at = traversal.precarious ? GetTickCount() : 0;
@@ -3383,7 +3401,7 @@ namespace trlvr
                 // auto_secure_catch: the Action pulse a grab would send,
                 // 0.2 s after the catch (a press on its first frame may not
                 // count), again every 0.6 s while it is still precarious.
-                if (traversal.precarious && config().auto_secure_catch &&
+                if (traversal.precarious && auto_secure &&
                     g_auto_secure_at && g_auto_secure_pulses < 4)
                 {
                     const DWORD due = g_auto_secure_at + 200 +
@@ -6991,6 +7009,215 @@ namespace trlvr
             return -1;
         }
 
+        // Ledge pull-up and one-hand catch animations (user 2026-10-06):
+        // retail picks between pull-ups of different lengths, and a one-hand
+        // catch drops her after some time. Every animation change during
+        // LedgeClimb (0x00F05804) or a precarious catch is logged with its
+        // keylist length (u16 keys at +4, s16 ms per key at +6), plus how
+        // long the state lasted. [vr] first_person_pullup_anim = N with
+        // first_person_pullup_replace = a,b,c swaps any of a,b,c for N when
+        // it starts during a first-person pull-up (empty = retail).
+        struct ClimbWatch
+        {
+            bool loaded = false;
+            int pullup_anim = -1;
+            int replace[8]{};
+            int replace_count = 0;
+            // One-hand catch: seconds added by restarting its animation.
+            float catch_extra = 4.5f;
+            int catch_anim = -1;
+            DWORD catch_restart_due = 0;
+            DWORD catch_grace_end = 0;
+            unsigned catch_restarts = 0;
+            int kind = 0;               // 0 none, 1 pull-up, 2 one-hand catch
+            unsigned number[3]{};
+            DWORD start = 0;
+            void* keylist = nullptr;
+        };
+        ClimbWatch g_climb_watch;
+
+        void climb_watch_load()
+        {
+            ClimbWatch& w = g_climb_watch;
+            w.loaded = true;
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%strlvr.ini", exe_dir());
+            // Test 2026-10-06: tapping Up pulled up with animation 266 in
+            // about 1.1 s, holding it with 236 in 2.5 s; first person
+            // always gets 266. -1 = retail choice.
+            w.pullup_anim = (int)GetPrivateProfileIntW(L"vr",
+                L"first_person_pullup_anim", 266, path);
+            wchar_t text[128]{};
+            GetPrivateProfileStringW(L"vr", L"first_person_pullup_replace",
+                                     L"236", text, _countof(text), path);
+            // A one-hand catch (animation 257) dropped Lara 1.53 s after
+            // it began; restarting the animation before it ends is tried
+            // for catch_extra_time more seconds (0 = retail).
+            wchar_t extra[32]{};
+            GetPrivateProfileStringW(L"vr", L"catch_extra_time", L"4.5",
+                                     extra, _countof(extra), path);
+            w.catch_extra = (float)_wtof(extra);
+            if (!(w.catch_extra >= 0.0f) || w.catch_extra > 10.0f)
+                w.catch_extra = 4.5f;
+            const wchar_t* p = text;
+            while (*p && w.replace_count < 8)
+            {
+                wchar_t* end = nullptr;
+                const long v = wcstol(p, &end, 10);
+                if (end == p)
+                {
+                    ++p;
+                    continue;
+                }
+                w.replace[w.replace_count++] = (int)v;
+                p = end;
+            }
+            if (w.pullup_anim >= 0 && w.replace_count)
+                log("first-person: pull-up animation %d replaces %d listed "
+                    "alternative(s)", w.pullup_anim, w.replace_count);
+        }
+
+        // The secure window: ButtonPrompt::Show (0x00566C00) stores its
+        // float argument -- from a per-difficulty table -- at
+        // PlayerData+0x6B4, in 30 fps frames (45.00 for the 1.5 s window in
+        // the 2026-10-06 test; it reads 0 once the catch ends). Extending the animation
+        // alone kept Lara hanging but the window still closed at 1.51 s.
+        bool catch_window(float add, float* before, float* after)
+        {
+            __try
+            {
+                unsigned char* player =
+                    *reinterpret_cast<unsigned char* const*>(0x0111713C);
+                if (!player)
+                    return false;
+                float* window = reinterpret_cast<float*>(player + 0x6B4);
+                *before = *window;
+                if (add > 0.0f && std::isfinite(*window))
+                    *window += add;
+                *after = *window;
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        bool keylist_length(void* keylist, unsigned* keys, int* ms)
+        {
+            __try
+            {
+                const unsigned char* k =
+                    static_cast<const unsigned char*>(keylist);
+                *keys = *reinterpret_cast<const unsigned short*>(k + 4);
+                *ms = *reinterpret_cast<const short*>(k + 6);
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        void climb_anim_watch(void* lara, uintptr_t vtable, bool precarious,
+                              bool first_person)
+        {
+            ClimbWatch& w = g_climb_watch;
+            if (!w.loaded)
+                climb_watch_load();
+            const int kind = vtable == 0x00F05804 ? 1 : precarious ? 2 : 0;
+            const DWORD now = GetTickCount();
+            const char* names[3] = { "", "ledge pull-up", "one-hand catch" };
+            if (kind != w.kind)
+            {
+                if (w.kind)
+                {
+                    float before = 0.0f, after = 0.0f;
+                    if (w.kind == 2 && catch_window(0.0f, &before, &after))
+                        log("anim: %s %u ended after %.2f s (window now "
+                            "%.2f)", names[w.kind], w.number[w.kind],
+                            (now - w.start) / 1000.0f, after);
+                    else
+                        log("anim: %s %u ended after %.2f s", names[w.kind],
+                            w.number[w.kind], (now - w.start) / 1000.0f);
+                }
+                w.kind = kind;
+                w.keylist = nullptr;
+                w.catch_anim = -1;
+                if (kind)
+                {
+                    w.start = now;
+                    ++w.number[kind];
+                }
+                if (kind == 2)
+                {
+                    const bool bar_hold = vtable == 0x00F05CA8;
+                    const bool secured_auto =
+                        config().auto_secure_catch == 2 ||
+                        (config().auto_secure_catch == 1 && bar_hold);
+                    float before = 0.0f, after = 0.0f;
+                    if (first_person && !secured_auto &&
+                        catch_window(w.catch_extra * 30.0f, &before,
+                                     &after))
+                        log("anim: one-hand catch %u: secure window %.2f -> "
+                            "%.2f (PlayerData+0x6B4)", w.number[2], before,
+                            after);
+                    w.catch_restart_due = now + 1100;
+                    w.catch_grace_end = now + 1100 +
+                        (DWORD)(w.catch_extra * 1000.0f);
+                    w.catch_restarts = 0;
+                }
+            }
+            if (!kind || !lara)
+                return;
+            // More time on a one-hand catch the player secures by hand
+            // (first person, auto_secure_catch not covering this hold).
+            const bool bar = vtable == 0x00F05CA8;
+            const bool auto_secure = config().auto_secure_catch == 2 ||
+                                     (config().auto_secure_catch == 1 && bar);
+            if (kind == 2 && first_person && !auto_secure &&
+                w.catch_anim >= 0 && w.catch_extra > 0.0f &&
+                (int)(now - w.catch_restart_due) >= 0 &&
+                (int)(w.catch_grace_end - now) > 0 &&
+                lara_play_animation(lara, w.catch_anim, false))
+            {
+                ++w.catch_restarts;
+                w.catch_restart_due = now + 1100;
+                w.keylist = lara_current_keylist(lara);
+                log("anim: one-hand catch %u: animation %d restarted (%u) "
+                    "for more time", w.number[2], w.catch_anim,
+                    w.catch_restarts);
+            }
+            void* keylist = lara_current_keylist(lara);
+            if (!keylist || keylist == w.keylist)
+                return;
+            w.keylist = keylist;
+            const int anim = lara_anim_index_of(lara, keylist);
+            if (kind == 2 && w.catch_anim < 0)
+                w.catch_anim = anim;
+            // (The keylist header guess, keys at +4 / ms at +6, read
+            // nonsense in the 2026-10-06 log; durations come from the
+            // state timings instead.)
+            log("anim: %s %u: animation %d at +%.2f s", names[kind],
+                w.number[kind], anim, (now - w.start) / 1000.0f);
+            // The swap is first person only (user 2026-10-06); third
+            // person just logs.
+            if (!first_person || kind != 1 || w.pullup_anim < 0 ||
+                anim < 0 || anim == w.pullup_anim)
+                return;
+            for (int i = 0; i < w.replace_count; ++i)
+                if (w.replace[i] == anim && lara_keylist(lara, w.pullup_anim))
+                {
+                    if (lara_play_animation(lara, w.pullup_anim, false))
+                    {
+                        w.keylist = lara_keylist(lara, w.pullup_anim);
+                        log("anim: pull-up animation %d replaced by %d",
+                            anim, w.pullup_anim);
+                    }
+                    break;
+                }
+        }
+
         void dangle_load()
         {
             if (g_dangle_loaded)
@@ -9736,10 +9963,30 @@ namespace trlvr
             return true;
         }
 
+        void* lara_instance()
+        {
+            __try
+            {
+                return *reinterpret_cast<void* const*>(kPlayerInstance);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return nullptr;
+            }
+        }
+
         bool third_person_camera_position(void* cam, const Mat4& retail,
                                           float out[3])
         {
-            const int mode = config().third_person_mode;
+            // Pull-up / one-hand catch animation log in third person too.
+            {
+                void* lara = lara_instance();
+                const TraversalProbe probe =
+                    first_person_traversal_probe(lara);
+                climb_anim_watch(lara, probe.state_vtable,
+                                 probe.precarious, false);
+            }
+            const int mode = camera_third_person_mode();
             Mat4 unscaled = retail;
             remove_view_prescale(&unscaled, nullptr, nullptr);
             const Mat4 to_world = rigid_inverse(unscaled);
@@ -10158,7 +10405,7 @@ namespace trlvr
             bool first_person = false;
             if (main_camera)
             {
-                if (config().first_person && drive)
+                if (camera_view_first_person() && drive)
                     first_person = first_person_resolve(
                         cam, mode, first_person_position);
                 else if (g_first_person_active || g_first_person_instance)
@@ -10223,7 +10470,7 @@ namespace trlvr
                 !camera_cinematic_playing() &&
                 !(ui_menu_active() && !ui_pause_menu_active()))
             {
-                g_tp_board_scale = config().third_person_mode == 2;
+                g_tp_board_scale = camera_third_person_mode() == 2;
                 tp_override = third_person_camera_position(
                     cam, base_camera, tp_position);
             }
@@ -10423,21 +10670,27 @@ namespace trlvr
         // game places those flat sprites from its own camera, and the HUD
         // policy then moves them again with the head, so in first person they
         // are replaced by the 3D crosshair drawn at the real impact point.
+        // Every view uses the VR crosshair now (user 2026-10-06): first
+        // person aims directly (controller ray impact), third person shows
+        // the game's auto-target, captured from the lock-on rings retail is
+        // no longer allowed to draw.
         void __cdecl detour_draw_combat_lock()
         {
             const int state = config().vr_crosshair
                 ? retail_combat_state() : 0;
-            // Third person keeps the retail lock-on reticles (world markers,
-            // placed correctly); only precision aim's centre crosshair is
-            // replaced.
-            if (!config().vr_crosshair || (!camera_first_person_active() &&
-                                           state != 0x20))
+            if (!config().vr_crosshair)
             {
                 g_draw_combat_lock();
                 return;
             }
             if (state == 0)
+            {
+                // Out of combat retail draws no reticle; third person still
+                // runs it for its other sense sprites.
+                if (!camera_first_person_active())
+                    g_draw_combat_lock();
                 return;
+            }
             g_combat_reticle_time = GetTickCount();
             g_combat_reticle_accurate = state == 0x20;
             // First person: the retail function still runs for the caution
@@ -10450,14 +10703,19 @@ namespace trlvr
                 g_draw_combat_lock();
                 g_block_combat_reticle = false;
             }
-            static bool reported = false;
-            if (!reported)
+            static bool reported[2] = { false, false };
+            const int view = camera_first_person_active() ? 0 : 1;
+            if (!reported[view])
             {
-                reported = true;
-                log("aim: retail combat reticles suppressed; VR crosshair "
-                    "drawn at the %s impact point",
-                    config().controller_aim ? "right-controller"
-                                            : "headset");
+                reported[view] = true;
+                if (view == 0)
+                    log("aim: retail combat reticles suppressed; VR crosshair "
+                        "drawn at the %s impact point",
+                        config().controller_aim ? "right-controller"
+                                                : "headset");
+                else
+                    log("aim: third person -- retail lock-on reticles "
+                        "replaced by the VR crosshair on the auto-target");
             }
         }
 
@@ -10466,7 +10724,24 @@ namespace trlvr
                                                 float d)
         {
             if (g_block_combat_reticle)
+            {
+                __try
+                {
+                    const float* p = static_cast<const float*>(position);
+                    if (p && std::isfinite(p[0]) && std::isfinite(p[1]) &&
+                        std::isfinite(p[2]))
+                    {
+                        g_lock_target[0] = p[0];
+                        g_lock_target[1] = p[1];
+                        g_lock_target[2] = p[2];
+                        g_lock_target_time = GetTickCount();
+                    }
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
                 return;
+            }
             g_draw_combat_reticle(position, a, b, c, d);
         }
 
@@ -10507,11 +10782,12 @@ namespace trlvr
 
             // The one place the mod is handed a whole Camera rather than just
             // its core, so the one place that can see what it is following.
-            // The shoulder camera auto-centres behind Lara; the board camera
-            // never swings on its own; classic follows camera_auto_center.
-            const int tp_mode = config().third_person_mode;
-            if (!camera_first_person_active() &&
-                (tp_mode == 1 || (tp_mode == 0 && tune_camera_auto_center())))
+            // Classic and shoulder follow camera_auto_center (shoulder used
+            // to always auto-centre behind Lara; user 2026-10-06: rotate it
+            // like classic); the board camera never swings on its own.
+            const int tp_mode = camera_third_person_mode();
+            if (!camera_first_person_active() && tp_mode != 2 &&
+                tune_camera_auto_center())
                 return;
             if (camera_first_person_active() && tune_camera_auto_center())
                 return;
@@ -11556,6 +11832,60 @@ namespace trlvr
         return g_first_person_active;
     }
 
+    namespace
+    {
+        int g_view_first_person = -1;   // -1: not read from config yet
+        int g_tp_mode = -1;             // -1: not read from config yet
+    }
+
+    int camera_third_person_mode()
+    {
+        if (g_tp_mode < 0)
+            g_tp_mode = config().third_person_mode;
+        return g_tp_mode;
+    }
+
+    bool camera_view_first_person()
+    {
+        if (g_view_first_person < 0)
+            g_view_first_person = config().first_person ? 1 : 0;
+        return g_view_first_person != 0;
+    }
+
+    void camera_toggle_view(const char* why)
+    {
+        // third_person_mode = all: classic -> shoulder -> board -> first
+        // person -> classic. Otherwise first person <-> the set preset.
+        bool first = !camera_view_first_person();
+        if (config().view_cycle_all)
+        {
+            const int mode = camera_third_person_mode();
+            if (camera_view_first_person())
+            {
+                first = false;
+                g_tp_mode = 0;
+            }
+            else if (mode < 2)
+            {
+                first = false;
+                g_tp_mode = mode + 1;
+            }
+            else
+                first = true;
+        }
+        g_view_first_person = first ? 1 : 0;
+        if (!first)
+            log("view: third-person preset %s",
+                camera_third_person_mode() == 1 ? "shoulder"
+                : camera_third_person_mode() == 2 ? "board" : "classic");
+        // Leaving first person: the next camera build sees the flag and
+        // calls first_person_leave (head, hands, gear restored); entering
+        // it resolves the first-person eye on the next build.
+        log("view: switched to %s (%s)", first ? "first person"
+                                               : "third person",
+            why ? why : "?");
+    }
+
     float camera_comfort_vignette()
     {
         static float strength = 0.0f;
@@ -11763,17 +12093,24 @@ namespace trlvr
         if (!head_point || !config().vr_crosshair)
             return false;
         const bool first_person = camera_first_person_active();
-        if (!first_person && !g_combat_reticle_accurate)
-            return false;
         // Retail combat state can outlive the holster (it only gates its
         // own reticle). With immersive holsters, the drawn guns decide.
         if (first_person && config().immersive_controls &&
             !vr_input_holster_combat_held())
             return false;
         const DWORD now = GetTickCount();
-        if (!g_combat_reticle_time || now - g_combat_reticle_time > 200 ||
-            !g_aim_point_time || now - g_aim_point_time > 200)
+        if (!g_combat_reticle_time || now - g_combat_reticle_time > 200)
             return false;
+        // Third person outside precision aim: on the game's auto-target,
+        // where its lock-on rings would have been. No target, no crosshair
+        // (as retail).
+        const bool on_lock = !first_person && !g_combat_reticle_accurate;
+        if (on_lock && (!g_lock_target_time ||
+                        now - g_lock_target_time > 200))
+            return false;
+        if (!on_lock && (!g_aim_point_time || now - g_aim_point_time > 200))
+            return false;
+        const float* world_point = on_lock ? g_lock_target : g_aim_point;
         Mat4 camera_to_world;
         memcpy(&camera_to_world.m[0][0],
                static_cast<const unsigned char*>(kMainCamera) +
@@ -11783,13 +12120,14 @@ namespace trlvr
         {
             float value = world_to_head.m[3][axis];
             for (int row = 0; row < 3; ++row)
-                value += g_aim_point[row] * world_to_head.m[row][axis];
+                value += world_point[row] * world_to_head.m[row][axis];
             if (!std::isfinite(value))
                 return false;
             head_point[axis] = value;
         }
         if (style)
-            *style = (g_combat_reticle_accurate ? 1 : 0) |
+            *style = on_lock ? (2 | 4) :
+                     (g_combat_reticle_accurate ? 1 : 0) |
                      (g_aim_point_hit ? 2 : 0) |
                      (g_aim_point_enemy ? 4 : 0);
         return head_point[2] > 1.0f;
@@ -12449,7 +12787,10 @@ namespace trlvr
         if (config().hmd_aim)
             log("aim: head-directed free-fire target enabled (camera mode 13)");
 
-        if (config().first_person)
+        log("view: starting in %s (right stick long press or \\ switches "
+            "live)", camera_view_first_person() ? "first person"
+                                                : "third person");
+        if (camera_view_first_person())
         {
             log("first-person: EXPERIMENTAL mode requested; gameplay view will "
                 "use a fixed root-local eye anchor, with safe menu/cinematic fallback");
@@ -12467,7 +12808,7 @@ namespace trlvr
         }
 
         // Third-person immersive draws controller hands from this hook too.
-        if ((config().first_person && config().first_person_tracked_hands) ||
+        if (config().first_person_tracked_hands ||
             config().immersive_controls)
         {
             tramp = nullptr;
@@ -12494,7 +12835,9 @@ namespace trlvr
                 g_set_indices_ptr = (PFN_SetIndicesPtr)tramp;
         }
 
-        if (config().first_person)
+        // First-person hooks: installed in either starting view so the view
+        // can switch live; each passes straight through unless first person
+        // is active (g_first_person_active).
         {
             tramp = nullptr;
             if (hook_install((void*)kFilteredInputUpdate,
@@ -12575,7 +12918,7 @@ namespace trlvr
                     reinterpret_cast<PFN_DrawCombatReticle>(tramp);
         }
 
-        if (config().first_person && config().immersive_controls)
+        if (config().immersive_controls)
         {
             tramp = nullptr;
             if (hook_install((void*)kPlayerInvEndCombatMode,
@@ -12611,7 +12954,6 @@ namespace trlvr
                 g_group_draw = reinterpret_cast<PFN_GroupDraw>(tramp);
         }
 
-        if (config().first_person)
         {
             tramp = nullptr;
             if (hook_install((void*)kG2InstanceBuildTransforms,

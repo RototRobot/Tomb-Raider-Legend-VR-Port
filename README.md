@@ -106,12 +106,16 @@ start-up.
 - **Hand-over-hand traversal**: grip ledges, vines, chains and swing bars and
   pull yourself along them; alternate hands quickly to shimmy fast; pull down
   with both hands to climb onto a ledge. A one-hand catch is secured by
-  grabbing the hold (or automatically, with `auto_secure_catch = 1`).
+  grabbing the hold (or automatically, with `auto_secure_catch = bars` or `all`).
 - **Jumps go where you look** off chains and poles; on vines the stick works
   relative to your view.
 - **Physical crouch**: crouch for real to crouch.
-- **Holster setup in game**: Pause menu → *VR Holster Setup* lets you place the
-  holsters, belt items and pouches where they suit your body.
+- **Holster setup in game**: Pause menu → *VR Settings* → *VR Holster Setup*
+  lets you place the holsters, belt items and pouches where they suit your body.
+- **Hand calibration in game**: Pause menu → *VR Settings* → *Hand Calibration*
+  holds Lara's hands out in front of you; move each controller into its hand
+  and squeeze the grip to lock it. Fixes hands that do not line up with your
+  controllers on any headset.
 - **Left-handed mode**, akimbo or single pistols, and three aiming styles.
 
 ### Interface and comfort
@@ -196,7 +200,7 @@ Defaults for Oculus Touch-style controllers (Reverb G2, Quest, Rift):
 | Left stick | Move |
 | Left stick click / double click / hold | Pause / recentre the view / health pack |
 | Right stick | Turn |
-| Right stick click / hold | Switch weapons / binoculars |
+| Right stick click / double click / hold | Switch weapons / PDA / binoculars |
 | Left trigger | Action, interact, pull the grapple |
 | Right trigger | Fire; select in menus |
 | Left grip | Throw the grapple |
@@ -252,6 +256,10 @@ first_person_tracked_hands = 1
 immersive_controls = 1
 ```
 
+`first_person` only sets the view you start in. With immersive controls on,
+**long-press the right stick** (or press `\` on the keyboard) to switch between
+first and third person at any time in gameplay.
+
 ### The settings most worth knowing
 
 | Setting | Default | What it does |
@@ -260,7 +268,7 @@ immersive_controls = 1
 | `first_person_tracked_hands` | `0` | Lara's hands follow your controllers (first person) |
 | `immersive_controls` | `0` | Hand gestures: holsters, belt gear, pouches, hand climbing, gear cross |
 | `first_person_body` | `hands` | `full` draws Lara's whole body below the view |
-| `third_person_mode` | `classic` | `classic`, `shoulder` or `board` |
+| `third_person_mode` | `classic` | `classic`, `shoulder` or `board`; `all` makes the right-stick long press cycle classic → shoulder → board → first person |
 | `left_handed` | `0` | Main hand on the left; swaps the triggers' roles |
 | `pistol_mode` | `akimbo` | `single`: each hip draws its own pistol, fired by that hand |
 | `aim_mode` | `hand` | `hands` aims between both pistols; `hands_head` mixes in the headset |
@@ -268,7 +276,9 @@ immersive_controls = 1
 | `turn_mode` | `smooth` | `snap` turns by `snap_turn_degrees` (30) |
 | `comfort_vignette` | `off` | `jumps` or `full` darkens the edge of view while moving |
 | `physical_crouch` | `1` | Crouch for real to crouch |
-| `auto_secure_catch` | `0` | One-hand catches secure themselves (no grab needed) |
+| `auto_secure_catch` | `off` | One-hand catches secure themselves: `bars` (swing bars only) or `all` (ledges and bars) |
+| `catch_extra_time` | `4.5` | Extra seconds to secure a one-hand catch by hand (first person, about 6 s in all; `0` = game timing) |
+| `first_person_pullup_anim` | `266` | Ledge pull-up animation used in first person (`-1` = the game's choice); replaces those in `first_person_pullup_replace` (`236`, the slow one) |
 | `first_person_no_spread` | `1` | Shots go exactly where the gun points |
 | `camera_collision` | `1` | Third-person view stops short of walls |
 | `ui_scale` | `0.6` | Size of the HUD and menus |

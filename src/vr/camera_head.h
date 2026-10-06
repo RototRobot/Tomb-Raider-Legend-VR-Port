@@ -32,6 +32,16 @@ namespace trlvr
     // True only while the opt-in first-person path has a validated gameplay
     // Lara/head anchor. Menus and cinematics deliberately fall back safely.
     bool camera_first_person_active();
+    // The chosen view: first_person in trlvr.ini at start, switched live
+    // (user request 2026-10-06) by camera_toggle_view -- right stick long
+    // press with immersive controls, or \ on the keyboard. First person is
+    // only *active* in gameplay; this is what the player picked.
+    bool camera_view_first_person();
+    void camera_toggle_view(const char* why);
+    // The third-person preset in use (0 classic, 1 shoulder, 2 board):
+    // third_person_mode at start; with third_person_mode = all the view
+    // switch steps through every preset and first person in turn.
+    int camera_third_person_mode();
     // 1 normally; the tabletop factor (Lara's real height / board height)
     // while the board-game third-person camera is in use.
     float camera_world_scale_factor();

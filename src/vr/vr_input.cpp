@@ -45,6 +45,7 @@
 #include "tune.h"
 #include "vr_gesture.h"
 #include "vr_session.h"
+#include "vr_submit.h"
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -89,6 +90,10 @@ namespace trlvr
             { "/actions/gameplay/in/binoculars", KEY,        VK_NEXT,   0, false },
             { "/actions/gameplay/in/recentre",   RECENTRE,   0,         0, false },
             { "/actions/gameplay/in/gear_tuning", GEAR_TUNING, 0,       0, false },
+            // The PDA (retail Tab, Input slot 11; tester report 2026-10-06:
+            // it had no button). Right stick double-click, which developer
+            // gear tuning had (F6 still opens that).
+            { "/actions/gameplay/in/pda",        KEY,        VK_TAB,    0, false },
         };
 
         const int kGameButtons = (int)(sizeof(g_game) / sizeof(g_game[0]));
@@ -97,7 +102,7 @@ namespace trlvr
             GameJump, GameInteract, GameDive, GameFire, GameGrapple,
             GameGrenade, GameAim, GameLockOn, GameWeapon, GamePause,
             GameMedkit, GameLight, GameBinoculars, GameRecentre,
-            GameGearTuning
+            GameGearTuning, GamePda
         };
 
         vr::IVRInput*  g_input = nullptr;
@@ -153,6 +158,9 @@ namespace trlvr
         bool g_ledge_pull_up = false;
         DWORD g_ledge_pull_requested_at = 0;
         bool g_ledge_climb_followthrough = false;
+        // Jump is tapped, not held, for a two-hand pull-up: holding it is
+        // what picks the game's slow pull-up (user 2026-10-06).
+        DWORD g_ledge_jump_until = 0;
         bool g_vine_pull_up = false;
         bool g_vine_pull_down = false;
         bool g_vine_pull_left = false;
@@ -498,6 +506,23 @@ namespace trlvr
         bool     g_tuning_trigger_was[2] = { false, false };
         // The trigger that placed the last item is ignored until released.
         bool     g_tuning_trigger_hold[2] = { false, false };
+        // Hand calibration: button edges, and whether it drew the pistols
+        // (put away again when it ends).
+        bool     g_cal_grip_was[2] = { false, false };
+        bool     g_cal_pause_was = false;
+        // Holster setup: the menu button cancels it (the right-stick
+        // double-click that used to is now the PDA).
+        bool     g_tuning_pause_was = false;
+        // The menu button that cancelled a setup does not also pause the
+        // game: held back until it is released.
+        bool     g_pause_hold = false;
+        // View switch: right stick long press (the binoculars action, free
+        // in both immersive views) and the \ key.
+        bool     g_view_button_was = false;
+        // A recentre a moment after the view switch (user 2026-10-06), once
+        // the new camera has settled.
+        ULONGLONG g_view_recenter_at = 0;
+        bool     g_cal_drew_guns = false;
 
         using PFN_PlayerCombat = void(__cdecl*)();
         using PFN_CombatAllowed = bool(__cdecl*)();
@@ -683,8 +708,19 @@ namespace trlvr
             }
         }
 
-        void update_holster_gesture(bool active)
+        // suspended: a menu is open. Pausing used to reset the gesture,
+        // which cleared the VR draw state and called EndCombatMode while
+        // the game was paused; if retail did not act on it, Lara came back
+        // with pistols out that the mod thought were holstered (open hands,
+        // retail-placed guns). Now a pause leaves everything as it was.
+        void update_holster_gesture(bool active, bool suspended = false)
         {
+            if (!active && suspended)
+            {
+                g_holster_grip_was[0] = digital(g_game[GameGrapple].handle);
+                g_holster_grip_was[1] = digital(g_game[GameLockOn].handle);
+                return;
+            }
             if (!active)
             {
                 reset_holster_gesture();
@@ -1315,7 +1351,10 @@ namespace trlvr
             }
         }
 
-        void release_all()
+        // keep_gear: leave drawn guns and held gear alone (hand calibration
+        // releases every key each frame but wants the pistols out; resetting
+        // the holster gesture ended combat at once, user test 2026-10-06).
+        void release_all(bool keep_gear = false)
         {
             static const bool none[256] = { false };
             apply(none, false);
@@ -1341,7 +1380,8 @@ namespace trlvr
             g_mouse_rem[0] = g_mouse_rem[1] = 0.0f;
             g_light_grip_was = false;
             g_light_key_pulse = false;
-            reset_holster_gesture();
+            if (!keep_gear)
+                reset_holster_gesture();
             camera_first_person_ledge_grip_input(
                 true, digital(g_game[GameGrapple].handle), false);
             camera_first_person_ledge_grip_input(
@@ -2075,7 +2115,8 @@ namespace trlvr
                 "right grip lock-on", "right stick weapon",
                 "left stick pause", "left stick long medkit",
                 "Y long light", "right stick long binoculars",
-                "left stick double recentre", "right stick double tuning" };
+                "left stick double recentre", "right stick double tuning",
+                "right stick double PDA" };
             for (int i = 0; i < kGameButtons && i < 32; ++i)
             {
                 const bool on = digital(g_game[i].handle);
@@ -2100,6 +2141,158 @@ namespace trlvr
             }
         }
 
+        // Hand calibration, chosen in the pause menu (the Next Generation
+        // Content entry, user 2026-10-06). Starts once back in gameplay:
+        // Lara's hands are held out in front, pistols drawn in first person,
+        // and each grip locks its hand where the controller is.
+        if (vr_hand_calibration_menu_pending() && !menu)
+        {
+            vr_hand_calibration_clear_menu_request();
+            g_menu_request_at = 0;
+            const bool hands_shown =
+                (immersive_first_person &&
+                 config().first_person_tracked_hands) ||
+                immersive_third_person;
+            if (!hands_shown)
+            {
+                log("controls: hand calibration needs immersive controls "
+                    "with tracked hands");
+                vr_submit_notice(L"Hand Calibration", L"Hand calibration "
+                    L"needs Lara's hands on your controllers: first person "
+                    L"with first_person_tracked_hands = 1, or third person.");
+            }
+            else if (tune_gear_tuning_active())
+                log("controls: hand calibration waits for holster setup");
+            else if (!vr_hand_calibration_begin())
+                vr_submit_notice(L"Hand Calibration", L"Your controllers' "
+                    L"grip poses are not available yet. Make sure both "
+                    L"controllers are on and tracked, then try again.");
+            else
+            {
+                if (g_binocular_hand >= 0 || g_grapple_hand >= 0 ||
+                    g_grenade_hand >= 0 || g_medipack_hand >= 0)
+                    reset_holster_gesture();
+                release_all(true);
+                g_cal_grip_was[0] = digital(g_game[GameGrapple].handle);
+                g_cal_grip_was[1] = digital(g_game[GameLockOn].handle);
+                g_cal_pause_was = digital(g_game[GamePause].handle);
+                g_cal_drew_guns = false;
+                if (immersive_first_person && !g_holster_drawn[0] &&
+                    !g_holster_drawn[1] && g_binocular_hand < 0 &&
+                    g_grapple_hand < 0 &&
+                    find_weapon_slot(WeaponPistols) >= 0)
+                {
+                    bool allowed = false;
+                    __try
+                    {
+                        allowed = reinterpret_cast<PFN_CombatAllowed>(
+                            kPlayerCombatAllowed)();
+                    }
+                    __except(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        allowed = false;
+                    }
+                    if (allowed)
+                    {
+                        select_weapon_kind(WeaponPistols, false);
+                        g_holster_drawn[0] = g_holster_drawn[1] = true;
+                        g_pistol_draw_hand = 1;
+                        g_pistol_drawn_at = GetTickCount64();
+                        reinterpret_cast<PFN_PlayerCombat>(
+                            kPlayerInvEnterIndicatorMode)();
+                        g_cal_drew_guns = true;
+                    }
+                    else
+                        log("controls: hand calibration without pistols "
+                            "(combat not allowed here)");
+                }
+            }
+        }
+        if (vr_hand_calibration_active())
+        {
+            if (menu)
+                vr_hand_calibration_cancel("menu opened");
+            else
+            {
+                Button& recentre_button = g_game[GameRecentre];
+                const bool recentre_down = digital(recentre_button.handle);
+                if (recentre_down && !recentre_button.was)
+                    vr_recenter();
+                recentre_button.was = recentre_down;
+                release_all(true);
+                const bool pause_down = digital(g_game[GamePause].handle);
+                const bool pause_pressed = pause_down && !g_cal_pause_was;
+                g_cal_pause_was = pause_down;
+                const bool grips[2] = {
+                    digital(g_game[GameGrapple].handle),
+                    digital(g_game[GameLockOn].handle)
+                };
+                if (pause_pressed)
+                {
+                    vr_hand_calibration_cancel("menu button");
+                    g_pause_hold = true;
+                }
+                for (int hand = 0; hand < 2; ++hand)
+                {
+                    const bool pressed = grips[hand] && !g_cal_grip_was[hand];
+                    g_cal_grip_was[hand] = grips[hand];
+                    if (pressed && vr_hand_calibration_active() &&
+                        vr_hand_calibration_lock(hand == 0))
+                        vr_input_handhold_haptic(hand == 0);
+                }
+                if (!vr_hand_calibration_active())
+                {
+                    if (g_cal_drew_guns && g_holster_drawn[0] &&
+                        g_holster_drawn[1])
+                    {
+                        g_holster_drawn[0] = g_holster_drawn[1] = false;
+                        g_pistol_draw_hand = -1;
+                        g_pistol_drawn_at = 0;
+                        reinterpret_cast<PFN_PlayerCombat>(
+                            kPlayerInvEndCombatMode)();
+                    }
+                    g_cal_drew_guns = false;
+                    // Grips and triggers still held must not grab or fire.
+                    g_holster_grip_was[0] = grips[0];
+                    g_holster_grip_was[1] = grips[1];
+                    g_light_grip_was = grips[0];
+                    g_tuning_trigger_hold[0] =
+                        digital(g_game[GameInteract].handle);
+                    g_tuning_trigger_hold[1] =
+                        digital(g_game[GameFire].handle);
+                }
+                return;
+            }
+        }
+
+        // Live first/third-person switch (user request 2026-10-06). Not in
+        // menus, setups or calibration; guns and held gear are put away
+        // first so neither view inherits the other's hand state.
+        {
+            const bool view_down = config().immersive_controls &&
+                digital(g_game[GameBinoculars].handle);
+            const bool view_key = (GetAsyncKeyState(VK_OEM_5) & 1) != 0;
+            const bool pressed = (view_down && !g_view_button_was) ||
+                                 view_key;
+            g_view_button_was = view_down;
+            if (pressed && !menu && !tune_gear_tuning_active() &&
+                !vr_hand_calibration_active() && !ui_loading_screen_active() &&
+                !camera_cinematic_playing())
+            {
+                reset_holster_gesture();
+                release_all();
+                camera_toggle_view(view_key ? "\\ key"
+                                            : "right stick long press");
+                g_view_recenter_at = GetTickCount64() + 250;
+            }
+            if (g_view_recenter_at && GetTickCount64() >= g_view_recenter_at)
+            {
+                g_view_recenter_at = 0;
+                if (!menu)
+                    vr_recenter();
+            }
+        }
+
         // Gear tuning. The double-click is its own SteamVR action (F6 on the
         // keyboard), so it never reaches the game as a weapon switch.
         Button& tuning = g_game[GameGearTuning];
@@ -2120,8 +2313,13 @@ namespace trlvr
                 g_menu_tuning = true;
             }
             else
+            {
                 log("controls: holster setup needs immersive first person "
                     "with tracked hands");
+                vr_submit_notice(L"VR Holster Setup", L"Holster setup works "
+                    L"in first person with tracked hands. Set first_person = "
+                    L"1 and first_person_tracked_hands = 1 in trlvr.ini.");
+            }
         }
         const bool tuning_possible =
             (tune_gear_tuning_enabled() || g_menu_tuning) &&
@@ -2134,25 +2332,31 @@ namespace trlvr
             tune_gear_tuning_cancel("double-click");
         else if ((tuning_pressed || menu_start) && tuning_possible)
         {
-            if (menu_start && (g_holster_drawn[0] || g_holster_drawn[1]))
+            if (menu_start && (g_holster_drawn[0] || g_holster_drawn[1] ||
+                               g_binocular_hand >= 0 || g_grapple_hand >= 0 ||
+                               g_grenade_hand >= 0 || g_medipack_hand >= 0))
             {
-                // Put the guns away so the placement can start.
-                g_holster_drawn[0] = g_holster_drawn[1] = false;
-                g_pistol_draw_hand = -1;
-                g_pistol_drawn_at = 0;
-                reinterpret_cast<PFN_PlayerCombat>(
-                    kPlayerInvEndCombatMode)();
+                // Put the guns away and drop anything held (binoculars,
+                // grapple, pouch items) so the placement can start.
+                log("controls: holster setup put away the guns / held gear");
+                reset_holster_gesture();
             }
             if (g_holster_drawn[0] || g_holster_drawn[1] ||
                 g_binocular_hand >= 0 || g_grapple_hand >= 0)
+            {
                 log("controls: gear tuning needs pistols holstered and no "
                     "belt item in hand");
+                vr_submit_notice(L"VR Holster Setup", L"Holster your pistols "
+                    L"and put down any item in your hands, then choose VR "
+                    L"Holster Setup again.");
+            }
             else
             {
                 release_all();
                 g_tuning_trigger_was[0] =
                     digital(g_game[GameInteract].handle);
                 g_tuning_trigger_was[1] = digital(g_game[GameFire].handle);
+                g_tuning_pause_was = digital(g_game[GamePause].handle);
                 tune_gear_tuning_begin();
             }
         }
@@ -2170,6 +2374,13 @@ namespace trlvr
                 vr_recenter();
             recentre_button.was = recentre_down;
             release_all();
+            const bool pause_down = digital(g_game[GamePause].handle);
+            if (pause_down && !g_tuning_pause_was)
+            {
+                tune_gear_tuning_cancel("menu button");
+                g_pause_hold = true;
+            }
+            g_tuning_pause_was = pause_down;
             const bool triggers[2] = {
                 digital(g_game[GameInteract].handle),
                 digital(g_game[GameFire].handle)
@@ -2234,7 +2445,7 @@ namespace trlvr
         camera_first_person_ledge_grip_input(
             false, right_grip, handhold_active);
         update_holster_gesture(immersive_first_person && !menu &&
-                               !handhold_active);
+                               !handhold_active, menu);
         bool grapple_pull_pulse = false;
         const int grapple_state = update_grapple_pull(
             immersive_first_person && !menu && !handhold_active,
@@ -2262,7 +2473,7 @@ namespace trlvr
         // Not with first person on: between levels and in loads the
         // first-person view is not active yet, which read as third person
         // and showed the cross (user, 2026-10-04).
-        update_gear_cross(tp_gameplay && !config().first_person, left_grip,
+        update_gear_cross(tp_gameplay && !camera_view_first_person(), left_grip,
                           right_grip, gear_now);
         // Board mode: a grip around the tiny Lara picks her up (after the
         // gear cross, which keeps any grip on or hovering it).
@@ -2322,6 +2533,11 @@ namespace trlvr
                     (i == GameWeapon || i == GameBinoculars ||
                      i == GameMedkit || i == GameLight))
                     continue;
+                if (i == GamePause && g_pause_hold)
+                {
+                    g_pause_hold = digital(g_game[GamePause].handle);
+                    continue;
+                }
                 // A grip that grabbed from the gear cross, or holds Lara.
                 if ((i == GameGrapple && (g_gear_grip_claim[0] ||
                                           pluck_claim[0])) ||
@@ -2581,7 +2797,9 @@ namespace trlvr
                 want[VK_ESCAPE] = true;
             // Holster setup chosen in the pause menu: back out of it (Esc
             // held 100 ms every 450 ms) so placement starts in gameplay.
-            if (tune_gear_tuning_menu_pending())
+            // Hand calibration backs out the same way.
+            if (tune_gear_tuning_menu_pending() ||
+                vr_hand_calibration_menu_pending())
             {
                 const ULONGLONG t = GetTickCount64();
                 if (!g_menu_request_at)
@@ -2590,9 +2808,10 @@ namespace trlvr
                 if (since > 6000)
                 {
                     tune_gear_tuning_clear_menu_request();
+                    vr_hand_calibration_clear_menu_request();
                     g_menu_request_at = 0;
-                    log("controls: holster setup dropped (menu did not "
-                        "close)");
+                    log("controls: holster setup / hand calibration dropped "
+                        "(menu did not close)");
                 }
                 else if (since > 200 && (since - 200) % 450 < 100)
                     want[VK_ESCAPE] = true;
@@ -2716,11 +2935,15 @@ namespace trlvr
                 g_move_dir[2] = bar_hanging && g_stick_dir[2];
                 g_move_dir[1] = !g_ledge_pull_up && g_ledge_pull_left;
                 g_move_dir[3] = !g_ledge_pull_up && g_ledge_pull_right;
-                if (g_ledge_pull_up)
-                    want[VK_SPACE] = true;
                 if (ledge_hanging && g_ledge_pull_up &&
                     !g_last_ledge_pull_up)
+                {
                     g_ledge_pull_requested_at = GetTickCount();
+                    g_ledge_jump_until = GetTickCount() + 100;
+                }
+                if (g_ledge_pull_up &&
+                    (int)(g_ledge_jump_until - GetTickCount()) > 0)
+                    want[VK_SPACE] = true;
                 if (g_ledge_pull_up != g_last_ledge_pull_up &&
                     g_ledge_pull_reports < 128)
                 {
@@ -3052,6 +3275,11 @@ namespace trlvr
     {
         return config().immersive_controls &&
             g_holster_drawn[left ? 0 : 1];
+    }
+
+    short vr_input_top_screen_id()
+    {
+        return g_in_menu ? g_last_screen : (short)-1;
     }
 
     bool vr_input_holster_combat_held()

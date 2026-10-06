@@ -6,6 +6,7 @@
 #include "../vr/vr_submit.h"
 #include "../vr/tune.h"
 #include "../vr/vr_input.h"
+#include "../vr/input_labels.h"
 #include "../vr/camera_head.h"
 
 #include "../common/config.h"
@@ -53,6 +54,7 @@ namespace trlvr
             // above; their keyboard events are naturally applied to the next
             // game frame.
             vr_input_update();
+            input_labels_update();
         }
 
         gpu_profile_mark("mod: VR submit (resolve, overlays, hands)");

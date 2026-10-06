@@ -15,6 +15,7 @@ Left stick long click       Use health pack (Home)
 
 Right stick                 Turn the camera (mouse movement)
 Right stick short click     Switch weapons (End)
+Right stick double click    Open the PDA (Tab)
 Right stick long click      Use binoculars (Page Down)
 
 Left trigger                Action / interact / pull grapple (E)
@@ -37,6 +38,7 @@ Left joystick short click   Pause; menu back (Escape)
 Left joystick double click  Recenter the VR view
 Right joystick              Turn the camera (mouse movement)
 Right joystick click        Switch weapons (End)
+Right joystick double click Open the PDA (Tab)
 
 Left trigger                Action / interact / pull grapple (E)
 Right trigger               Fire (left mouse); menu select (Enter)
@@ -62,6 +64,7 @@ Left joystick long click    Use health pack (Home)
 
 Right joystick              Turn the camera (mouse movement)
 Right joystick short click  Switch weapons (End)
+Right joystick double click Open the PDA (Tab)
 Right joystick long click   Use binoculars (Page Down)
 
 Left trigger                Action / interact / pull grapple (E)
@@ -96,6 +99,8 @@ Set this in trlvr.ini and restart the game:
     [controls]
     immersive_controls = 1
 
+Right stick long press      Switch first / third person (\ on the keyboard)
+
 FIRST PERSON (also set [vr] first_person = 1, first_person_tracked_hands = 1)
 The grips become your hands; changes from the tables above:
   * Pistols: grip at a hip to draw (akimbo draws both); grip there again to
@@ -119,9 +124,13 @@ of the game's own item icons sits in front of you: grip an icon to use it,
 grip its centre handle to move the cross. The left grip at the left chest
 toggles the light.
 
-In first person, pause menu > VR Holster Setup places the holsters, belt
-gear and pouches for your body: hold each item where you want it and pull the
-trigger.
+In first person, pause menu > VR Settings > VR Holster Setup places the
+holsters, belt gear and pouches for your body: hold each item where you want
+it and pull the trigger.
+
+Pause menu > VR Settings > Hand Calibration lines Lara's hands up with your
+controllers: move each controller into the held-out hand and squeeze its
+grip. Locking both hands saves; the menu button cancels.
 
 
 NOTES

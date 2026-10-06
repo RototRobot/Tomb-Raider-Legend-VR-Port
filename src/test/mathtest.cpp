@@ -173,9 +173,9 @@ int main()
         check(close(R * sx + ox, 1.0f, 1e-3f),
               "a ray along the right tangent lands on the right edge");
         check(close(T * sy + oy, -1.0f, 1e-3f),
-              "a ray along the top tangent lands on one vertical edge");
+              "a ray along the raw top tangent lands on the bottom edge");
         check(close(B * sy + oy, 1.0f, 1e-3f),
-              "a ray along the bottom tangent lands on the other");
+              "a ray along the raw bottom tangent lands on the top edge");
 
         // The centre of an asymmetric frustum is not the centre of the screen,
         // and the offset has to point the right way.
@@ -185,6 +185,27 @@ int main()
         float offRegs[16];
         registers_from_matrix(f, offRegs);
         check(close(offRegs[3 * 4 + 2], 1.0f), "w is still z_view");
+    }
+
+    // --- vertical asymmetry in the game's y-down view ----------------------
+    // OpenVR's raw "bottom" is the tangent to the UP edge (Valve driver docs).
+    // The game's view is y-down (sy < 0), so a ray at view y/z = -B points up
+    // and must reach the top of the screen (NDC +1). A Quest-like frustum with
+    // much more room below than above shows the sign; a G2's near-symmetric
+    // one cannot.
+    {
+        const float T = -1.20f, B = 0.95f;   // 50 degrees down, 43.5 up
+        Mat4 f = projection_from_tangents(-1.0f, 1.0f, T, B,
+                                          gp.near_z, gp.far_z, true);
+        const float sy = f.m[1][1], oy = f.m[2][1];
+        check(close(-B * sy + oy, 1.0f, 1e-3f),
+              "y-down: a ray along the up edge (raw bottom) lands at the top");
+        check(close(-T * sy + oy, -1.0f, 1e-3f),
+              "y-down: a ray along the down edge (raw top) lands at the bottom");
+        Mat4 g = projection_from_tangents(-1.0f, 1.0f, T, B,
+                                          gp.near_z, gp.far_z, false);
+        check(close(B * g.m[1][1] + g.m[2][1], 1.0f, 1e-3f),
+              "y-up: the raw bottom tangent is the top edge");
     }
 
     // --- a mono HUD still needs each lens's asymmetric projection ---------

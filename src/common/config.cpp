@@ -56,7 +56,7 @@ namespace trlvr
             { L"vr", L"hand_model", L"2" },
             { L"vr", L"first_person_mantle_smoothing", L"1" },
             { L"vr", L"physical_crouch", L"1" },
-            { L"vr", L"auto_secure_catch", L"0" },
+            { L"vr", L"auto_secure_catch", L"off" },
             { L"vr", L"msaa", L"4" },
             { L"vr", L"first_person_object_culling", L"frustum" },
             { L"vr", L"terrain_culling", L"frustum" },
@@ -188,9 +188,10 @@ namespace trlvr
             L"first_person_mantle_smoothing = 1\r\n"
             L"; 1 = crouching for real (about 35 cm down) makes Lara crouch.\r\n"
             L"physical_crouch = 1\r\n"
-            L"; 1 = a one-hand catch (the game's quick grab prompt) secures\r\n"
-            L"; itself in first person; 0 = grab the hold to secure it.\r\n"
-            L"auto_secure_catch = 0\r\n"
+            L"; One-hand catches (the game's quick grab prompt) in first person:\r\n"
+            L"; off = grab the hold to secure it, bars = swing bars secure\r\n"
+            L"; themselves, all = ledges and bars secure themselves.\r\n"
+            L"auto_secure_catch = off\r\n"
             L"; Most anti-aliasing samples the game may use when its FSAA option\r\n"
             L"; is on: 0 (off), 2, 4 or 8. The game picks the most offered; 8 on\r\n"
             L"; a VR-sized image costs the GPU heavily. Takes effect at start-up.\r\n"
@@ -210,8 +211,9 @@ namespace trlvr
             L"; full (any movement, shimmying, climbing and smooth turning).\r\n"
             L"comfort_vignette = off\r\n"
             L"; Third-person camera: classic (the game's camera, smoothed),\r\n"
-            L"; shoulder (close behind Lara, life size, auto-centre) or board\r\n"
-            L"; (Lara a few inches tall on a tabletop world).\r\n"
+            L"; shoulder (close behind Lara, life size) or board (Lara a few\r\n"
+            L"; inches tall on a tabletop world); all = start in classic and let\r\n"
+            L"; the view switch cycle classic, shoulder, board, first person.\r\n"
             L"third_person_mode = classic\r\n"
             L"; Seconds the third-person camera position takes to catch up.\r\n"
             L"third_person_smoothing = 0.12\r\n"
@@ -461,8 +463,18 @@ namespace trlvr
             L"vr", L"first_person_mantle_smoothing", true, path);
         g_config.physical_crouch = read_bool(
             L"vr", L"physical_crouch", true, path);
-        g_config.auto_secure_catch = read_bool(
-            L"vr", L"auto_secure_catch", false, path);
+        {
+            // off / bars / all; 0 and 1 as before (1 = everything, as
+            // Preview 1 documented it), 2 also reads as all.
+            wchar_t secure[16]{};
+            GetPrivateProfileStringW(L"vr", L"auto_secure_catch", L"off",
+                                     secure, 16, path);
+            g_config.auto_secure_catch =
+                _wcsnicmp(secure, L"bar", 3) == 0 ? 1 :
+                (_wcsicmp(secure, L"all") == 0 || _wcsicmp(secure, L"1") == 0 ||
+                 _wcsicmp(secure, L"2") == 0 || _wcsicmp(secure, L"on") == 0)
+                    ? 2 : 0;
+        }
         g_config.msaa = GetPrivateProfileIntW(L"vr", L"msaa", 4, path);
         {
             wchar_t culling[32]{};
@@ -506,6 +518,7 @@ namespace trlvr
             g_config.third_person_mode =
                 _wcsicmp(mode, L"shoulder") == 0 ? 1
                 : _wcsicmp(mode, L"board") == 0 ? 2 : 0;
+            g_config.view_cycle_all = _wcsicmp(mode, L"all") == 0;
             auto clamp_read = [&](const wchar_t* key, const wchar_t* def,
                                   float lo, float hi, float fallback) {
                 const float v = read_float(L"vr", key, def, path);

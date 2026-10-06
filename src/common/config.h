@@ -52,7 +52,9 @@ namespace trlvr
         bool physical_crouch = true;
         // One-hand catches (the game's quick "grab" prompt) secure
         // themselves in first person: no grab or button needed.
-        bool auto_secure_catch = false;
+        // One-hand catches secured automatically in first person:
+        // 0 off, 1 swing bars only, 2 ledges and bars.
+        int auto_secure_catch = 0;
         // MSAA cap in samples (0 off, 2, 4, 8) when the game's FSAA is on.
         int msaa = 4;
         // First-person world objects: true = drawn whenever their room is
@@ -74,6 +76,9 @@ namespace trlvr
         // smoothed), 1 shoulder (close behind Lara at 1:1, auto-centre),
         // 2 board (Lara a few inches tall on a tabletop world).
         int third_person_mode = 0;
+        // third_person_mode = all: start in classic, and the view switch
+        // cycles classic -> shoulder -> board -> first person (2026-10-06).
+        bool view_cycle_all = false;
         float third_person_smoothing = 0.12f;   // seconds
         float shoulder_distance = 1.3f;         // metres behind the focus
         float shoulder_height = 0.0f;           // metres above it

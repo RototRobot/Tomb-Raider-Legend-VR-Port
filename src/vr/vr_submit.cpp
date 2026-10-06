@@ -624,7 +624,24 @@ namespace trlvr
                     const float c = n * 0.5f;
                     target->BeginDraw();
                     target->Clear(D2D1::ColorF(0, 0, 0, 0));
-                    if (glyph[0] == L' ' && !glyph[1])
+                    if (wcscmp(glyph, L"GRIP") == 0)
+                    {
+                        // A yellow pill with GRIP in dark letters across
+                        // the middle of the square texture.
+                        const D2D1_ROUNDED_RECT pill = D2D1::RoundedRect(
+                            D2D1::RectF(6.0f, c - n * 0.19f, n - 6.0f,
+                                        c + n * 0.19f),
+                            n * 0.19f, n * 0.19f);
+                        target->FillRoundedRectangle(pill, yellow);
+                        target->DrawRoundedRectangle(pill, rim, 5.0f);
+                        target->SetTransform(D2D1::Matrix3x2F::Scale(
+                            0.52f, 0.52f, D2D1::Point2F(c, c)));
+                        target->DrawText(glyph, 4, format,
+                            D2D1::RectF(-(float)n, 0.0f, 2.0f * n,
+                                        (float)n), ink);
+                        target->SetTransform(D2D1::Matrix3x2F::Identity());
+                    }
+                    else if (glyph[0] == L' ' && !glyph[1])
                     {
                         const D2D1_ROUNDED_RECT tile = D2D1::RoundedRect(
                             D2D1::RectF(6.0f, 6.0f, n - 6.0f, n - 6.0f),
@@ -704,10 +721,10 @@ namespace trlvr
             if (g_badge || g_badge_tried || !g_device)
                 return g_badge;
             g_badge_tried = true;
-            g_badge = make_icon_texture(L"\u270A", // raised fist
+            g_badge = make_icon_texture(L"GRIP",
                 D2D1::ColorF(1.0f, 0.82f, 0.10f),
                 D2D1::ColorF(0.55f, 0.36f, 0.0f),
-                D2D1::ColorF(0.25f, 0.15f, 0.0f), "grab badge");
+                D2D1::ColorF(0.12f, 0.08f, 0.0f), "grip pill");
             return g_badge;
         }
 
@@ -723,14 +740,16 @@ namespace trlvr
             float u, v;
         };
 
-        // While a precarious one-hand catch waits for a grab: a pulsing
-        // yellow fist badge on the centre of the grab zone, replacing the
-        // retail prompt (hidden in camera_head).
+        // While a precarious one-hand catch waits for a grab: a yellow
+        // GRIP pill, replacing the retail prompt (hidden in camera_head).
+        // It used to sit on the grab zone, which moves a lot in that
+        // moment; now it is fixed in the view (user 2026-10-06): 60% up the
+        // screen for a ledge, 85% for a swing bar, 1 m ahead.
         void draw_secure_grab_badge(IDirect3DSurface9* back)
         {
-            float centre[3]{};
+            float zone[3]{};
             if (!g_device || !stereo_same_frame_active() ||
-                !camera_first_person_secure_grab_point(centre))
+                !camera_first_person_secure_grab_point(zone))
                 return;
             D3DSURFACE_DESC desc{};
             if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
@@ -746,11 +765,21 @@ namespace trlvr
             QueryPerformanceCounter(&now);
             const double t = frequency.QuadPart
                 ? (double)now.QuadPart / (double)frequency.QuadPart : 0.0;
-            // 1.6 pulses a second: size 0.85..1.15 x 14.4 cm (8 cm x 1.8, user
-            // request), alpha 0.65..1.
+            // 1.6 pulses a second in brightness only (alpha 0.7..1); the
+            // pill is about 17 cm wide at 1 m.
             const float wave = 0.5f + 0.5f * (float)sin(t * 6.2831853 * 1.6);
-            const float radius = 0.072f * metre * (0.85f + 0.30f * wave);
-            const DWORD alpha = (DWORD)(255.0f * (0.65f + 0.35f * wave));
+            const float radius = 0.09f * metre;
+            const DWORD alpha = (DWORD)(255.0f * (0.70f + 0.30f * wave));
+            // Fraction of the view height from the top: 0.40 is 60% up.
+            const float from_top =
+                camera_first_person_bar_hanging() ? 0.15f : 0.40f;
+            const EyeInfo& lens = vr_eye(EyeLeft);
+            // OpenVR's raw "bottom" is the up edge (vr_math notes); engine
+            // head space is y-down.
+            const float up_tangent = lens.tan_bottom -
+                from_top * (lens.tan_bottom - lens.tan_top);
+            const float depth = 1.0f * metre;
+            const float centre[3] = { 0.0f, -up_tangent * depth, depth };
             IDirect3DTexture9* texture = grab_badge_texture();
             // Premultiplied: the diffuse scales colour and alpha together.
             const DWORD shade = texture
@@ -790,8 +819,8 @@ namespace trlvr
             if (!reported)
             {
                 reported = true;
-                log("grab badge: shown on the grab zone (head %.0f, %.0f, "
-                    "%.0f)", centre[0], centre[1], centre[2]);
+                log("grab badge: GRIP pill shown %.0f%% up the view",
+                    100.0f * (1.0f - from_top));
             }
             IDirect3DStateBlock9* state = nullptr;
             IDirect3DSurface9* old_target = nullptr;
@@ -1486,57 +1515,21 @@ namespace trlvr
         IDirect3DTexture9* g_tuning_panel = nullptr;
         wchar_t g_tuning_panel_text[512] = {};
 
-        void draw_gear_tuning_panel(IDirect3DSurface9* back)
+        // A text panel floating in front of the player (yaw-only body frame),
+        // drawn over the finished frame in both eyes.
+        void draw_world_panel(IDirect3DSurface9* back,
+                              const D3DSURFACE_DESC& desc,
+                              IDirect3DTexture9* texture, float up,
+                              float forward, float half_w_metres,
+                              float half_h_metres)
         {
-            if (!g_device || !stereo_same_frame_active() ||
-                !tune_gear_tuning_active())
-                return;
-            D3DSURFACE_DESC desc{};
-            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
-                !desc.Height)
-                return;
             const float metre = tune_world_scale();
-            if (!(metre > 0.0f))
-                return;
-            wchar_t hands[2][96]{};
-            for (int hand = 0; hand < 2; ++hand)
-            {
-                const int gear = tune_gear_tuning_slot(hand);
-                if (gear < 0)
-                    swprintf_s(hands[hand], L"%s hand: nothing this step",
-                               hand ? L"Right" : L"Left");
-                else
-                    swprintf_s(hands[hand], L"%s hand: %S%s",
-                               hand ? L"Right" : L"Left",
-                               tune_gear_name(gear),
-                               tune_gear_tuning_placed(gear)
-                                   ? L"  (placed)" : L"");
-            }
-            wchar_t body[512]{};
-            swprintf_s(body,
-                L"Step %d of %d\n%s\n%s\n\nMove each item to where it feels "
-                L"comfortable on your body and pull that hand's trigger to "
-                L"place it. Pull again to pick it back up.\nThe last item "
-                L"saves. Double-click the right stick to cancel.",
-                tune_gear_tuning_step() + 1, tune_gear_tuning_step_count(),
-                hands[0], hands[1]);
-            if (!g_tuning_panel || wcscmp(body, g_tuning_panel_text) != 0)
-            {
-                if (g_tuning_panel)
-                {
-                    g_tuning_panel->Release();
-                    g_tuning_panel = nullptr;
-                }
-                wcscpy_s(g_tuning_panel_text, body);
-                g_tuning_panel = make_text_texture(L"VR Holster Setup", body,
-                                                   1024, 640);
-                if (!g_tuning_panel)
-                    return;
-            }
             float centre[3]{};
-            if (!vr_body_point_head_position(0.0f, -0.05f, 0.60f, centre))
+            if (!texture || !(metre > 0.0f) ||
+                !vr_body_point_head_position(0.0f, up, forward, centre))
                 return;
-            const float half_w = 0.25f * metre, half_h = 0.156f * metre;
+            const float half_w = half_w_metres * metre;
+            const float half_h = half_h_metres * metre;
             const float eye_w = desc.Width * 0.5f;
             IDirect3DStateBlock9* state = nullptr;
             if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
@@ -1598,7 +1591,7 @@ namespace trlvr
                                                D3DTOP_DISABLE);
                 g_device->SetTextureStageState(1, D3DTSS_ALPHAOP,
                                                D3DTOP_DISABLE);
-                g_device->SetTexture(0, g_tuning_panel);
+                g_device->SetTexture(0, texture);
                 if (SUCCEEDED(g_device->BeginScene()))
                 {
                     const float corner[4][2] = {
@@ -1642,6 +1635,259 @@ namespace trlvr
             }
             state->Apply();
             state->Release();
+        }
+
+        void draw_gear_tuning_panel(IDirect3DSurface9* back)
+        {
+            if (!g_device || !stereo_same_frame_active() ||
+                !tune_gear_tuning_active())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float metre = tune_world_scale();
+            if (!(metre > 0.0f))
+                return;
+            wchar_t hands[2][96]{};
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                const int gear = tune_gear_tuning_slot(hand);
+                if (gear < 0)
+                    swprintf_s(hands[hand], L"%s hand: nothing this step",
+                               hand ? L"Right" : L"Left");
+                else
+                    swprintf_s(hands[hand], L"%s hand: %S%s",
+                               hand ? L"Right" : L"Left",
+                               tune_gear_name(gear),
+                               tune_gear_tuning_placed(gear)
+                                   ? L"  (placed)" : L"");
+            }
+            wchar_t body[512]{};
+            swprintf_s(body,
+                L"Step %d of %d\n%s\n%s\n\nMove each item to where it feels "
+                L"comfortable on your body and pull that hand's trigger to "
+                L"place it. Pull again to pick it back up.\nThe last item "
+                L"saves. Press the menu button (left stick) to cancel.",
+                tune_gear_tuning_step() + 1, tune_gear_tuning_step_count(),
+                hands[0], hands[1]);
+            if (!g_tuning_panel || wcscmp(body, g_tuning_panel_text) != 0)
+            {
+                if (g_tuning_panel)
+                {
+                    g_tuning_panel->Release();
+                    g_tuning_panel = nullptr;
+                }
+                wcscpy_s(g_tuning_panel_text, body);
+                g_tuning_panel = make_text_texture(L"VR Holster Setup", body,
+                                                   1024, 640);
+                if (!g_tuning_panel)
+                {
+                    static bool reported = false;
+                    if (!reported)
+                    {
+                        reported = true;
+                        log("submit: holster setup panel could not be built "
+                            "(Direct2D text); placement still works");
+                    }
+                    return;
+                }
+            }
+            draw_world_panel(back, desc, g_tuning_panel, -0.05f, 0.60f,
+                             0.25f, 0.156f);
+        }
+
+        // Hand calibration guide (user test 2026-10-06: without one it was
+        // hard to see what was being lined up). Each unlocked controller is
+        // drawn as a wire box where it really is: centred on the palm (the
+        // SteamVR grip origin), turned with the controller itself, with a
+        // long arrow where it points and a short one for its top.
+        void draw_hand_calibration_controllers(IDirect3DSurface9* back)
+        {
+            if (!stereo_same_frame_active() || !vr_hand_calibration_active())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float metre = tune_world_scale() * tune_move_scale();
+            if (!(metre > 0.0f))
+                return;
+            const float eye_width = desc.Width * 0.5f;
+            static DebugLineVertex lines[2 * 2 * 24 * 2];
+            unsigned used = 0;
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                const bool left = hand == 0;
+                Mat4 grip, device;
+                if (vr_hand_calibration_locked(left) ||
+                    !vr_controller_grip_uncorrected_head_pose(left, &grip) ||
+                    !vr_controller_head_pose(left, &device))
+                    continue;
+                // Controller axes in head space (engine: x right, y down,
+                // z forward); the box sits at the palm.
+                float axis[3][3]{};
+                for (int a = 0; a < 3; ++a)
+                {
+                    float length = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                        length += device.m[a][k] * device.m[a][k];
+                    length = sqrtf(length);
+                    if (length < 1.0e-6f)
+                        break;
+                    for (int k = 0; k < 3; ++k)
+                        axis[a][k] = device.m[a][k] / length;
+                }
+                const float* centre = grip.m[3];
+                // (right, down, forward) metres -> head-space point.
+                const auto point = [&](float x, float y, float z, float out[3])
+                {
+                    for (int k = 0; k < 3; ++k)
+                        out[k] = centre[k] + (x * axis[0][k] +
+                                 y * axis[1][k] + z * axis[2][k]) * metre;
+                };
+                const DWORD colour = left ? 0xFF55DFFFu : 0xFFFFB25Au;
+                const DWORD pointer = 0xFFFFFF55u;
+                const DWORD top = 0xFF66FF66u;
+                // Segments in controller metres: box edges, then arrows.
+                const float hx = 0.022f, hy = 0.025f, hz = 0.06f;
+                float seg[24][2][3]{};
+                int n = 0;
+                const auto add = [&](float x0, float y0, float z0,
+                                     float x1, float y1, float z1)
+                {
+                    if (n >= 24)
+                        return;
+                    seg[n][0][0] = x0; seg[n][0][1] = y0; seg[n][0][2] = z0;
+                    seg[n][1][0] = x1; seg[n][1][1] = y1; seg[n][1][2] = z1;
+                    ++n;
+                };
+                for (int s = -1; s <= 1; s += 2)
+                    for (int t = -1; t <= 1; t += 2)
+                    {
+                        add(-hx, s * hy, t * hz, hx, s * hy, t * hz);
+                        add(s * hx, -hy, t * hz, s * hx, hy, t * hz);
+                        add(s * hx, t * hy, -hz, s * hx, t * hy, hz);
+                    }
+                const int box_edges = n;
+                add(0, 0, 0, 0, 0, 0.22f);                  // points
+                add(0, 0, 0.22f, -0.018f, 0, 0.19f);
+                add(0, 0, 0.22f, 0.018f, 0, 0.19f);
+                const int pointer_end = n;
+                add(0, 0, 0, 0, -0.09f, 0);                 // top
+                add(0, -0.09f, 0, 0, -0.07f, -0.015f);
+                add(0, -0.09f, 0, 0, -0.07f, 0.015f);
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    const Eye eye = eye_index ? EyeRight : EyeLeft;
+                    for (int i = 0; i < n; ++i)
+                    {
+                        float a[3], b[3], ua = 0, va = 0, ub = 0, vb = 0;
+                        point(seg[i][0][0], seg[i][0][1], seg[i][0][2], a);
+                        point(seg[i][1][0], seg[i][1][1], seg[i][1][2], b);
+                        if (!vr_project_head_point(eye, a[0], a[1], a[2],
+                                                   &ua, &va) ||
+                            !vr_project_head_point(eye, b[0], b[1], b[2],
+                                                   &ub, &vb) ||
+                            ua < 0.0f || ua > 1.0f || ub < 0.0f ||
+                            ub > 1.0f || va < 0.0f || va > 1.0f ||
+                            vb < 0.0f || vb > 1.0f ||
+                            used + 2 > _countof(lines))
+                            continue;
+                        const DWORD c = i < box_edges ? colour
+                                      : i < pointer_end ? pointer : top;
+                        lines[used++] = { eye_width * (eye_index + ua),
+                                          desc.Height * va, 0.0f, 1.0f, c };
+                        lines[used++] = { eye_width * (eye_index + ub),
+                                          desc.Height * vb, 0.0f, 1.0f, c };
+                    }
+                }
+            }
+            draw_hand_lines(back, desc, lines, used);
+        }
+
+        // vr_submit_notice: shown for kNoticeMs, rebuilt when it changes.
+        IDirect3DTexture9* g_notice_panel = nullptr;
+        wchar_t g_notice_title[64] = {};
+        wchar_t g_notice_body[384] = {};
+        bool g_notice_dirty = false;
+        ULONGLONG g_notice_at = 0;
+        const ULONGLONG kNoticeMs = 6000;
+
+        void draw_notice_panel(IDirect3DSurface9* back)
+        {
+            if (!g_device || !g_notice_at || !stereo_same_frame_active())
+                return;
+            if (GetTickCount64() - g_notice_at > kNoticeMs)
+            {
+                g_notice_at = 0;
+                return;
+            }
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            if (g_notice_dirty || !g_notice_panel)
+            {
+                g_notice_dirty = false;
+                if (g_notice_panel)
+                {
+                    g_notice_panel->Release();
+                    g_notice_panel = nullptr;
+                }
+                g_notice_panel = make_text_texture(g_notice_title,
+                                                   g_notice_body, 1024, 400);
+                if (!g_notice_panel)
+                {
+                    g_notice_at = 0;
+                    log("submit: notice panel could not be built (Direct2D "
+                        "text)");
+                    return;
+                }
+            }
+            draw_world_panel(back, desc, g_notice_panel, 0.0f, 0.75f,
+                             0.25f, 0.0977f);
+        }
+
+        // Hand calibration instructions, above the held-out hands.
+        IDirect3DTexture9* g_calibration_panel = nullptr;
+        wchar_t g_calibration_panel_text[512] = {};
+
+        void draw_hand_calibration_panel(IDirect3DSurface9* back)
+        {
+            if (!g_device || !stereo_same_frame_active() ||
+                !vr_hand_calibration_active())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            wchar_t body[512]{};
+            swprintf_s(body,
+                L"Lara's hands are held out in front of you.\n"
+                L"The boxes are your controllers: yellow arrow where it "
+                L"points, green arrow its top. Move each one to where it "
+                L"should sit in that hand, then squeeze its grip to lock "
+                L"it.\n\n"
+                L"Left hand: %s\nRight hand: %s\n\n"
+                L"Locking both saves. Press the menu button to cancel.",
+                vr_hand_calibration_locked(true) ? L"locked" : L"squeeze grip",
+                vr_hand_calibration_locked(false) ? L"locked"
+                                                  : L"squeeze grip");
+            if (!g_calibration_panel ||
+                wcscmp(body, g_calibration_panel_text) != 0)
+            {
+                if (g_calibration_panel)
+                {
+                    g_calibration_panel->Release();
+                    g_calibration_panel = nullptr;
+                }
+                wcscpy_s(g_calibration_panel_text, body);
+                g_calibration_panel = make_text_texture(
+                    L"VR Hand Calibration", body, 1024, 640);
+            }
+            draw_world_panel(back, desc, g_calibration_panel, 0.14f, 0.80f,
+                             0.25f, 0.156f);
         }
 
         void draw_pouch_items(IDirect3DSurface9* back)
@@ -2351,6 +2597,16 @@ namespace trlvr
         }
     }
 
+    void vr_submit_notice(const wchar_t* title, const wchar_t* body)
+    {
+        if (!title || !body)
+            return;
+        wcsncpy_s(g_notice_title, title, _TRUNCATE);
+        wcsncpy_s(g_notice_body, body, _TRUNCATE);
+        g_notice_dirty = true;
+        g_notice_at = GetTickCount64();
+    }
+
     void vr_submit_note_draw()
     {
         InterlockedIncrement(&g_perf_draws);
@@ -2415,6 +2671,9 @@ namespace trlvr
             draw_aim_debug_laser(back_buffer);
             draw_pouch_items(back_buffer);
             draw_gear_tuning_panel(back_buffer);
+            draw_hand_calibration_panel(back_buffer);
+            draw_notice_panel(back_buffer);
+            draw_hand_calibration_controllers(back_buffer);
             draw_secure_grab_badge(back_buffer);
             draw_gear_cross(back_buffer);
             draw_pluck_ring(back_buffer);

@@ -504,11 +504,17 @@ namespace trlvr
         r.m[2][3] = 1.0f;                 // w = z_view
         r.m[3][2] = -q * near_z;
 
+        // OpenVR's raw "bottom" is the tangent to the UP (+Y) edge and "top"
+        // to the down edge (Valve's driver docs: "bottom and top are
+        // backwards"), which is what the y-up rows above assume. A y-down
+        // view (the game's, sy < 0) mirrors y itself, so only the scale
+        // flips; the offset multiplies z and keeps its sign. Flipping it too
+        // turned the frustum upside down about its centre -- invisible on a
+        // Reverb G2 (top/bottom 1.050/1.056) but a pitch error of several
+        // degrees on a Quest, felt as the world warping with head motion
+        // (tester report 2026-10-05, Quest 3 over Virtual Desktop).
         if (flip_y)
-        {
             r.m[1][1] = -r.m[1][1];
-            r.m[2][1] = -r.m[2][1];
-        }
         return r;
     }
 
