@@ -70,7 +70,6 @@ namespace trlvr
             { L"vr", L"board_lara_height_cm", L"15" },
             { L"vr", L"board_distance", L"0.5" },
             { L"vr", L"board_height", L"0.35" },
-            { L"vr", L"board_hand_back", L"0.08" },
             { L"vr", L"board_god_hand", L"1" },
             { L"vr", L"camera_collision", L"1" },
             { L"vr", L"first_person_no_spread", L"1" },
@@ -226,8 +225,6 @@ namespace trlvr
             L"board_lara_height_cm = 15\r\n"
             L"board_distance = 0.5\r\n"
             L"board_height = 0.35\r\n"
-            L"; Board mode: metres the hands sit back along the palm.\r\n"
-            L"board_hand_back = 0.08\r\n"
             L"; Board mode cheats: pinch Lara up, stand her on a palm, flick\r\n"
             L"; her over (hold Y). Needs board mode, immersive controls and\r\n"
             L"; third person too.\r\n"

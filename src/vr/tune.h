@@ -45,6 +45,11 @@ namespace trlvr
     bool tune_hand_correction(bool left, float out[12]);
     bool tune_set_hand_correction(bool left, const float in[12]);
     bool tune_hand_debug_enabled();
+    // [developer] hand_ruler (2026-10-07): the controllers' true grip poses
+    // and a ruler from the left palm to the right controller's tip, in real
+    // centimetres, to measure the drawn hand against the controller in each
+    // view. F5 reloads.
+    bool tune_hand_ruler_enabled();
     bool tune_hand_debug_selected_left();
     bool tune_hand_debug_rotation_mode();
     float tune_first_person_belt_height();

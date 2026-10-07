@@ -1697,6 +1697,89 @@ namespace trlvr
                              0.25f, 0.156f);
         }
 
+        // Pistol aim target (calibration step 2): concentric rings and a
+        // cross 4 m ahead, fixed in the room, drawn over everything.
+        void draw_calibration_target(IDirect3DSurface9* back)
+        {
+            float centre[3];
+            if (!vr_hand_calibration_target(centre))
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float metre = tune_world_scale() * tune_move_scale();
+            if (!(metre > 0.0f))
+                return;
+            // Billboard axes facing the eye: right and up across the view
+            // ray (engine head space: y down).
+            const float distance = sqrtf(centre[0] * centre[0] +
+                centre[1] * centre[1] + centre[2] * centre[2]);
+            if (distance < 1.0f)
+                return;
+            const float view[3] = { centre[0] / distance,
+                centre[1] / distance, centre[2] / distance };
+            float right[3] = { view[2], 0.0f, -view[0] };
+            const float rl = sqrtf(right[0] * right[0] + right[2] * right[2]);
+            if (rl < 1.0e-4f)
+                return;
+            right[0] /= rl;
+            right[2] /= rl;
+            const float up[3] = {
+                view[1] * right[2] - view[2] * right[1],
+                view[2] * right[0] - view[0] * right[2],
+                view[0] * right[1] - view[1] * right[0] };
+            const float eye_width = desc.Width * 0.5f;
+            static DebugLineVertex lines[2 * 2 * 120];
+            unsigned used = 0;
+            const auto point = [&](float x, float y, float out[3]) {
+                for (int k = 0; k < 3; ++k)
+                    out[k] = centre[k] + (right[k] * x + up[k] * y) * metre;
+            };
+            const auto segment = [&](const float a[3], const float b[3],
+                                     DWORD colour)
+            {
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    const Eye eye = eye_index ? EyeRight : EyeLeft;
+                    float ua = 0, va = 0, ub = 0, vb = 0;
+                    if (used + 2 > _countof(lines) ||
+                        !vr_project_head_point(eye, a[0], a[1], a[2],
+                                               &ua, &va) ||
+                        !vr_project_head_point(eye, b[0], b[1], b[2],
+                                               &ub, &vb) ||
+                        ua < 0.0f || ua > 1.0f || ub < 0.0f || ub > 1.0f ||
+                        va < 0.0f || va > 1.0f || vb < 0.0f || vb > 1.0f)
+                        continue;
+                    lines[used++] = { eye_width * (eye_index + ua),
+                                      desc.Height * va, 0.0f, 1.0f, colour };
+                    lines[used++] = { eye_width * (eye_index + ub),
+                                      desc.Height * vb, 0.0f, 1.0f, colour };
+                }
+            };
+            const float radii[3] = { 0.03f, 0.12f, 0.24f };
+            const DWORD ring_colour[3] = {
+                0xFFFF3030u, 0xFFFFFFFFu, 0xFFFFB25Au };
+            for (int r = 0; r < 3; ++r)
+                for (int i = 0; i < 24; ++i)
+                {
+                    const float a0 = 6.2831853f * i / 24.0f;
+                    const float a1 = 6.2831853f * (i + 1) / 24.0f;
+                    float p0[3], p1[3];
+                    point(radii[r] * cosf(a0), radii[r] * sinf(a0), p0);
+                    point(radii[r] * cosf(a1), radii[r] * sinf(a1), p1);
+                    segment(p0, p1, ring_colour[r]);
+                }
+            float p0[3], p1[3];
+            point(-0.30f, 0.0f, p0);
+            point(0.30f, 0.0f, p1);
+            segment(p0, p1, 0xFFFFFFFFu);
+            point(0.0f, -0.30f, p0);
+            point(0.0f, 0.30f, p1);
+            segment(p0, p1, 0xFFFFFFFFu);
+            draw_hand_lines(back, desc, lines, used);
+        }
+
         // Hand calibration guide (user test 2026-10-06: without one it was
         // hard to see what was being lined up). Each unlocked controller is
         // drawn as a wire box where it really is: centred on the palm (the
@@ -1706,6 +1789,11 @@ namespace trlvr
         {
             if (!stereo_same_frame_active() || !vr_hand_calibration_active())
                 return;
+            if (vr_hand_calibration_step() == 1)
+            {
+                draw_calibration_target(back);
+                return;
+            }
             D3DSURFACE_DESC desc{};
             if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
                 !desc.Height)
@@ -1849,6 +1937,187 @@ namespace trlvr
                              0.25f, 0.0977f);
         }
 
+        // Hand ruler ([developer] hand_ruler): the left controller's true
+        // grip (palm) pose as a box with axes, a crosshair at the right
+        // controller's tracked origin (its tip), the line between them with
+        // centimetre ticks, and a panel reading the distance in real cm --
+        // total and along the left controller's right / up / forward axes.
+        // Real units throughout (head space / world_scale x move_scale), so
+        // classic and board read the same for the same physical layout.
+        IDirect3DTexture9* g_ruler_panel = nullptr;
+        wchar_t g_ruler_text[256] = {};
+
+        void draw_hand_ruler(IDirect3DSurface9* back)
+        {
+            if (!g_device || !stereo_same_frame_active() ||
+                !tune_hand_ruler_enabled())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float metre = tune_world_scale() * tune_move_scale();
+            Mat4 grip, left_device, right_device;
+            if (!(metre > 0.0f) ||
+                !vr_controller_grip_uncorrected_head_pose(true, &grip) ||
+                !vr_controller_head_pose(true, &left_device) ||
+                !vr_controller_head_pose(false, &right_device))
+                return;
+            float axis[3][3]{};
+            for (int a = 0; a < 3; ++a)
+            {
+                float length = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    length += left_device.m[a][k] * left_device.m[a][k];
+                length = sqrtf(length);
+                if (length < 1.0e-6f)
+                    return;
+                for (int k = 0; k < 3; ++k)
+                    axis[a][k] = left_device.m[a][k] / length;
+            }
+            const float* origin = grip.m[3];
+            const float* tip = right_device.m[3];
+            float d[3];
+            for (int k = 0; k < 3; ++k)
+                d[k] = (tip[k] - origin[k]) / metre;
+            const float total = sqrtf(d[0] * d[0] + d[1] * d[1] +
+                                      d[2] * d[2]);
+            // Along the left controller: right (+x), up (-y), forward (+z).
+            const float along[3] = {
+                d[0] * axis[0][0] + d[1] * axis[0][1] + d[2] * axis[0][2],
+                -(d[0] * axis[1][0] + d[1] * axis[1][1] + d[2] * axis[1][2]),
+                d[0] * axis[2][0] + d[1] * axis[2][1] + d[2] * axis[2][2] };
+
+            const float eye_width = desc.Width * 0.5f;
+            static DebugLineVertex lines[2 * 2 * 160];
+            unsigned used = 0;
+            const auto segment = [&](const float a[3], const float b[3],
+                                     DWORD colour)
+            {
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    const Eye eye = eye_index ? EyeRight : EyeLeft;
+                    float ua = 0, va = 0, ub = 0, vb = 0;
+                    if (used + 2 > _countof(lines) ||
+                        !vr_project_head_point(eye, a[0], a[1], a[2],
+                                               &ua, &va) ||
+                        !vr_project_head_point(eye, b[0], b[1], b[2],
+                                               &ub, &vb) ||
+                        ua < 0.0f || ua > 1.0f || ub < 0.0f || ub > 1.0f ||
+                        va < 0.0f || va > 1.0f || vb < 0.0f || vb > 1.0f)
+                        continue;
+                    lines[used++] = { eye_width * (eye_index + ua),
+                                      desc.Height * va, 0.0f, 1.0f, colour };
+                    lines[used++] = { eye_width * (eye_index + ub),
+                                      desc.Height * vb, 0.0f, 1.0f, colour };
+                }
+            };
+            // Left palm: axes 4 cm (red right, green up, blue forward).
+            const DWORD axis_colour[3] = {
+                0xFFFF5555u, 0xFF66FF66u, 0xFF6688FFu };
+            for (int a = 0; a < 3; ++a)
+            {
+                float end[3];
+                const float sign = a == 1 ? -1.0f : 1.0f;
+                for (int k = 0; k < 3; ++k)
+                    end[k] = origin[k] + sign * axis[a][k] * 0.04f * metre;
+                segment(origin, end, axis_colour[a]);
+            }
+            // Right tip: a 2 cm crosshair.
+            for (int a = 0; a < 3; ++a)
+            {
+                float p0[3], p1[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    p0[k] = tip[k] - axis[a][k] * 0.01f * metre;
+                    p1[k] = tip[k] + axis[a][k] * 0.01f * metre;
+                }
+                segment(p0, p1, 0xFFFFFF55u);
+            }
+            // The ruler, with ticks across it every cm (5 cm longer).
+            segment(origin, tip, 0xFFF0F0F0u);
+            if (total > 0.005f)
+            {
+                float dir[3], side[3];
+                for (int k = 0; k < 3; ++k)
+                    dir[k] = d[k] / total;
+                // Across the ruler, roughly in the left controller's up.
+                const float* up = axis[1];
+                const float dot = up[0] * dir[0] + up[1] * dir[1] +
+                                  up[2] * dir[2];
+                float len = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    side[k] = up[k] - dot * dir[k];
+                    len += side[k] * side[k];
+                }
+                len = sqrtf(len);
+                if (len > 1.0e-4f)
+                {
+                    for (float& s : side)
+                        s /= len;
+                    const int ticks = (int)(total * 100.0f);
+                    for (int i = 1; i <= ticks && i <= 100; ++i)
+                    {
+                        const float half = (i % 5 == 0 ? 0.008f : 0.004f) *
+                                           metre;
+                        float centre[3], p0[3], p1[3];
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            centre[k] = origin[k] + dir[k] * 0.01f * i *
+                                                    metre;
+                            p0[k] = centre[k] - side[k] * half;
+                            p1[k] = centre[k] + side[k] * half;
+                        }
+                        segment(p0, p1, i % 5 == 0 ? 0xFFFFB25Au
+                                                   : 0xFFC0C0C0u);
+                    }
+                }
+            }
+            draw_hand_lines(back, desc, lines, used);
+
+            // Readout, rounded to 0.5 cm so the panel is not rebuilt every
+            // frame; logged when it changes.
+            const auto half_cm = [](float metres) {
+                return floorf(metres * 200.0f + 0.5f) / 2.0f;
+            };
+            wchar_t text[256]{};
+            swprintf_s(text,
+                L"Left palm (box) to right controller tip (yellow):\n"
+                L"%.1f cm\n\nforward %+.1f   up %+.1f   right %+.1f cm\n"
+                L"(along the left controller; view %S)",
+                half_cm(total), half_cm(along[2]), half_cm(along[1]),
+                half_cm(along[0]),
+                camera_first_person_active() ? "first person"
+                : camera_third_person_mode() == 2 ? "board"
+                : camera_third_person_mode() == 1 ? "shoulder" : "classic");
+            if (!g_ruler_panel || wcscmp(text, g_ruler_text) != 0)
+            {
+                if (g_ruler_panel)
+                {
+                    g_ruler_panel->Release();
+                    g_ruler_panel = nullptr;
+                }
+                wcscpy_s(g_ruler_text, text);
+                g_ruler_panel = make_text_texture(L"Hand Ruler", text,
+                                                  1024, 400);
+                static DWORD last_log = 0;
+                if (GetTickCount() - last_log > 500)
+                {
+                    last_log = GetTickCount();
+                    log("ruler: %.1f cm (forward %+.1f, up %+.1f, right "
+                        "%+.1f) view %s", total * 100.0f, along[2] * 100.0f,
+                        along[1] * 100.0f, along[0] * 100.0f,
+                        camera_first_person_active() ? "first person"
+                        : camera_third_person_mode() == 2 ? "board"
+                        : camera_third_person_mode() == 1 ? "shoulder"
+                                                          : "classic");
+                }
+            }
+            draw_world_panel(back, desc, g_ruler_panel, 0.22f, 0.85f,
+                             0.25f, 0.0977f);
+        }
+
         // Hand calibration instructions, above the held-out hands.
         IDirect3DTexture9* g_calibration_panel = nullptr;
         wchar_t g_calibration_panel_text[512] = {};
@@ -1863,17 +2132,29 @@ namespace trlvr
                 !desc.Height)
                 return;
             wchar_t body[512]{};
-            swprintf_s(body,
-                L"Lara's hands are held out in front of you.\n"
-                L"The boxes are your controllers: yellow arrow where it "
-                L"points, green arrow its top. Move each one to where it "
-                L"should sit in that hand, then squeeze its grip to lock "
-                L"it.\n\n"
-                L"Left hand: %s\nRight hand: %s\n\n"
-                L"Locking both saves. Press the menu button to cancel.",
-                vr_hand_calibration_locked(true) ? L"locked" : L"squeeze grip",
-                vr_hand_calibration_locked(false) ? L"locked"
-                                                  : L"squeeze grip");
+            if (vr_hand_calibration_step() == 1)
+                swprintf_s(body,
+                    L"Step 2: pistol aim\n"
+                    L"Point your %s pistol at the target ahead, lining up "
+                    L"its sights the way you would aim, then pull that "
+                    L"trigger. Your aim is saved for both hands.\n\n"
+                    L"A: skip (keep your current aim)\n"
+                    L"Menu button: stop here",
+                    config().left_handed ? L"left" : L"right");
+            else
+                swprintf_s(body,
+                    L"Step 1: hand alignment\n"
+                    L"The boxes are your controllers: yellow arrow where it "
+                    L"points, green arrow its top. Move each one to where "
+                    L"it should sit in Lara's hand, then squeeze its grip "
+                    L"to lock it.\n"
+                    L"Left hand: %s     Right hand: %s\n\n"
+                    L"A: skip (keep your current alignment)\n"
+                    L"Menu button: stop here",
+                    vr_hand_calibration_locked(true) ? L"locked"
+                                                     : L"squeeze grip",
+                    vr_hand_calibration_locked(false) ? L"locked"
+                                                      : L"squeeze grip");
             if (!g_calibration_panel ||
                 wcscmp(body, g_calibration_panel_text) != 0)
             {
@@ -1886,8 +2167,10 @@ namespace trlvr
                 g_calibration_panel = make_text_texture(
                     L"VR Hand Calibration", body, 1024, 640);
             }
-            draw_world_panel(back, desc, g_calibration_panel, 0.14f, 0.80f,
-                             0.25f, 0.156f);
+            // Higher during the aim step, clear of the target below it.
+            draw_world_panel(back, desc, g_calibration_panel,
+                             vr_hand_calibration_step() == 1 ? 0.26f : 0.14f,
+                             0.80f, 0.25f, 0.156f);
         }
 
         void draw_pouch_items(IDirect3DSurface9* back)
@@ -2674,6 +2957,7 @@ namespace trlvr
             draw_hand_calibration_panel(back_buffer);
             draw_notice_panel(back_buffer);
             draw_hand_calibration_controllers(back_buffer);
+            draw_hand_ruler(back_buffer);
             draw_secure_grab_badge(back_buffer);
             draw_gear_cross(back_buffer);
             draw_pluck_ring(back_buffer);

@@ -315,6 +315,13 @@ namespace trlvr
         return root >= 3000 && root < 4000;
     }
 
+    bool ui_pda_active()
+    {
+        // Root 6 from the 2026-10-06 log (Objectives 12, Data 10, Gear 9
+        // open on top of it).
+        return ui_root_screen_id() == 6;
+    }
+
     bool ui_pause_menu_active()
     {
         return pause_screen_active();

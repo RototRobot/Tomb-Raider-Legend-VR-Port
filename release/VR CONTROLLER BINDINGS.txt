@@ -130,7 +130,9 @@ it and pull the trigger.
 
 Pause menu > VR Settings > Hand Calibration lines Lara's hands up with your
 controllers: move each controller into the held-out hand and squeeze its
-grip. Locking both hands saves; the menu button cancels.
+grip (locking both saves). Then, in first person, aim your pistol at the
+target and pull the trigger to set your aim. A skips a step (keeping what
+you had); the menu button stops.
 
 
 NOTES

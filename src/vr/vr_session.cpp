@@ -1034,6 +1034,57 @@ namespace trlvr
 
         const GameProjection gp = projection_from_registers(in);
 
+        // The PDA's backdrop (the device screen and map behind its menu)
+        // is not interface geometry, so it went through the head-tracked
+        // eye projection: stuck to the view and the wrong size (user
+        // screenshot 2026-10-06). With the PDA open nothing else is drawn,
+        // so map its flat picture exactly as the world-locked menu panels
+        // are mapped -- same anchor (level, recentred forward), same UI
+        // scale -- so it stays pinned behind the menu items.
+        if (config().ui_passthrough && ui_pda_active() &&
+            (gp.valid || is_perspective_registers(in)))
+        {
+            Mat4 m{};
+            for (int i = 0; i < 4; ++i)
+                for (int k = 0; k < 4; ++k)
+                    m.m[k][i] = in[i * 4 + k];
+            const GameProjection depth = gp.valid ? gp
+                : (g_game_proj_known ? g_game_proj : gp);
+            const float near_z = depth.valid && depth.near_z > 0.0f
+                ? depth.near_z : 1.0f;
+            const float far_z = depth.valid && depth.far_z > near_z
+                ? depth.far_z : 100000.0f;
+            const bool flip = depth.valid ? depth.sy < 0.0f : false;
+            const EyeInfo& l = g_eyes[EyeLeft];
+            const EyeInfo& r = g_eyes[EyeRight];
+            const EyeInfo& target = (eye == EyeCenter) ? l : g_eyes[eye];
+            const Mat4 reference = projection_from_tangents(
+                0.5f * (l.tan_left + r.tan_left),
+                0.5f * (l.tan_right + r.tan_right),
+                0.5f * (l.tan_top + r.tan_top),
+                0.5f * (l.tan_bottom + r.tan_bottom),
+                near_z, far_z, flip);
+            // The menu's own close clip plane, so the rotated plane is not
+            // cut into wedges (see the world-locked menu above).
+            const Mat4 panel = projection_from_tangents(
+                target.tan_left, target.tan_right,
+                target.tan_top, target.tan_bottom,
+                near_z > 1.0f ? 1.0f : near_z, far_z, flip);
+            const Mat4 source = gp.valid ? projection_from_game(gp) : m;
+            registers_from_matrix(reproject_ndc_to_world_locked(
+                source, reference, panel, vr_head_rotation(),
+                tune_ui_scale()), out);
+            static bool reported = false;
+            if (!reported)
+            {
+                reported = true;
+                log("stereo: PDA backdrop pinned to the world-locked menu "
+                    "(scale %.2f, %s matrix)", tune_ui_scale(),
+                    gp.valid ? "projection" : "full");
+            }
+            return true;
+        }
+
         // Mission Prep: the camera kept the game's flat shot (camera_head),
         // so every scene draw already produces the flat picture. Post-map
         // its clip coordinates exactly as the world-locked menu does
@@ -1739,6 +1790,13 @@ namespace trlvr
         vr::HmdMatrix34_t g_cal_reference[2]{};
         // Locked this pass, not yet saved: rotation then metres.
         float g_cal_pending[2][12]{};
+        int g_cal_step = 0;            // 0 hands, 1 pistol aim
+        bool g_cal_with_aim = false;
+        // The aim target, fixed in tracking space (metres) at step 1.
+        float g_cal_target[3]{};
+        // Metres ahead of the head the target is placed: far enough that
+        // the palm-to-barrel offset is a small angle (8 cm at 4 m: ~1 deg).
+        const float kCalTargetDistance = 4.0f;
 
         // Where the reference hands sit, metres from the head in its
         // yaw-only frame: arms out in front, guns level.
@@ -1784,13 +1842,13 @@ namespace trlvr
         if (!grip_to_head || !g_grip_offset_valid[hand])
             return false;
         // Calibrating: an unlocked hand is held at the reference.
-        if (g_cal_active && !g_cal_locked[hand])
+        if (g_cal_active && g_cal_step == 0 && !g_cal_locked[hand])
             return tracking_pose_to_head(g_cal_reference[hand], grip_to_head);
         Mat4 grip;
         if (!uncorrected_grip_head_pose(hand, &grip))
             return false;
         float c[12]{};
-        if (g_cal_active && g_cal_locked[hand])
+        if (g_cal_active && g_cal_step == 0 && g_cal_locked[hand])
             memcpy(c, g_cal_pending[hand], sizeof(c));
         else if (!tune_hand_correction(left, c))
         {
@@ -1826,7 +1884,132 @@ namespace trlvr
         return g_cal_active && g_cal_locked[left ? 0 : 1];
     }
 
-    bool vr_hand_calibration_begin()
+    int vr_hand_calibration_step()
+    {
+        return g_cal_active ? g_cal_step : -1;
+    }
+
+    namespace
+    {
+        void calibration_finish(const char* how)
+        {
+            g_cal_active = false;
+            g_cal_step = 0;
+            log("vr: hand calibration finished (%s)", how);
+        }
+
+        // Step 1: a target kCalTargetDistance ahead of the head (level,
+        // 10 cm below the eyes), fixed in tracking space.
+        void calibration_start_aim()
+        {
+            const vr::HmdMatrix34_t& head =
+                g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                    .mDeviceToAbsoluteTracking;
+            float fx = -head.m[0][2], fz = -head.m[2][2];
+            const float length = sqrtf(fx * fx + fz * fz);
+            if (length < 1.0e-3f)
+            {
+                calibration_finish("no forward for the aim target");
+                return;
+            }
+            fx /= length;
+            fz /= length;
+            g_cal_target[0] = head.m[0][3] + fx * kCalTargetDistance;
+            g_cal_target[1] = head.m[1][3] - 0.10f;
+            g_cal_target[2] = head.m[2][3] + fz * kCalTargetDistance;
+            g_cal_step = 1;
+            log("vr: hand calibration step 2: pistol aim (target %.1f m "
+                "ahead)", kCalTargetDistance);
+        }
+    }
+
+    void vr_hand_calibration_skip()
+    {
+        if (!g_cal_active)
+            return;
+        if (g_cal_step == 0)
+        {
+            g_cal_locked[0] = g_cal_locked[1] = false;
+            log("vr: hand alignment skipped; the saved alignment is kept");
+            if (g_cal_with_aim)
+                calibration_start_aim();
+            else
+                calibration_finish("hand alignment skipped");
+            return;
+        }
+        log("vr: pistol aim skipped; the saved aim is kept");
+        calibration_finish("pistol aim skipped");
+    }
+
+    bool vr_hand_calibration_target(float head_point[3])
+    {
+        if (!g_cal_active || g_cal_step != 1 || !head_point)
+            return false;
+        vr::HmdMatrix34_t pose{};
+        pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
+        for (int i = 0; i < 3; ++i)
+            pose.m[i][3] = g_cal_target[i];
+        Mat4 m;
+        if (!tracking_pose_to_head(pose, &m))
+            return false;
+        for (int i = 0; i < 3; ++i)
+            head_point[i] = m.m[3][i];
+        return true;
+    }
+
+    bool vr_hand_calibration_aim(bool left)
+    {
+        if (!g_cal_active || g_cal_step != 1)
+            return false;
+        Mat4 grip;
+        float target[3];
+        if (!vr_controller_grip_head_pose(left, &grip) ||
+            !vr_hand_calibration_target(target))
+            return false;
+        // The direction from the corrected grip (where the aim ray starts)
+        // to the target, in that grip's own axes (engine: x right, y down,
+        // z forward) -- the same frame the aim ray's pitch/yaw live in.
+        float d[3];
+        for (int k = 0; k < 3; ++k)
+            d[k] = target[k] - grip.m[3][k];
+        float local[3]{};
+        for (int row = 0; row < 3; ++row)
+        {
+            float len = 0.0f, dot = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                len += grip.m[row][k] * grip.m[row][k];
+                dot += grip.m[row][k] * d[k];
+            }
+            if (len < 1.0e-8f)
+                return false;
+            local[row] = dot / sqrtf(len);
+        }
+        const float n = sqrtf(local[0] * local[0] + local[1] * local[1] +
+                              local[2] * local[2]);
+        if (!(n > 1.0e-4f))
+            return false;
+        for (float& v : local)
+            v /= n;
+        // local = (sin y cos p, -sin p, cos y cos p).
+        const float pitch = asinf(fminf(1.0f, fmaxf(-1.0f, -local[1]))) *
+                            57.29578f;
+        float yaw = atan2f(local[0], local[2]) * 57.29578f;
+        // Stored as the right hand's; the left grip is its mirror image.
+        if (left)
+            yaw = -yaw;
+        float old_pitch = 0.0f, old_yaw = 0.0f;
+        const bool had = tune_grip_aim(&old_pitch, &old_yaw);
+        const bool saved = tune_set_grip_aim(pitch, yaw);
+        log("vr: pistol aim set from the %s hand: pitch %+.1f, yaw %+.1f "
+            "(was %s%+.1f, %+.1f) -- %s", left ? "left" : "right", pitch,
+            yaw, had ? "" : "unset ", old_pitch, old_yaw,
+            saved ? "saved" : "NOT saved");
+        calibration_finish("pistol aim set");
+        return saved;
+    }
+
+    bool vr_hand_calibration_begin(bool with_aim)
     {
         if (!g_ready || !g_pose_valid)
             return false;
@@ -1897,6 +2080,8 @@ namespace trlvr
         }
         g_cal_locked[0] = g_cal_locked[1] = false;
         g_cal_active = true;
+        g_cal_step = 0;
+        g_cal_with_aim = with_aim;
         log("vr: hand calibration started (hands held %.2f m forward, "
             "%.2f m down, %.2f m apart; barrel pitch %+.1f, yaw %+.1f)",
             kCalForward, -kCalUp, 2.0f * kCalSide, pitch, yaw);
@@ -1957,9 +2142,12 @@ namespace trlvr
             return true;
         const bool saved = tune_set_hand_correction(true, g_cal_pending[0]) &&
                            tune_set_hand_correction(false, g_cal_pending[1]);
-        g_cal_active = false;
-        log("vr: hand calibration finished; %s", saved
+        log("vr: hand alignment %s", saved
             ? "saved to trlvr.ini" : "could NOT be saved to trlvr.ini");
+        if (g_cal_with_aim)
+            calibration_start_aim();
+        else
+            calibration_finish("hand alignment saved");
         return true;
     }
 

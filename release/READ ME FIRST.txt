@@ -1,5 +1,5 @@
 ================================================================
-  Tomb Raider: Legend  --  VR mod          PREVIEW 2 (testers)
+  Tomb Raider: Legend  --  VR mod          PREVIEW 3 (testers)
 ================================================================
 
 This is an early preview for testers. Expect rough edges. Please report what
@@ -102,11 +102,17 @@ You then see through Lara's eyes with your own tracked hands:
   * Pause menu > "VR Settings" (the old Display menu):
       "VR Holster Setup" (the old Widescreen entry) places the holsters,
       gear and pouches where they suit your body.
-      "Hand Calibration" (the old Next Generation Content entry) holds
-      Lara's hands out in front of you, guns forward and thumbs up. Move
-      each controller to where it should sit in that hand and squeeze its
-      grip to lock it; locking both saves. Do this first if her hands do
-      not line up with your controllers (common on Quest).
+      "Hand Calibration" (the old Next Generation Content entry):
+        Step 1, hand alignment: Lara's hands are held out in front of you.
+        Move each controller to where it should sit in that hand and
+        squeeze its grip to lock it; locking both saves.
+        Step 2, pistol aim (first person): point your pistol at the target
+        ahead the way you would aim it and pull that trigger. Saved for
+        both hands (your gun hand is the right, or the left with
+        left_handed = 1).
+        A skips a step and keeps what you had; the menu button stops.
+        Do this first if her hands or your aim do not line up (common on
+        Quest).
 
 Other camera options (third person, immersive controls on):
     third_person_mode = classic | shoulder | board | all

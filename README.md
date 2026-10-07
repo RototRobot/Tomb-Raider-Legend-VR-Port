@@ -114,8 +114,9 @@ start-up.
   lets you place the holsters, belt items and pouches where they suit your body.
 - **Hand calibration in game**: Pause menu → *VR Settings* → *Hand Calibration*
   holds Lara's hands out in front of you; move each controller into its hand
-  and squeeze the grip to lock it. Fixes hands that do not line up with your
-  controllers on any headset.
+  and squeeze the grip to lock it. Then aim your pistol at a target and pull
+  the trigger to set your aim. A skips a step. Fixes hands and aim that do not
+  line up with your controllers on any headset.
 - **Left-handed mode**, akimbo or single pistols, and three aiming styles.
 
 ### Interface and comfort

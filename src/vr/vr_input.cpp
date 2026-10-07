@@ -510,12 +510,18 @@ namespace trlvr
         // (put away again when it ends).
         bool     g_cal_grip_was[2] = { false, false };
         bool     g_cal_pause_was = false;
+        // A (jump) skips a calibration step; the aim hand's trigger sets
+        // the pistol aim.
+        bool     g_cal_skip_was = false;
+        bool     g_cal_trigger_was[2] = { false, false };
         // Holster setup: the menu button cancels it (the right-stick
         // double-click that used to is now the PDA).
         bool     g_tuning_pause_was = false;
         // The menu button that cancelled a setup does not also pause the
         // game: held back until it is released.
         bool     g_pause_hold = false;
+        // The A press that skipped the last calibration step is not a jump.
+        bool     g_cal_jump_hold = false;
         // View switch: right stick long press (the binoculars action, free
         // in both immersive views) and the \ key.
         bool     g_view_button_was = false;
@@ -2163,48 +2169,79 @@ namespace trlvr
             }
             else if (tune_gear_tuning_active())
                 log("controls: hand calibration waits for holster setup");
-            else if (!vr_hand_calibration_begin())
-                vr_submit_notice(L"Hand Calibration", L"Your controllers' "
-                    L"grip poses are not available yet. Make sure both "
-                    L"controllers are on and tracked, then try again.");
             else
             {
+                // Held items go first; then the pistols (drawn here, or
+                // swapped in for a long gun) so the aim step has one.
                 if (g_binocular_hand >= 0 || g_grapple_hand >= 0 ||
                     g_grenade_hand >= 0 || g_medipack_hand >= 0)
                     reset_holster_gesture();
-                release_all(true);
-                g_cal_grip_was[0] = digital(g_game[GameGrapple].handle);
-                g_cal_grip_was[1] = digital(g_game[GameLockOn].handle);
-                g_cal_pause_was = digital(g_game[GamePause].handle);
                 g_cal_drew_guns = false;
-                if (immersive_first_person && !g_holster_drawn[0] &&
-                    !g_holster_drawn[1] && g_binocular_hand < 0 &&
-                    g_grapple_hand < 0 &&
+                bool pistols = false;
+                if (immersive_first_person &&
                     find_weapon_slot(WeaponPistols) >= 0)
                 {
-                    bool allowed = false;
-                    __try
+                    if (g_holster_drawn[0] || g_holster_drawn[1])
                     {
-                        allowed = reinterpret_cast<PFN_CombatAllowed>(
-                            kPlayerCombatAllowed)();
-                    }
-                    __except(EXCEPTION_EXECUTE_HANDLER)
-                    {
-                        allowed = false;
-                    }
-                    if (allowed)
-                    {
-                        select_weapon_kind(WeaponPistols, false);
+                        if (weapon_slot_kind(selected_weapon_slot()) ==
+                            WeaponLong)
+                            select_weapon_kind(WeaponPistols, true);
                         g_holster_drawn[0] = g_holster_drawn[1] = true;
-                        g_pistol_draw_hand = 1;
-                        g_pistol_drawn_at = GetTickCount64();
-                        reinterpret_cast<PFN_PlayerCombat>(
-                            kPlayerInvEnterIndicatorMode)();
-                        g_cal_drew_guns = true;
+                        pistols = true;
                     }
                     else
-                        log("controls: hand calibration without pistols "
-                            "(combat not allowed here)");
+                    {
+                        bool allowed = false;
+                        __try
+                        {
+                            allowed = reinterpret_cast<PFN_CombatAllowed>(
+                                kPlayerCombatAllowed)();
+                        }
+                        __except(EXCEPTION_EXECUTE_HANDLER)
+                        {
+                            allowed = false;
+                        }
+                        if (allowed)
+                        {
+                            select_weapon_kind(WeaponPistols, false);
+                            g_holster_drawn[0] = g_holster_drawn[1] = true;
+                            g_pistol_draw_hand = 1;
+                            g_pistol_drawn_at = GetTickCount64();
+                            reinterpret_cast<PFN_PlayerCombat>(
+                                kPlayerInvEnterIndicatorMode)();
+                            g_cal_drew_guns = true;
+                            pistols = true;
+                        }
+                        else
+                            log("controls: hand calibration without pistols "
+                                "(combat not allowed here); no aim step");
+                    }
+                }
+                if (!vr_hand_calibration_begin(pistols))
+                {
+                    vr_submit_notice(L"Hand Calibration", L"Your controllers' "
+                        L"grip poses are not available yet. Make sure both "
+                        L"controllers are on and tracked, then try again.");
+                    if (g_cal_drew_guns)
+                    {
+                        g_holster_drawn[0] = g_holster_drawn[1] = false;
+                        g_pistol_draw_hand = -1;
+                        g_pistol_drawn_at = 0;
+                        reinterpret_cast<PFN_PlayerCombat>(
+                            kPlayerInvEndCombatMode)();
+                        g_cal_drew_guns = false;
+                    }
+                }
+                else
+                {
+                    release_all(true);
+                    g_cal_grip_was[0] = digital(g_game[GameGrapple].handle);
+                    g_cal_grip_was[1] = digital(g_game[GameLockOn].handle);
+                    g_cal_pause_was = digital(g_game[GamePause].handle);
+                    g_cal_skip_was = digital(g_game[GameJump].handle);
+                    g_cal_trigger_was[0] =
+                        digital(g_game[GameInteract].handle);
+                    g_cal_trigger_was[1] = digital(g_game[GameFire].handle);
                 }
             }
         }
@@ -2232,14 +2269,35 @@ namespace trlvr
                     vr_hand_calibration_cancel("menu button");
                     g_pause_hold = true;
                 }
+                const int step = vr_hand_calibration_step();
                 for (int hand = 0; hand < 2; ++hand)
                 {
                     const bool pressed = grips[hand] && !g_cal_grip_was[hand];
                     g_cal_grip_was[hand] = grips[hand];
-                    if (pressed && vr_hand_calibration_active() &&
+                    if (pressed && step == 0 &&
                         vr_hand_calibration_lock(hand == 0))
                         vr_input_handhold_haptic(hand == 0);
                 }
+                // Physical triggers: the aim hand's sets the pistol aim.
+                const bool triggers[2] = {
+                    digital(g_game[GameInteract].handle),
+                    digital(g_game[GameFire].handle)
+                };
+                const int aim_hand = config().left_handed ? 0 : 1;
+                for (int hand = 0; hand < 2; ++hand)
+                {
+                    const bool pressed = triggers[hand] &&
+                                         !g_cal_trigger_was[hand];
+                    g_cal_trigger_was[hand] = triggers[hand];
+                    if (pressed && hand == aim_hand && step == 1 &&
+                        vr_hand_calibration_aim(hand == 0))
+                        vr_input_handhold_haptic(hand == 0);
+                }
+                const bool skip_down = digital(g_game[GameJump].handle);
+                if (skip_down && !g_cal_skip_was &&
+                    vr_hand_calibration_active())
+                    vr_hand_calibration_skip();
+                g_cal_skip_was = skip_down;
                 if (!vr_hand_calibration_active())
                 {
                     if (g_cal_drew_guns && g_holster_drawn[0] &&
@@ -2260,6 +2318,7 @@ namespace trlvr
                         digital(g_game[GameInteract].handle);
                     g_tuning_trigger_hold[1] =
                         digital(g_game[GameFire].handle);
+                    g_cal_jump_hold = digital(g_game[GameJump].handle);
                 }
                 return;
             }
@@ -2536,6 +2595,11 @@ namespace trlvr
                 if (i == GamePause && g_pause_hold)
                 {
                     g_pause_hold = digital(g_game[GamePause].handle);
+                    continue;
+                }
+                if (i == GameJump && g_cal_jump_hold)
+                {
+                    g_cal_jump_hold = digital(g_game[GameJump].handle);
                     continue;
                 }
                 // A grip that grabbed from the gear cross, or holds Lara.

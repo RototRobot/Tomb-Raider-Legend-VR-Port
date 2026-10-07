@@ -63,6 +63,7 @@ namespace trlvr
         int g_view_prescale_fix = -1;
         unsigned g_ledge_visibility_marker = 0;
         bool g_hand_debug_enabled = false;
+        bool g_hand_ruler_enabled = false;
         bool g_hand_debug_left = true;
         bool g_hand_debug_rotation = false;
         bool g_key_down[9]{};
@@ -476,6 +477,8 @@ namespace trlvr
             g_hand_offset_loaded = true;
             g_hand_debug_enabled = GetPrivateProfileIntW(L"developer",
                 L"hand_tuning_debug", 0, path) != 0;
+            g_hand_ruler_enabled = GetPrivateProfileIntW(L"developer",
+                L"hand_ruler", 0, path) != 0;
             g_first_person_belt_height = read_zone_value(
                 path, L"first_person_belt_height", 12.0f,
                 -60.0f, 60.0f);
@@ -883,6 +886,13 @@ namespace trlvr
         }
         WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
         return ok;
+    }
+
+    bool tune_hand_ruler_enabled()
+    {
+        if (!g_hand_offset_loaded)
+            load_hand_offsets();
+        return g_hand_ruler_enabled;
     }
 
     bool tune_hand_debug_enabled()

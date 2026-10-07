@@ -19,5 +19,7 @@ namespace trlvr
     // Mission Prep (root screen 3001): its staged 3D scene is drawn without
     // eye separation, like a loading screen.
     bool ui_mission_prep_active();
+    // The PDA (root screen 6; its pages 9, 10, 12 stack on top).
+    bool ui_pda_active();
     short ui_root_screen_id();
 }

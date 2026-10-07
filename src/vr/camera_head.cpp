@@ -389,6 +389,89 @@ namespace trlvr
         // crosshair.
         float g_lock_target[3] = { 0.0f, 0.0f, 0.0f };
         DWORD g_lock_target_time = 0;
+        // Third person: the game has a target (crosshair red, else white).
+        bool g_lock_on_target = false;
+
+        // Environmental targets (user 2026-10-06: Lara aims at them, no
+        // crosshair). playerDrawCombatLock draws its reticle for the combat
+        // target only in lock states (PlayerData+0x3E6 == 3 or +0x440 &
+        // 0x3000000), so they never reach playerDrawCombatReticle. Fall back
+        // to the target Lara is actually aiming at: playerGetCombatTarget
+        // (0x005A54A0) and getTargetPosition (0x00588F90, Vector3& out).
+        // Guns out in retail terms: playerInvEnterIndicatorMode
+        // (0x005AC310) sets PlayerData+0x440 bit 0x01000000, lock mode
+        // 0x02000000; playerInvEndCombatMode (0x005AC4B0) clears both. The
+        // combat "state" read by retail_combat_state is never zero in
+        // third person (log 2026-10-06: 0x01..0x2D while walking), so it
+        // cannot say whether the guns are drawn.
+        bool retail_weapons_out()
+        {
+            __try
+            {
+                const unsigned char* player =
+                    *reinterpret_cast<unsigned char* const*>(0x0111713C);
+                return player &&
+                    (*reinterpret_cast<const unsigned*>(player + 0x440) &
+                     0x03000000u) != 0;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        // PlayerData+0x760: where the weapon will fire (playerUpdateTarget-
+        // Pos's result). Zero until a target has been chosen.
+        bool weapon_target_position(float out[3])
+        {
+            __try
+            {
+                const unsigned char* player =
+                    *reinterpret_cast<unsigned char* const*>(0x0111713C);
+                if (!player)
+                    return false;
+                const float* p =
+                    reinterpret_cast<const float*>(player + 0x760);
+                if (!std::isfinite(p[0]) || !std::isfinite(p[1]) ||
+                    !std::isfinite(p[2]) ||
+                    (p[0] == 0.0f && p[1] == 0.0f && p[2] == 0.0f))
+                    return false;
+                out[0] = p[0];
+                out[1] = p[1];
+                out[2] = p[2];
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        bool combat_target_position(float out[3])
+        {
+            __try
+            {
+                void* target = reinterpret_cast<void*(__cdecl*)()>(
+                    0x005A54A0)();
+                if (!target)
+                    return false;
+                alignas(16) float position[4] = {};
+                reinterpret_cast<void(__cdecl*)(float*, void*)>(
+                    0x00588F90)(position, target);
+                if (!std::isfinite(position[0]) ||
+                    !std::isfinite(position[1]) ||
+                    !std::isfinite(position[2]))
+                    return false;
+                out[0] = position[0];
+                out[1] = position[1];
+                out[2] = position[2];
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
         unsigned g_gameplay_target_updates = 0;
 
         bool g_first_person_active = false;
@@ -7729,30 +7812,11 @@ namespace trlvr
                     matrix_from_floats(matrices + wrist[hand] * 16);
                 Mat4 delta = first_person_hand_delta(
                     hand, original_wrist, controllers[hand]);
-                // Board mode: the hands read as sitting too far forward
-                // along the palm (user test 2026-10-02). Slide them back
-                // along the wrist->palm line by board_hand_back metres
-                // (pre-scale units; the projection then grows them by F).
-                float palm[3];
-                if (camera_world_scale_factor() > 1.001f &&
-                    first_person_palm_local(hand, palm))
-                {
-                    const Mat4 placed = original_wrist * delta;
-                    float dir[3]{};
-                    for (int k = 0; k < 3; ++k)
-                        dir[k] = palm[0] * placed.m[0][k] +
-                                 palm[1] * placed.m[1][k] +
-                                 palm[2] * placed.m[2][k];
-                    const float length = sqrtf(dir[0] * dir[0] +
-                        dir[1] * dir[1] + dir[2] * dir[2]);
-                    if (length > 1e-4f)
-                    {
-                        const float back = config().board_hand_back *
-                                           config().world_scale / length;
-                        delta = delta * translation(-dir[0] * back,
-                            -dir[1] * back, -dir[2] * back);
-                    }
-                }
+                // (A board-only slide back along the palm, board_hand_back,
+                // was removed 2026-10-07: it dated from a double-scaled grip
+                // offset fixed the same day, and with the hand ruler it was
+                // the whole 8 cm difference from classic. One hand tuning
+                // now fits every view.)
                 static short touched[512];
                 static float saved[512][16];
                 int touched_count = 0;
@@ -10683,12 +10747,30 @@ namespace trlvr
                 g_draw_combat_lock();
                 return;
             }
+            static int state_was = -1;
+            static unsigned state_reports = 0;
+            if (state != state_was && state_reports < 60)
+            {
+                ++state_reports;
+                log("aim: retail combat state 0x%02X (%s)", state,
+                    camera_first_person_active() ? "first person"
+                                                 : "third person");
+            }
+            state_was = state;
             if (state == 0)
             {
                 // Out of combat retail draws no reticle; third person still
                 // runs it for its other sense sprites.
                 if (!camera_first_person_active())
                     g_draw_combat_lock();
+                return;
+            }
+            // 0x30 is the caution indicator (danger sensed, guns away):
+            // retail draws only the warning sprite. No crosshair -- it
+            // showed whenever danger was near (user 2026-10-06).
+            if (state == 0x30)
+            {
+                g_draw_combat_lock();
                 return;
             }
             g_combat_reticle_time = GetTickCount();
@@ -10699,9 +10781,45 @@ namespace trlvr
             // its centre crosshair, which the VR crosshair replaces.
             if (state != 0x20 && g_draw_combat_reticle)
             {
+                const DWORD captured_before = g_lock_target_time;
                 g_block_combat_reticle = true;
                 g_draw_combat_lock();
                 g_block_combat_reticle = false;
+                // Third person: the crosshair goes where the shot goes --
+                // PlayerData+0x760, the weapon target playerUpdateTargetPos
+                // just chose. The reticle retail draws is for its combat
+                // lock target, which can be a different enemy than the
+                // rocks Lara is actually aiming at (user screenshot
+                // 2026-10-06). Failing that, the captured reticle, then
+                // the combat target (environment targets draw none).
+                float target[3];
+                if (!camera_first_person_active())
+                {
+                    float unused[3];
+                    g_lock_on_target =
+                        g_lock_target_time != captured_before ||
+                        combat_target_position(unused);
+                }
+                if (!camera_first_person_active() &&
+                    weapon_target_position(target))
+                {
+                    memcpy(g_lock_target, target, sizeof(g_lock_target));
+                    g_lock_target_time = GetTickCount();
+                }
+                else if (!camera_first_person_active() &&
+                    g_lock_target_time == captured_before &&
+                    combat_target_position(target))
+                {
+                    memcpy(g_lock_target, target, sizeof(g_lock_target));
+                    g_lock_target_time = GetTickCount();
+                    static bool reported = false;
+                    if (!reported)
+                    {
+                        reported = true;
+                        log("aim: third-person crosshair on a combat target "
+                            "retail drew no reticle for (environment target)");
+                    }
+                }
             }
             static bool reported[2] = { false, false };
             const int view = camera_first_person_active() ? 0 : 1;
@@ -12090,7 +12208,8 @@ namespace trlvr
 
     bool camera_aim_crosshair(float head_point[3], int* style)
     {
-        if (!head_point || !config().vr_crosshair)
+        if (!head_point || !config().vr_crosshair ||
+            vr_hand_calibration_active())
             return false;
         const bool first_person = camera_first_person_active();
         // Retail combat state can outlive the holster (it only gates its
@@ -12105,6 +12224,9 @@ namespace trlvr
         // where its lock-on rings would have been. No target, no crosshair
         // (as retail).
         const bool on_lock = !first_person && !g_combat_reticle_accurate;
+        // Third person: only with the guns drawn (precision aim aside).
+        if (on_lock && !retail_weapons_out())
+            return false;
         if (on_lock && (!g_lock_target_time ||
                         now - g_lock_target_time > 200))
             return false;
@@ -12126,7 +12248,7 @@ namespace trlvr
             head_point[axis] = value;
         }
         if (style)
-            *style = on_lock ? (2 | 4) :
+            *style = on_lock ? (g_lock_on_target ? (2 | 4) : 0) :
                      (g_combat_reticle_accurate ? 1 : 0) |
                      (g_aim_point_hit ? 2 : 0) |
                      (g_aim_point_enemy ? 4 : 0);

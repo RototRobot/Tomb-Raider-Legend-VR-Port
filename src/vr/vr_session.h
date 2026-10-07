@@ -195,8 +195,19 @@ namespace trlvr
     bool vr_hand_calibration_menu_pending();
     void vr_hand_calibration_clear_menu_request();
     // Fixes the reference pose in front of the current head. False (and
-    // logged) without grip poses for both hands.
-    bool vr_hand_calibration_begin();
+    // logged) without grip poses for both hands. with_aim: after the hands,
+    // a pistol aim step (first person with the pistols drawn).
+    bool vr_hand_calibration_begin(bool with_aim);
+    // Steps (user 2026-10-07): 0 hand alignment, 1 pistol aim. Each can be
+    // skipped (keeping what was saved before) and saves on its own.
+    int vr_hand_calibration_step();
+    void vr_hand_calibration_skip();
+    // Pistol aim: the aim hand (left_handed picks it) points its drawn
+    // pistol at the target and pulls the trigger; the direction from its
+    // grip to the target becomes the grip aim (mirrored for the other hand).
+    bool vr_hand_calibration_aim(bool left);
+    // The aim target in head space (game units), while step 1 is up.
+    bool vr_hand_calibration_target(float head_point[3]);
     void vr_hand_calibration_cancel(const char* reason);
     bool vr_hand_calibration_active();
     bool vr_hand_calibration_locked(bool left);
