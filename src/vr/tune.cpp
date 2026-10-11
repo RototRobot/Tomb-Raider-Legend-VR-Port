@@ -1,6 +1,7 @@
 #include "tune.h"
 #include "../proxy/gpu_profile.h"
 #include "cull.h"
+#include "reflection_stereo.h"
 #include "hud_capture.h"
 
 #include "vr_session.h"
@@ -64,6 +65,9 @@ namespace trlvr
         unsigned g_ledge_visibility_marker = 0;
         bool g_hand_debug_enabled = false;
         bool g_hand_ruler_enabled = false;
+        bool g_gear_cross_debug = false;
+        bool g_finger_debug = false;
+        bool g_finger_record = false;
         bool g_hand_debug_left = true;
         bool g_hand_debug_rotation = false;
         bool g_key_down[9]{};
@@ -275,13 +279,213 @@ namespace trlvr
                 g_hand_debug_rotation ? "degrees" : "game units");
         }
 
+        struct ProfileValue
+        {
+            const wchar_t* section;
+            const wchar_t* key;
+            const wchar_t* value;
+        };
+        // The developer's Reverb G2 tuning, 2026-10-08; hand calibration
+        // and grip aim redone 2026-10-11 (calibration hands 10 deg
+        // nose-down).
+        const ProfileValue kProfileReverb[] = {
+            { L"developer", L"grip_aim_pitch", L"-61.1" },
+            { L"developer", L"grip_aim_yaw", L"-29.7" },
+            { L"developer", L"aim_pitch", L"-62.0" },
+            { L"developer", L"aim_yaw", L"-32.5" },
+            { L"developer", L"grip_hand_cal_m00", L"0.240572438" },
+            { L"developer", L"grip_hand_cal_m01", L"-0.886961341" },
+            { L"developer", L"grip_hand_cal_m02", L"-0.394238710" },
+            { L"developer", L"grip_hand_cal_m10", L"-0.127931371" },
+            { L"developer", L"grip_hand_cal_m11", L"0.373649299" },
+            { L"developer", L"grip_hand_cal_m12", L"-0.918705642" },
+            { L"developer", L"grip_hand_cal_m20", L"0.962163389" },
+            { L"developer", L"grip_hand_cal_m21", L"0.271451056" },
+            { L"developer", L"grip_hand_cal_m22", L"-0.023580495" },
+            { L"developer", L"hand_left_cal_m00", L"0.329725802" },
+            { L"developer", L"hand_left_cal_m01", L"-0.122583061" },
+            { L"developer", L"hand_left_cal_m02", L"0.936084867" },
+            { L"developer", L"hand_left_cal_m10", L"-0.561800003" },
+            { L"developer", L"hand_left_cal_m11", L"0.771386743" },
+            { L"developer", L"hand_left_cal_m12", L"0.298903555" },
+            { L"developer", L"hand_left_cal_m20", L"-0.758723736" },
+            { L"developer", L"hand_left_cal_m21", L"-0.624448538" },
+            { L"developer", L"hand_left_cal_m22", L"0.185478792" },
+            { L"developer", L"hand_right_cal_m00", L"-0.351017147" },
+            { L"developer", L"hand_right_cal_m01", L"-0.497706294" },
+            { L"developer", L"hand_right_cal_m02", L"0.793142378" },
+            { L"developer", L"hand_right_cal_m10", L"-0.935727775" },
+            { L"developer", L"hand_right_cal_m11", L"0.217788830" },
+            { L"developer", L"hand_right_cal_m12", L"-0.277455270" },
+            { L"developer", L"hand_right_cal_m20", L"-0.034646213" },
+            { L"developer", L"hand_right_cal_m21", L"-0.839557171" },
+            { L"developer", L"hand_right_cal_m22", L"-0.542165637" },
+            { L"developer", L"holster_left_x", L"-0.187" },
+            { L"developer", L"holster_right_x", L"0.185" },
+            { L"developer", L"holster_y", L"-0.63" },
+            { L"developer", L"holster_z", L"-0.07" },
+            { L"developer", L"holster_radius_x", L"0.16" },
+            { L"developer", L"holster_radius_y", L"0.18" },
+            { L"developer", L"holster_radius_z", L"0.21" },
+            { L"developer", L"holster_left_y", L"-0.545" },
+            { L"developer", L"holster_left_z", L"-0.059" },
+            { L"developer", L"holster_right_y", L"-0.526" },
+            { L"developer", L"holster_right_z", L"-0.021" },
+            { L"developer", L"gear_grapple_x", L"0.105" },
+            { L"developer", L"gear_grapple_y", L"-0.454" },
+            { L"developer", L"gear_grapple_z", L"0.149" },
+            { L"developer", L"gear_binoculars_x", L"-0.136" },
+            { L"developer", L"gear_binoculars_y", L"-0.533" },
+            { L"developer", L"gear_binoculars_z", L"0.136" },
+            { L"developer", L"gear_light_x", L"-0.114" },
+            { L"developer", L"gear_light_y", L"-0.226" },
+            { L"developer", L"gear_light_z", L"0.064" },
+            { L"developer", L"gear_grenade_x", L"-0.003" },
+            { L"developer", L"gear_grenade_y", L"-0.566" },
+            { L"developer", L"gear_grenade_z", L"0.245" },
+            { L"developer", L"gear_medipack_x", L"0.102" },
+            { L"developer", L"gear_medipack_y", L"-0.197" },
+            { L"developer", L"gear_medipack_z", L"0.050" },
+            { L"developer", L"gear_custom_positions", L"1" },
+            { L"vr", L"hand_calibration_left",
+              L"0.939252 0.336762 0.066309 -0.331416 0.940089 -0.079977 "
+              L"-0.089269 0.053142 0.994589 0.005850 -0.073837 -0.082877" },
+            { L"vr", L"hand_calibration_right",
+              L"0.974462 -0.215322 -0.063718 0.220872 0.970255 0.099099 "
+              L"0.040484 -0.110642 0.993035 0.013293 -0.075340 -0.101658" },
+            { L"controls", L"gear_cross_right", L"-0.170" },
+            { L"controls", L"gear_cross_up", L"-0.466" },
+            { L"controls", L"gear_cross_forward", L"0.299" },
+        };
+        // Oculus Touch (Quest 3) tuning: hand calibration and grip aim
+        // from the developer's Quest 3 run, 2026-10-11, on the same hand
+        // transform as the Reverb profile; holsters, gear and the gear
+        // cross from a Quest tester (Oculus_tuned.ini, 2026-10-08).
+        const ProfileValue kProfileTouch[] = {
+            { L"developer", L"grip_aim_pitch", L"-60.1" },
+            { L"developer", L"grip_aim_yaw", L"-30.4" },
+            { L"developer", L"aim_pitch", L"-62.0" },
+            { L"developer", L"aim_yaw", L"-32.5" },
+            { L"developer", L"grip_hand_cal_m00", L"0.240572438" },
+            { L"developer", L"grip_hand_cal_m01", L"-0.886961341" },
+            { L"developer", L"grip_hand_cal_m02", L"-0.394238710" },
+            { L"developer", L"grip_hand_cal_m10", L"-0.127931371" },
+            { L"developer", L"grip_hand_cal_m11", L"0.373649299" },
+            { L"developer", L"grip_hand_cal_m12", L"-0.918705642" },
+            { L"developer", L"grip_hand_cal_m20", L"0.962163389" },
+            { L"developer", L"grip_hand_cal_m21", L"0.271451056" },
+            { L"developer", L"grip_hand_cal_m22", L"-0.023580495" },
+            { L"developer", L"hand_left_cal_m00", L"0.329725802" },
+            { L"developer", L"hand_left_cal_m01", L"-0.122583061" },
+            { L"developer", L"hand_left_cal_m02", L"0.936084867" },
+            { L"developer", L"hand_left_cal_m10", L"-0.561800003" },
+            { L"developer", L"hand_left_cal_m11", L"0.771386743" },
+            { L"developer", L"hand_left_cal_m12", L"0.298903555" },
+            { L"developer", L"hand_left_cal_m20", L"-0.758723736" },
+            { L"developer", L"hand_left_cal_m21", L"-0.624448538" },
+            { L"developer", L"hand_left_cal_m22", L"0.185478792" },
+            { L"developer", L"hand_right_cal_m00", L"-0.351017147" },
+            { L"developer", L"hand_right_cal_m01", L"-0.497706294" },
+            { L"developer", L"hand_right_cal_m02", L"0.793142378" },
+            { L"developer", L"hand_right_cal_m10", L"-0.935727775" },
+            { L"developer", L"hand_right_cal_m11", L"0.217788830" },
+            { L"developer", L"hand_right_cal_m12", L"-0.277455270" },
+            { L"developer", L"hand_right_cal_m20", L"-0.034646213" },
+            { L"developer", L"hand_right_cal_m21", L"-0.839557171" },
+            { L"developer", L"hand_right_cal_m22", L"-0.542165637" },
+            { L"developer", L"holster_left_x", L"-0.218" },
+            { L"developer", L"holster_right_x", L"0.247" },
+            { L"developer", L"holster_y", L"-0.63" },
+            { L"developer", L"holster_z", L"-0.07" },
+            { L"developer", L"holster_radius_x", L"0.13" },
+            { L"developer", L"holster_radius_y", L"0.15" },
+            { L"developer", L"holster_radius_z", L"0.18" },
+            { L"developer", L"holster_left_y", L"-0.465" },
+            { L"developer", L"holster_left_z", L"-0.061" },
+            { L"developer", L"holster_right_y", L"-0.519" },
+            { L"developer", L"holster_right_z", L"-0.118" },
+            { L"developer", L"gear_grapple_x", L"0.074" },
+            { L"developer", L"gear_grapple_y", L"-0.458" },
+            { L"developer", L"gear_grapple_z", L"0.000" },
+            { L"developer", L"gear_binoculars_x", L"-0.094" },
+            { L"developer", L"gear_binoculars_y", L"-0.462" },
+            { L"developer", L"gear_binoculars_z", L"0.009" },
+            { L"developer", L"gear_light_x", L"-0.110" },
+            { L"developer", L"gear_light_y", L"-0.184" },
+            { L"developer", L"gear_light_z", L"-0.002" },
+            { L"developer", L"gear_grenade_x", L"-0.009" },
+            { L"developer", L"gear_grenade_y", L"-0.305" },
+            { L"developer", L"gear_grenade_z", L"-0.029" },
+            { L"developer", L"gear_medipack_x", L"0.149" },
+            { L"developer", L"gear_medipack_y", L"-0.221" },
+            { L"developer", L"gear_medipack_z", L"0.009" },
+            { L"developer", L"gear_custom_positions", L"1" },
+            { L"controls", L"gear_cross_right", L"-0.318" },
+            { L"controls", L"gear_cross_up", L"-0.341" },
+            { L"vr", L"hand_calibration_left",
+              L"0.969951 0.241271 -0.031378 -0.242096 0.944256 -0.223092 "
+              L"-0.024197 0.223985 0.974292 -0.003403 -0.088850 -0.062348" },
+            { L"vr", L"hand_calibration_right",
+              L"0.977691 -0.198456 0.068819 0.199299 0.979923 -0.005542 "
+              L"-0.066337 0.019134 0.997614 0.011165 -0.049608 -0.073391" },
+            { L"controls", L"gear_cross_forward", L"0.408" },
+        };
+        int g_controller_profile = 0;
+
+        // Values startup used to write into every INI: still there in old
+        // INIs, so they cannot mean the player chose them.
+        bool old_auto_written(const wchar_t* key, const wchar_t* text)
+        {
+            static const ProfileValue kOld[] = {
+                { L"developer", L"holster_left_x", L"-0.24" },
+                { L"developer", L"holster_right_x", L"0.24" },
+                { L"developer", L"holster_y", L"-0.63" },
+                { L"developer", L"holster_z", L"-0.07" },
+                { L"developer", L"holster_radius_x", L"0.13" },
+                { L"developer", L"holster_radius_y", L"0.15" },
+                { L"developer", L"holster_radius_z", L"0.18" },
+            };
+            wchar_t* end = nullptr;
+            const float value = wcstof(text, &end);
+            if (end == text)
+                return false;
+            for (const ProfileValue& old : kOld)
+                if (_wcsicmp(old.key, key) == 0)
+                    return fabsf(value - (float)_wtof(old.value)) < 1.0e-4f;
+            return false;
+        }
+
+        const wchar_t* profile_value(const wchar_t* section,
+                                     const wchar_t* key)
+        {
+            const ProfileValue* table = g_controller_profile == 1
+                ? kProfileTouch : kProfileReverb;
+            const size_t count = g_controller_profile == 1
+                ? _countof(kProfileTouch) : _countof(kProfileReverb);
+            for (size_t i = 0; i < count; ++i)
+                if (_wcsicmp(table[i].section, section) == 0 &&
+                    _wcsicmp(table[i].key, key) == 0)
+                    return table[i].value;
+            return nullptr;
+        }
+
+        // GetPrivateProfileString with the profile's default.
+        void profile_read(const wchar_t* section, const wchar_t* key,
+                          wchar_t* text, size_t count, const wchar_t* path)
+        {
+            GetPrivateProfileStringW(section, key, L"", text, (DWORD)count,
+                                     path);
+            const wchar_t* fallback = profile_value(section, key);
+            if (fallback && (!text[0] || old_auto_written(key, text)))
+                wcsncpy_s(text, count, fallback, _TRUNCATE);
+        }
+
         float read_zone_value(const wchar_t* path, const wchar_t* key,
                               float fallback, float min_value,
                               float max_value)
         {
             wchar_t text[64]{};
-            GetPrivateProfileStringW(L"developer", key, L"", text,
-                                     _countof(text), path);
+            profile_read(L"developer", key, text, _countof(text), path);
             if (!text[0])
                 return fallback;
             wchar_t* end = nullptr;
@@ -296,8 +500,7 @@ namespace trlvr
                                  float* out)
         {
             wchar_t text[64]{};
-            GetPrivateProfileStringW(L"developer", key, L"", text,
-                                     _countof(text), path);
+            profile_read(L"developer", key, text, _countof(text), path);
             if (!text[0])
                 return false;
             wchar_t* end = nullptr;
@@ -479,6 +682,17 @@ namespace trlvr
                 L"hand_tuning_debug", 0, path) != 0;
             g_hand_ruler_enabled = GetPrivateProfileIntW(L"developer",
                 L"hand_ruler", 0, path) != 0;
+            g_gear_cross_debug = GetPrivateProfileIntW(L"developer",
+                L"gear_cross_debug", 0, path) != 0;
+            log("tune: gear cross debug view %s",
+                g_gear_cross_debug ? "on" : "off");
+            g_finger_record = GetPrivateProfileIntW(L"developer",
+                L"finger_record", 0, path) != 0;
+            log("tune: finger pose recorder %s", g_finger_record
+                ? "on (numpad / starts and stops a recording)" : "off");
+            g_finger_debug = GetPrivateProfileIntW(L"developer",
+                L"finger_debug", 0, path) != 0;
+            log("tune: finger debug view %s", g_finger_debug ? "on" : "off");
             g_first_person_belt_height = read_zone_value(
                 path, L"first_person_belt_height", 12.0f,
                 -60.0f, 60.0f);
@@ -555,8 +769,10 @@ namespace trlvr
 
             g_gear_tuning_enabled = GetPrivateProfileIntW(L"developer",
                 L"gear_tuning", 0, path) != 0;
-            const bool custom = GetPrivateProfileIntW(L"developer",
-                L"gear_custom_positions", 0, path) != 0;
+            wchar_t custom_text[16]{};
+            profile_read(L"developer", L"gear_custom_positions",
+                         custom_text, _countof(custom_text), path);
+            const bool custom = _wtoi(custom_text) != 0;
             for (int gear = 0; gear < TuneGearCount; ++gear)
             {
                 g_gear_saved_valid[gear] = false;
@@ -738,6 +954,72 @@ namespace trlvr
         return true;
     }
 
+    void tune_theatre_offset(float out[3])
+    {
+        wchar_t path[MAX_PATH]{};
+        ini_path(path);
+        const wchar_t* keys[3] = { L"theatre_window_right",
+                                   L"theatre_window_up",
+                                   L"theatre_window_forward" };
+        for (int k = 0; k < 3; ++k)
+        {
+            wchar_t value[32]{};
+            GetPrivateProfileStringW(L"vr", keys[k], L"0", value, 32, path);
+            const float v = (float)_wtof(value);
+            out[k] = std::isfinite(v) && fabsf(v) < 20.0f ? v : 0.0f;
+        }
+    }
+
+    void tune_set_theatre_offset(const float in[3])
+    {
+        wchar_t path[MAX_PATH]{};
+        ini_path(path);
+        const wchar_t* keys[3] = { L"theatre_window_right",
+                                   L"theatre_window_up",
+                                   L"theatre_window_forward" };
+        for (int k = 0; k < 3; ++k)
+        {
+            wchar_t value[32]{};
+            swprintf_s(value, L"%.3f", in[k]);
+            WritePrivateProfileStringW(L"vr", keys[k], value, path);
+        }
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
+        log("tune: theatre window moved to (%+.2f, %+.2f, %+.2f) m from its "
+            "place; saved", in[0], in[1], in[2]);
+    }
+
+    void tune_board_offset(float out[3])
+    {
+        wchar_t path[MAX_PATH]{};
+        ini_path(path);
+        const wchar_t* keys[3] = { L"board_offset_right", L"board_offset_up",
+                                   L"board_offset_forward" };
+        for (int k = 0; k < 3; ++k)
+        {
+            wchar_t value[32]{};
+            GetPrivateProfileStringW(L"vr", keys[k], L"0", value, 32, path);
+            const float v = (float)_wtof(value);
+            out[k] = std::isfinite(v) && fabsf(v) < 10.0f ? v : 0.0f;
+        }
+    }
+
+    void tune_set_board_offset(const float in[3])
+    {
+        wchar_t path[MAX_PATH]{};
+        ini_path(path);
+        const wchar_t* keys[3] = { L"board_offset_right", L"board_offset_up",
+                                   L"board_offset_forward" };
+        for (int k = 0; k < 3; ++k)
+        {
+            wchar_t value[32]{};
+            swprintf_s(value, L"%.3f", in[k]);
+            WritePrivateProfileStringW(L"vr", keys[k], value, path);
+        }
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
+        log("tune: board (and diorama) moved to (%+.2f, %+.2f, %+.2f) m from "
+            "its place; saved", in[0], in[1], in[2]);
+    }
+
     bool tune_set_grip_aim(float pitch_degrees, float yaw_degrees)
     {
         if (!std::isfinite(pitch_degrees) || !std::isfinite(yaw_degrees))
@@ -772,8 +1054,8 @@ namespace trlvr
             {
                 g_hand_correction_valid[h] = false;
                 wchar_t text[512]{};
-                GetPrivateProfileStringW(L"vr", kHandCorrectionKeys[h], L"",
-                                         text, _countof(text), path);
+                profile_read(L"vr", kHandCorrectionKeys[h], text,
+                             _countof(text), path);
                 float values[12]{};
                 const wchar_t* p = text;
                 int n = 0;
@@ -851,8 +1133,8 @@ namespace trlvr
         for (int i = 0; i < 9; ++i)
         {
             wchar_t text[64]{};
-            GetPrivateProfileStringW(L"developer", kCalibrationKeys[hand][i],
-                                     L"", text, _countof(text), path);
+            profile_read(L"developer", kCalibrationKeys[hand][i], text,
+                         _countof(text), path);
             if (!text[0])
                 return false;
             wchar_t* end = nullptr;
@@ -886,6 +1168,114 @@ namespace trlvr
         }
         WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
         return ok;
+    }
+
+    int tune_reset_controller_tuning_on_load()
+    {
+        wchar_t path[MAX_PATH]{};
+        ini_path(path);
+        if (!GetPrivateProfileIntW(L"controls",
+                                   L"reset_controller_tuning_on_load", 0,
+                                   path))
+            return -1;
+        int removed = 0;
+        const auto remove = [&](const wchar_t* section, const wchar_t* key)
+        {
+            wchar_t text[8]{};
+            GetPrivateProfileStringW(section, key, L"", text, _countof(text),
+                                     path);
+            if (!text[0])
+                return;
+            if (WritePrivateProfileStringW(section, key, nullptr, path))
+                ++removed;
+        };
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                remove(L"developer", kPositionKeys[hand][axis]);
+                remove(L"developer", kRotationKeys[hand][axis]);
+            }
+            for (int i = 0; i < 9; ++i)
+                remove(L"developer", kCalibrationKeys[hand][i]);
+            remove(L"vr", kHandCorrectionKeys[hand]);
+        }
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            remove(L"developer", kGripPosKeys[axis]);
+            remove(L"developer", kGripRotKeys[axis]);
+        }
+        for (int i = 0; i < 9; ++i)
+            remove(L"developer", kGripCalKeys[i]);
+        const wchar_t* aim_keys[] = {
+            L"grip_aim_pitch", L"grip_aim_yaw", L"aim_pitch", L"aim_yaw",
+            L"aim_pitch_left", L"aim_yaw_left" };
+        for (const wchar_t* key : aim_keys)
+            remove(L"developer", key);
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
+        return removed;
+    }
+
+    void tune_set_controller_profile(int profile, const char* type)
+    {
+        profile = profile == 1 ? 1 : 0;
+        if (profile == g_controller_profile)
+        {
+            log("tune: %s controllers -- %s tuning profile", type ? type : "?",
+                profile == 1 ? "Oculus Touch" : "Reverb G2 (default)");
+            return;
+        }
+        g_controller_profile = profile;
+        // Everything read through the profile is read again.
+        g_hand_offset_loaded = false;
+        g_hand_correction_loaded = false;
+        log("tune: %s controllers -- switched to the %s tuning profile (INI "
+            "values still take precedence)", type ? type : "?",
+            profile == 1 ? "Oculus Touch" : "Reverb G2 (default)");
+    }
+
+    int tune_controller_profile() { return g_controller_profile; }
+
+    bool tune_profile_read(const wchar_t* section, const wchar_t* key,
+                           wchar_t* out, size_t out_count)
+    {
+        if (!out || !out_count)
+            return false;
+        wchar_t path[MAX_PATH]{};
+        ini_path(path);
+        profile_read(section, key, out, out_count, path);
+        return out[0] != 0;
+    }
+
+    bool tune_profile_default(const wchar_t* section, const wchar_t* key,
+                              float* out)
+    {
+        const wchar_t* text = profile_value(section, key);
+        if (!text || !out)
+            return false;
+        *out = (float)_wtof(text);
+        return std::isfinite(*out);
+    }
+
+    bool tune_finger_record()
+    {
+        if (!g_hand_offset_loaded)
+            load_hand_offsets();
+        return g_finger_record;
+    }
+
+    bool tune_finger_debug()
+    {
+        if (!g_hand_offset_loaded)
+            load_hand_offsets();
+        return g_finger_debug;
+    }
+
+    bool tune_gear_cross_debug()
+    {
+        if (!g_hand_offset_loaded)
+            load_hand_offsets();
+        return g_gear_cross_debug;
     }
 
     bool tune_hand_ruler_enabled()
@@ -980,7 +1370,13 @@ namespace trlvr
             vr_recenter();
         if (GetAsyncKeyState(VK_F5) & 1)
             load_hand_offsets();
-        if (GetAsyncKeyState(VK_F7) & 1)
+        const bool shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+        // Shift+F7 / Shift+F8: water reflection / screen copy modes
+        // (diagnosis, reflection_stereo.h).
+        const bool f7 = (GetAsyncKeyState(VK_F7) & 1) != 0;
+        if (f7 && shift_down)
+            reflection_stereo_cycle_mode(false);
+        else if (f7)
         {
             g_view_prescale_fix = tune_view_prescale_fix() ? 0 : 1;
             log("tune: F7 view prescale fix %s (true VR proportions %s)",
@@ -1059,7 +1455,10 @@ namespace trlvr
                     camera_pose_debug_key(20);
             }
         }
-        if (GetAsyncKeyState(VK_F8) & 1)
+        const bool f8 = (GetAsyncKeyState(VK_F8) & 1) != 0;
+        if (f8 && shift_down)
+            reflection_stereo_cycle_mode(true);
+        else if (f8)
         {
             ++g_ledge_visibility_marker;
             log("tune: ledge hand geometry/projection sample %u (F8)",

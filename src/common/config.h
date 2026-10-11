@@ -26,6 +26,58 @@ namespace trlvr
         bool head_position = true;
         bool hmd_drives_camera = true;
         bool hmd_drives_position = true;
+        // Roomscale (2026-10-09): in first person on the ground, walking in
+        // the room moves Lara (beyond a lean deadzone, metres), with the
+        // game's collision probe stopping her -- and the view -- at walls.
+        bool roomscale = true;
+        float roomscale_deadzone = 0.15f;
+        // Roomscale walk (2026-10-10): a real step of more than 0.4 m is
+        // walked by the game itself (walk key + direction keys), so Lara
+        // turns and walks with her own animations.
+        bool roomscale_walk = true;
+        // Wall touch (user 2026-10-10, as in the newer Tomb Raider games):
+        // in third person, walking beside a wall with nothing drawn, Lara
+        // reaches out and runs her near hand along it. Up to
+        // wall_touch_max_speed metres per second (walking, not running).
+        bool wall_touch = true;
+        // Stereo water reflection (2026-10-11): the game's planar reflection
+        // drawn once per eye. Needs Reflections on in the Setup dialog.
+        // Experimental and off: no visible difference was confirmed, and it
+        // draws the reflection twice.
+        bool water_reflection = false;
+        // Water Effects (underwater / surface distortion) per eye: the
+        // screen copy it samples is split by eye. Needs Water Effects on in
+        // the Setup dialog. Experimental and off: user test 2026-10-11 still
+        // showed it in one eye, following the head (the full-screen
+        // distortion layer, FXDRAW_WaterFX 0x00446D90, is not understood
+        // well enough yet).
+        bool water_effects = false;
+        float wall_touch_max_speed = 2.6f;
+        // Hardcore first person (2026-10-10, a user's request): the view
+        // turns with Lara's body through flips, rolls and spins instead of
+        // staying level.
+        bool first_person_hardcore = false;
+        // Tilts under this many degrees stay level (walking); it eases in
+        // to a full follow at three times it.
+        float first_person_hardcore_threshold = 20.0f;
+        // First person: the hands (and what they hold) stop at walls and
+        // the ground instead of passing through (2026-10-09; off by default
+        // since 2026-10-10 at the user's request).
+        bool hand_collision = false;
+        // First person: the hands cannot go into Lara's own torso.
+        bool hand_body_collision = true;
+        // Torso spring (2026-10-10, first-person full body): her chest
+        // sways on a damped spring about the neck -- rotation only, at most
+        // body_spring_angle degrees -- from turning, the walk's bob and the
+        // player's hands pressing on it.
+        bool body_spring = true;
+        float body_spring_angle = 4.0f;
+        // Soft parts (2026-10-10): the chest's own front children (her
+        // breast bones in the skeleton dump) bounce on their own springs,
+        // mostly up and down, and give under the hands; at most
+        // body_soft_angle degrees.
+        bool body_soft = true;
+        float body_soft_angle = 12.0f;
         bool hmd_aim = true;
         float world_scale = 291.0f;
         float head_rotation_scale = 1.0f;
@@ -69,6 +121,12 @@ namespace trlvr
         // Depth of field: -1 = the game's own setting (launcher), 0 = off,
         // 1 = on. Applied when the game loads its graphics settings.
         int depth_of_field = 0;
+        // Fullscreen Effects (the game's glow/bloom pass, which reads the
+        // two-eye target as one image): same choices, off by default.
+        int fullscreen_effects = 0;
+        // The game's FSAA (anti-aliasing): on by default; its strength is
+        // capped by msaa.
+        int fsaa = 1;
         // Comfort vignette: 0 off, 1 while jumping/rolling, 2 on any
         // movement (walk, run, jump, roll, shimmy, climb, smooth turn).
         int comfort_vignette = 0;
@@ -105,6 +163,34 @@ namespace trlvr
         // strength, up to 2) and a controller vibration per shot.
         float weapon_recoil = 1.0f;
         bool weapon_haptics = true;
+        // The game's own gamepad rumble (screen shakes, explosions) played
+        // on both VR controllers (2026-10-08).
+        bool shake_rumble = true;
+        // Cutscenes (2026-10-09): false = as before (the head turns the
+        // cutscene camera), true = theatre -- the cutscene is seen through
+        // a window fixed in the room, in a black space, still 3D (leaning
+        // looks round into the scene). [vr] cutscene_mode = normal/theatre.
+        bool cutscene_theatre = false;
+        float cutscene_screen_width = 3.0f;      // metres, 16:9
+        float cutscene_screen_distance = 2.5f;   // metres ahead
+        // Scene scale in the theatre: 0 = auto (each shot scaled so Lara
+        // sits at the screen), else a fixed factor (1 = life size).
+        float cutscene_scale = 0.0f;
+        // Gameplay theatre (2026-10-10): third-person play (not board mode)
+        // through the same room-fixed window. Off by default.
+        bool gameplay_theatre = false;
+        // The room round the window, 0xRRGGBB: black, or a chroma-key
+        // colour for headsets/streamers that swap it for passthrough.
+        unsigned theatre_backdrop = 0x000000;
+        // Board-mode diorama (2026-10-10): the tabletop world seen through
+        // a box with open front and top; outside it the room is dark
+        // (theatre_backdrop). Metres; the box is centred on Lara's spot and
+        // reaches board_diorama_below under her floor.
+        bool board_diorama = false;
+        float board_diorama_width = 0.6f;
+        float board_diorama_depth = 0.6f;
+        float board_diorama_height = 0.45f;
+        float board_diorama_below = 0.15f;
         // Extra height from Lara's HeadSegment joint to her eye position,
         // measured in game units. The joint is at neck/collar level.
         float first_person_eye_height = 70.0f;
@@ -135,6 +221,24 @@ namespace trlvr
         // Opt-in body-relative gestures layered over the normal SteamVR
         // bindings. The standard bindings remain the default and fallback.
         bool immersive_controls = false;
+        // Gear (medipack, binoculars, weapon switch, light) in immersive
+        // third person: false = the 3D gear cross, true = the radial menu
+        // (left stick long press, then a stick direction, with the game's
+        // own flat cross shown). Immersive off always uses the radial menu.
+        // [controls] gear_menu = cross / radial (2026-10-09).
+        bool gear_menu_radial = false;
+        // Analog walk (2026-10-10): the game only gets keys, so the stick
+        // was run-or-nothing. A light push also holds the game's Walk key
+        // (input slot 20 Left Shift or 21 Left Ctrl, whichever is Walk).
+        bool stick_walk = true;
+        // Finger tracking (2026-10-10): Lara's fingers follow SteamVR's
+        // skeletal input (controller finger sensors, or Quest / Index hand
+        // tracking), from her model's straight rest pose instead of her
+        // animation. finger_rest_curl is how curled that pose already is.
+        bool finger_tracking = false;   // off by default (user 2026-10-10)
+        float finger_rest_curl = 0.0f;
+        float stick_walk_threshold = 0.7f;   // stick below this walks
+        unsigned short walk_vk = 0xA0;       // VK_LSHIFT
         // Left-handed: long guns and the aim ray use the left controller and
         // the triggers swap (left fires; right does Action / precision aim).
         bool left_handed = false;
@@ -173,6 +277,18 @@ namespace trlvr
     };
 
     const Config& config();
+    // Hardcore first person from the pause menu: set and saved.
+    void config_set_first_person_hardcore(bool on);
+    // The other VR Settings toggles (pause menu, 2026-10-10): each sets the
+    // live value and saves it to trlvr.ini.
+    void config_set_left_handed(bool on);
+    // 0 off, 1 cutscenes, 2 cutscenes and gameplay.
+    void config_set_theatre(int mode);
+    // 0 classic, 1 shoulder, 2 board, 3 all (the view switch cycles them).
+    void config_set_third_person_mode(int mode);
+    void config_set_full_body(bool on);
+    // Hands against the world and Lara's body.
+    void config_set_hand_collision(bool world, bool body);
     void load_config();
     unsigned config_defaults_added();
 }

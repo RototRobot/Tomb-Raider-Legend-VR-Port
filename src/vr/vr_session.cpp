@@ -2,6 +2,7 @@
 #include "camera_head.h"
 #include "stereo.h"
 
+#include "reflection_stereo.h"
 #include "../common/config.h"
 #include "../common/log.h"
 #include "tune.h"
@@ -66,6 +67,9 @@ namespace trlvr
                 return true;                     // size not known yet
             if (g_rt_w == g_scene_w && g_rt_h == g_scene_h)
                 return true;
+            // The water reflection, drawn per eye into its own targets.
+            if (reflection_stereo_pass_active())
+                return true;
 
             // PCWaterEffect renders a mask/distortion image at half the
             // scene's width and height. In same-frame stereo that target also
@@ -84,6 +88,33 @@ namespace trlvr
         float g_head_pos[3] = { 0.0f, 0.0f, 0.0f };
         float g_pos_offset[3] = { 0.0f, 0.0f, 0.0f };
         float g_head_position_origin[3] = { 0.0f, 0.0f, 0.0f };
+        // The headset's flat forward (tracking x, z) at the last recentre.
+        // Head rotation is measured from it (g_yaw_offset), so head
+        // position must be too: it was left in SteamVR's raw axes, which put
+        // every lean -- and, with roomscale, every step -- off by the
+        // recentre's yaw (user 2026-10-10: walking only went the right way
+        // toward one direction; that log recentred at -57 degrees).
+        float g_recentre_forward[2] = { 0.0f, -1.0f };
+
+        // Raw head displacement (engine axes: x right, y down, z forward
+        // of SteamVR's own frame) -> the recentred frame, and back.
+        void head_raw_to_recentred(const float d[3], float out[3])
+        {
+            const float fx = g_recentre_forward[0], fz = g_recentre_forward[1];
+            const float right = -d[0] * fz - d[2] * fx;
+            const float forward = d[0] * fx - d[2] * fz;
+            out[0] = right;
+            out[1] = d[1];
+            out[2] = forward;
+        }
+
+        void head_recentred_to_raw(const float d[3], float out[3])
+        {
+            const float fx = g_recentre_forward[0], fz = g_recentre_forward[1];
+            out[0] = -d[0] * fz + d[2] * fx;
+            out[1] = d[1];
+            out[2] = -d[0] * fx - d[2] * fz;
+        }
         bool g_head_position_origin_active = false;
         bool g_head_position_recenter_pending = false;
         bool g_pose_valid = false;
@@ -100,9 +131,43 @@ namespace trlvr
         bool g_main_camera_head_valid = false;
         Mat4 g_pause_head_anchor = Mat4::identity();
         bool g_pause_head_anchor_valid = false;
+        // Theatre diagnostics, per 5 s: camera builds against frames, and
+        // the largest correction the residual below made.
+        unsigned g_theatre_builds = 0, g_theatre_frames = 0;
+        float g_theatre_max_turn = 0.0f, g_theatre_max_move = 0.0f;
 
-        Mat4 pause_head_delta()
+        // Bumped whenever anything pause_head_delta reads can change: new
+        // poses (once a frame), a camera build, a recentre.
+        unsigned g_head_state_generation = 1;
+
+        Mat4 pause_head_delta_compute()
         {
+            // Theatre (user 2026-10-09: the window "moves some" with the
+            // head): the room-fixed surround is drawn with this frame's
+            // pose, but the scene with the pose baked into the cutscene
+            // camera at its last build -- and a cutscene camera is not
+            // necessarily rebuilt every frame. Carry the scene from that
+            // pose to this one, as a paused scene is carried.
+            if (vr_theatre_active() && !ui_menu_active() &&
+                config().hmd_drives_camera && g_pose_valid &&
+                g_main_camera_head_valid)
+            {
+                g_pause_head_anchor_valid = false;
+                const Mat4 delta = rigid_inverse(g_main_camera_head) *
+                                   vr_head_camera_view();
+                const float c = 0.5f * (delta.m[0][0] + delta.m[1][1] +
+                                        delta.m[2][2] - 1.0f);
+                const float turn = acosf(c > 1.0f ? 1.0f : c < -1.0f ? -1.0f
+                                                                     : c);
+                const float move = sqrtf(delta.m[3][0] * delta.m[3][0] +
+                                         delta.m[3][1] * delta.m[3][1] +
+                                         delta.m[3][2] * delta.m[3][2]);
+                if (std::isfinite(turn) && turn > g_theatre_max_turn)
+                    g_theatre_max_turn = turn;
+                if (std::isfinite(move) && move > g_theatre_max_move)
+                    g_theatre_max_move = move;
+                return delta;
+            }
             if (!ui_menu_active() || !config().hmd_drives_camera ||
                 !g_pose_valid)
             {
@@ -120,6 +185,25 @@ namespace trlvr
                     "pause HUD head-locked, main menu world-locked");
             }
             return rigid_inverse(g_pause_head_anchor) * current;
+        }
+
+        // Once per change, not once per draw (2026-10-11 performance pass:
+        // paused, ~4000 draws x 2 eyes each redid the menu checks, the head
+        // pose and an inverse -- 8-18 ms of CPU a frame, the pause menu at
+        // 33 fps against 2-3 ms for the same scene in gameplay).
+        Mat4 pause_head_delta()
+        {
+            static unsigned cached_generation = 0;
+            static unsigned cached_recenter = 0;
+            static Mat4 cached = Mat4::identity();
+            if (cached_generation != g_head_state_generation ||
+                cached_recenter != g_recenter_generation)
+            {
+                cached = pause_head_delta_compute();
+                cached_generation = g_head_state_generation;
+                cached_recenter = g_recenter_generation;
+            }
+            return cached;
         }
 
         void set_status(const char* fmt, ...)
@@ -500,9 +584,18 @@ namespace trlvr
         float retail[3];
         float focus[3];
     };
-    SkyCandidate g_sky_last[8];
+    // 2026-10-11 (user: the second level's sky slid with the look stick and
+    // precision aim again): the window was the first 8 calls of a frame --
+    // one per eye per upload, so only ~4 draws; a level that draws other
+    // things before its sky never had it learned. Now 32 calls.
+    const int kSkyLearnCalls = 32;
+    // Nearest a sky may be (2026-10-11: level 2's dome sits 2393 units from
+    // the camera, and was refused at 2500; the black-slab draw it guards
+    // against was 1302 units).
+    const float kSkyMinDistance = 2000.0f;
+    SkyCandidate g_sky_last[32];
     int g_sky_last_count = 0;
-    SkyCandidate g_sky_this[8];
+    SkyCandidate g_sky_this[32];
     int g_sky_this_count = 0;
     // Learned offsets, a ring (2026-10-05: four fixed slots filled up in
     // the user's level by 285 s -- one with a 2-unit duplicate -- and a
@@ -512,9 +605,9 @@ namespace trlvr
     int g_sky_offset_next = 0;
     // Offsets of this and last frame's sky draws: a sky draw keeps being
     // recognised when its offset drifts a little between frames.
-    float g_sky_hits_last[8][3];
+    float g_sky_hits_last[16][3];
     int g_sky_hits_last_count = 0;
-    float g_sky_hits_this[8][3];
+    float g_sky_hits_this[16][3];
     int g_sky_hits_this_count = 0;
     int g_sky_frame_draws = 0;
     bool g_sky_no_eye_offset = false;
@@ -547,7 +640,7 @@ namespace trlvr
         };
         // Learn from the first draws of the frame.
         const int draw_index = g_sky_frame_draws++;
-        if (draw_index < 8)
+        if (draw_index < kSkyLearnCalls)
         {
             for (int i = 0; i < g_sky_last_count; ++i)
             {
@@ -580,14 +673,14 @@ namespace trlvr
                                    (c.retail[k] - c.focus[k]));
                 const bool follows_lara = orbit < 20.0f;
                 if (moved > 10.0f && same(c.offset, offset, 2.0f) &&
-                    (offset_length < 2500.0f || moved > 400.0f ||
+                    (offset_length < kSkyMinDistance || moved > 400.0f ||
                      follows_lara))
                 {
                     static unsigned rejected = 0;
                     if (rejected++ < 6 && !follows_lara)
                         log("sky: camera-following draw at offset (%.0f, "
                             "%.0f, %.0f) not taken as sky (%s)", offset[0],
-                            offset[1], offset[2], offset_length < 2500.0f
+                            offset[1], offset[2], offset_length < kSkyMinDistance
                                 ? "too close" : "camera jumped");
                 }
                 else if (moved > 10.0f && same(c.offset, offset, 2.0f))
@@ -612,7 +705,7 @@ namespace trlvr
                     }
                 }
             }
-            if (g_sky_this_count < 8)
+            if (g_sky_this_count < kSkyLearnCalls)
             {
                 SkyCandidate& c = g_sky_this[g_sky_this_count++];
                 memcpy(c.offset, offset, sizeof(offset));
@@ -625,11 +718,11 @@ namespace trlvr
             pinned = same(g_sky_offsets[j], offset, 2.0f);
         // Last frame's sky, drifted by a few units (first draws only).
         for (int j = 0; j < g_sky_hits_last_count && !pinned &&
-                        draw_index < 12; ++j)
+                        draw_index < kSkyLearnCalls + 8; ++j)
             pinned = same(g_sky_hits_last[j], offset, 24.0f);
         if (!pinned)
             return false;
-        if (g_sky_hits_this_count < 8)
+        if (g_sky_hits_this_count < 16)
             memcpy(g_sky_hits_this[g_sky_hits_this_count++], offset,
                    sizeof(offset));
         for (int k = 0; k < 3; ++k)
@@ -1176,9 +1269,14 @@ namespace trlvr
             // scale, so stereo stays right.
             if (!camera_first_person_active() && (hand == 2 || hand == 3))
             {
-                const float grow = camera_world_scale_factor();
+                // Theatre: the eye separation carries the shot's scale, so
+                // the hands are scaled about the head by it too, or they
+                // read that much nearer or farther than the real hands
+                // (user 2026-10-10).
+                const float grow = camera_world_scale_factor() *
+                    (vr_theatre_active() ? camera_theatre_scale() : 1.0f);
                 Mat4 scale = Mat4::identity();
-                if (grow > 1.001f)
+                if (fabsf(grow - 1.0f) > 0.001f)
                     scale.m[0][0] = scale.m[1][1] = scale.m[2][2] = grow;
                 // The scene's own projection (same near/far), so the hands'
                 // depth values are comparable with the world's. A near of 4
@@ -1440,6 +1538,333 @@ namespace trlvr
     const Mat4& vr_head_view() { return g_head_view; }
     float vr_head_yaw() { return g_head_yaw; }
 
+    // Cutscene theatre (user 2026-10-09, after Vertigo 2): the cutscene
+    // camera stays where the game puts it -- unlevelled, the flat game's
+    // own framing -- and the head moves the eye from it as through a
+    // window: anchored where the head was when the cutscene began (or at a
+    // recentre), at 1:1, so leaning looks round into the scene. Outside
+    // the window everything is black (vr_submit draws the surround before
+    // the HUD, so subtitles stay on top). Bink movies keep their own flat
+    // screen.
+    namespace
+    {
+        bool g_theatre_active = false;
+        float g_theatre_yaw = 0.0f;               // raw head yaw, anchor
+        float g_theatre_origin[3] = { 0.0f, 0.0f, 0.0f };   // tracking, m
+        float g_theatre_forward[2] = { 0.0f, -1.0f };       // tracking x, z
+        ULONGLONG g_theatre_since = 0;
+        unsigned g_theatre_recentre_seen = 0;
+        bool g_theatre_gameplay = false;    // gameplay (not a cutscene)
+        // The window's offset from where it first appears (anchor frame,
+        // metres: right, up, forward); the eye anchor moves with it, so the
+        // world behind the glass goes along. Saved by the handle.
+        // (A turn with the handle was tried 2026-10-10 and taken out: it
+        // swung the view with it. The window moves, always facing the
+        // anchor's forward.)
+        float g_theatre_offset[3]{};
+        bool g_theatre_offset_loaded = false;
+        int g_theatre_drag = -1;
+        float g_theatre_drag_hand[3]{};     // tracking metres at the grab
+        float g_theatre_drag_offset[3]{};
+        bool g_theatre_handle_hover[2] = { false, false };
+        // A portal, not a room (user 2026-10-10: leaning through the window
+        // and looking back showed the black box all round). Once the head
+        // goes through the window rectangle it is in the world, and the
+        // room is only the window seen from behind -- a floating black
+        // rectangle. Crossing the plane outside the rectangle changes
+        // nothing; coming back through the rectangle returns to the room.
+        bool g_theatre_in_world = false;
+        bool g_theatre_side_valid = false;
+        float g_theatre_last_forward = 0.0f;
+
+        void theatre_offset_load()
+        {
+            if (!g_theatre_offset_loaded)
+            {
+                g_theatre_offset_loaded = true;
+                tune_theatre_offset(g_theatre_offset);
+            }
+        }
+
+        // The window's flat forward in tracking space (the anchor's).
+        void theatre_window_forward(float out[2])
+        {
+            out[0] = g_theatre_forward[0];
+            out[1] = g_theatre_forward[1];
+        }
+
+        // The eye anchor in tracking space: the anchor moved by the saved
+        // offset (in the anchor's own frame).
+        void theatre_eye_anchor(float out[3])
+        {
+            theatre_offset_load();
+            const float fx = g_theatre_forward[0], fz = g_theatre_forward[1];
+            const float r = g_theatre_offset[0], u = g_theatre_offset[1],
+                        f = g_theatre_offset[2];
+            out[0] = g_theatre_origin[0] + r * -fz + f * fx;
+            out[1] = g_theatre_origin[1] + u;
+            out[2] = g_theatre_origin[2] + r * fx + f * fz;
+        }
+
+        // Window frame (right, up, forward metres from the eye anchor, the
+        // window's turn applied) -> tracking space.
+        void theatre_point(float r, float u, float f, float out[3])
+        {
+            float eye[3], w[2];
+            theatre_eye_anchor(eye);
+            theatre_window_forward(w);
+            out[0] = eye[0] + r * -w[1] + f * w[0];
+            out[1] = eye[1] + u;
+            out[2] = eye[2] + r * w[0] + f * w[1];
+        }
+
+        // SteamVR's raw yaw (g_head_yaw_raw's convention) of a level head
+        // facing a flat tracking direction.
+        float raw_yaw_of_forward(float fx, float fz)
+        {
+            const float pose[12] = { -fz, 0.0f, -fx, 0.0f,
+                                     0.0f, 1.0f, 0.0f, 0.0f,
+                                     fx, 0.0f, -fz, 0.0f };
+            return yaw_of(view_from_pose(pose, 1.0f));
+        }
+
+        void theatre_anchor()
+        {
+            const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                                  .mDeviceToAbsoluteTracking.m[0][0];
+            g_theatre_origin[0] = m[3];
+            g_theatre_origin[1] = m[7];
+            g_theatre_origin[2] = m[11];
+            float fx = -m[2], fz = -m[10];
+            const float length = sqrtf(fx * fx + fz * fz);
+            if (length > 1.0e-4f)
+            {
+                g_theatre_forward[0] = fx / length;
+                g_theatre_forward[1] = fz / length;
+            }
+            g_theatre_yaw = g_head_yaw_raw;
+            g_theatre_recentre_seen = g_recenter_generation;
+        }
+
+        void theatre_track_side();
+
+        void theatre_update()
+        {
+            // Cutscenes, and with gameplay_theatre third-person play (not
+            // board mode, not first person, not the main menu or loads; a
+            // pause keeps it).
+            const bool cinematic = camera_cinematic_playing();
+            const bool cutscene = config().cutscene_theatre && cinematic;
+            const bool gameplay = config().gameplay_theatre && !cinematic &&
+                !camera_view_first_person() &&
+                camera_third_person_mode() != 2 &&
+                !(ui_menu_active() && !ui_pause_menu_active()) &&
+                !ui_loading_screen_active();
+            const bool want = (cutscene || gameplay) &&
+                config().hmd_drives_camera && g_pose_valid &&
+                !movie_playing();
+            if (want && (!g_theatre_active || gameplay != g_theatre_gameplay))
+                log("theatre: %s shown through a %.1f m window %.1f m ahead",
+                    gameplay ? "third-person play" : "cutscene",
+                    config().cutscene_screen_width,
+                    config().cutscene_screen_distance);
+            g_theatre_gameplay = gameplay;
+            if (want && !g_theatre_active)
+            {
+                theatre_anchor();
+                g_theatre_since = GetTickCount64();
+                g_theatre_in_world = false;
+                g_theatre_side_valid = false;
+            }
+            else if (want && g_recenter_generation != g_theatre_recentre_seen)
+            {
+                theatre_anchor();
+                g_theatre_in_world = false;
+                g_theatre_side_valid = false;
+                log("theatre: window moved in front of you (recentre)");
+            }
+            else if (!want && g_theatre_active)
+                log("theatre: window closed, back to the normal view");
+            g_theatre_active = want;
+            if (want)
+                theatre_track_side();
+            static ULONGLONG report_at = 0;
+            const ULONGLONG now = GetTickCount64();
+            if (!want)
+            {
+                report_at = 0;
+                return;
+            }
+            if (!report_at)
+            {
+                report_at = now + 5000;
+                g_theatre_builds = g_theatre_frames = 0;
+                g_theatre_max_turn = g_theatre_max_move = 0.0f;
+            }
+            ++g_theatre_frames;
+            if (now >= report_at)
+            {
+                const float s = tune_world_scale() * tune_move_scale();
+                log("theatre: %u camera builds in %u frames; largest "
+                    "catch-up %.2f deg, %.1f mm", g_theatre_builds,
+                    g_theatre_frames, g_theatre_max_turn * 57.29578f,
+                    s > 0.0f ? g_theatre_max_move / s * 1000.0f : 0.0f);
+                report_at = now + 5000;
+                g_theatre_builds = g_theatre_frames = 0;
+                g_theatre_max_turn = g_theatre_max_move = 0.0f;
+            }
+        }
+
+        // The headset's place in the window's frame (metres from the eye
+        // anchor: right, up, forward).
+        bool theatre_head_in_frame(float out[3])
+        {
+            const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                                  .mDeviceToAbsoluteTracking.m[0][0];
+            float eye_anchor[3];
+            theatre_point(0.0f, 0.0f, 0.0f, eye_anchor);
+            const float d[3] = { m[3] - eye_anchor[0], m[7] - eye_anchor[1],
+                                 m[11] - eye_anchor[2] };
+            float w[2];
+            theatre_window_forward(w);
+            const float fx = w[0], fz = w[1];
+            out[0] = d[0] * -fz + d[2] * fx;
+            out[1] = d[1];
+            out[2] = d[0] * fx + d[2] * fz;
+            return std::isfinite(out[0]) && std::isfinite(out[1]) &&
+                   std::isfinite(out[2]);
+        }
+
+        void theatre_track_side()
+        {
+            float h[3];
+            if (!theatre_head_in_frame(h))
+                return;
+            const float plane = config().cutscene_screen_distance;
+            const float hw = 0.5f * config().cutscene_screen_width;
+            const float hh = hw * 9.0f / 16.0f;
+            if (g_theatre_side_valid)
+            {
+                const bool was_in = g_theatre_last_forward > plane;
+                const bool now_in = h[2] > plane;
+                const bool through = fabsf(h[0]) <= hw && fabsf(h[1]) <= hh;
+                if (was_in != now_in && through)
+                {
+                    g_theatre_in_world = now_in;
+                    log("theatre: head %s through the window",
+                        now_in ? "went" : "came back");
+                }
+            }
+            g_theatre_last_forward = h[2];
+            g_theatre_side_valid = true;
+        }
+
+        Mat4 theatre_head_camera_view()
+        {
+            Mat4 r = g_head_view;
+            r.m[3][0] = r.m[3][1] = r.m[3][2] = 0.0f;
+            float w[2];
+            theatre_window_forward(w);
+            const Mat4 head = set_yaw(r, wrap_pi(g_head_yaw_raw -
+                raw_yaw_of_forward(w[0], w[1])));
+            const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                                  .mDeviceToAbsoluteTracking.m[0][0];
+            float eye_anchor[3];
+            theatre_point(0.0f, 0.0f, 0.0f, eye_anchor);
+            const float d[3] = { m[3] - eye_anchor[0],
+                                 m[7] - eye_anchor[1],
+                                 m[11] - eye_anchor[2] };
+            const float fx = w[0], fz = w[1];
+            const float right = d[0] * -fz + d[2] * fx;
+            const float up = d[1];
+            const float forward = d[0] * fx + d[2] * fz;
+            const float s = tune_world_scale() * tune_move_scale() *
+                            camera_theatre_scale();
+            // Engine view axes: x right, y down, z forward.
+            return translation(-right * s, up * s, -forward * s) * head;
+        }
+    }
+
+    bool vr_theatre_active() { return g_theatre_active; }
+
+    // Board-mode diorama (user 2026-10-10). Board mode already shows the
+    // world as a model fixed in the room (the head is the camera at table
+    // scale), so nothing about the camera changes: only what is dark. The
+    // box sits round Lara's spot -- board_distance ahead along the recentred
+    // forward and board_height below the head at the recentre, as the board
+    // seat is placed (camera_head) -- open at the front (toward you) and
+    // the top. Its other faces are one-way: dark from outside, the world
+    // from inside.
+    namespace
+    {
+        bool g_diorama_active = false;
+        float g_board_offset[3]{};
+        bool g_board_offset_loaded = false;
+        bool g_handle_board = false;     // the drag is the diorama's
+
+        const float* board_offset()
+        {
+            if (!g_board_offset_loaded)
+            {
+                g_board_offset_loaded = true;
+                tune_board_offset(g_board_offset);
+            }
+            return g_board_offset;
+        }
+
+        void diorama_update()
+        {
+            const bool want = config().board_diorama &&
+                config().hmd_drives_camera && g_pose_valid &&
+                !camera_cinematic_playing() && !camera_view_first_person() &&
+                camera_third_person_mode() == 2 &&
+                !(ui_menu_active() && !ui_pause_menu_active()) &&
+                !ui_loading_screen_active() && !movie_playing();
+            if (want != g_diorama_active)
+                log("diorama: %s", want
+                    ? "board mode seen through the box (open front and top)"
+                    : "off");
+            g_diorama_active = want;
+        }
+
+        // Box frame -> tracking: right, up (from Lara's floor), forward
+        // (from the box centre), metres.
+        void diorama_point(float r, float u, float f, float out[3])
+        {
+            const float* o = board_offset();
+            const float fx = g_recentre_forward[0], fz = g_recentre_forward[1];
+            r += o[0];
+            u += o[1];
+            const float ahead = config().board_distance + f + o[2];
+            out[0] = g_pos_offset[0] + r * -fz + ahead * fx;
+            out[1] = g_pos_offset[1] - config().board_height + u;
+            out[2] = g_pos_offset[2] + r * fx + ahead * fz;
+        }
+
+        // The handle: a bar just under the box's front opening, in the dark
+        // like the theatre window's (on the opening itself the game's later
+        // draws covered it -- user 2026-10-10).
+        void diorama_handle_point(float r, float u, float out[3])
+        {
+            diorama_point(r, -config().board_diorama_below - 0.05f + u,
+                          -0.5f * config().board_diorama_depth - 0.01f, out);
+        }
+    }
+
+    bool vr_diorama_active() { return g_diorama_active; }
+
+    void vr_board_offset(float out[3])
+    {
+        const float* o = board_offset();
+        for (int k = 0; k < 3; ++k)
+            out[k] = o[k];
+    }
+
+    bool vr_dark_room_active()
+    {
+        return g_theatre_active || g_diorama_active;
+    }
+
     Mat4 vr_head_rotation()
     {
         // Rotation only, recentred, with the turn scale applied.
@@ -1458,6 +1883,8 @@ namespace trlvr
 
     Mat4 vr_head_camera_view()
     {
+        if (g_theatre_active)
+            return theatre_head_camera_view();
         const Mat4 head = vr_head_rotation();
         Mat4 move = Mat4::identity();
         if (config().hmd_drives_position)
@@ -1469,6 +1896,10 @@ namespace trlvr
                 pos[0] -= g_head_position_origin[0];
                 pos[1] -= g_head_position_origin[1];
                 pos[2] -= g_head_position_origin[2];
+            }
+            {
+                const float raw[3] = { pos[0], pos[1], pos[2] };
+                head_raw_to_recentred(raw, pos);
             }
             const float scale = tune_move_scale();
             move = translation(-pos[0] * scale,
@@ -1510,6 +1941,8 @@ namespace trlvr
     {
         g_main_camera_head = vr_head_camera_view();
         g_main_camera_head_valid = true;
+        ++g_theatre_builds;
+        ++g_head_state_generation;
 
         // A rare camera rebuild while paused already incorporates the current
         // pose, so make it the new residual origin immediately.
@@ -1520,6 +1953,31 @@ namespace trlvr
         }
     }
 
+    bool vr_head_position_offset(float out[3])
+    {
+        if (!out || !config().hmd_drives_position ||
+            !g_head_position_origin_active || !g_pose_valid)
+            return false;
+        const float scale = tune_move_scale();
+        float raw[3];
+        for (int k = 0; k < 3; ++k)
+            raw[k] = (g_head_pos[k] - g_head_position_origin[k]) * scale;
+        head_raw_to_recentred(raw, out);
+        return true;
+    }
+
+    void vr_shift_head_position_origin(const float d[3])
+    {
+        const float scale = tune_move_scale();
+        if (!d || !g_head_position_origin_active || !(scale > 0.0f))
+            return;
+        float raw[3];
+        head_recentred_to_raw(d, raw);
+        for (int k = 0; k < 3; ++k)
+            if (std::isfinite(raw[k]))
+                g_head_position_origin[k] += raw[k] / scale;
+    }
+
     void vr_head_position(float* xyz)
     {
         xyz[0] = g_head_pos[0];
@@ -1527,8 +1985,10 @@ namespace trlvr
         xyz[2] = g_head_pos[2];
     }
 
-    bool vr_controller_body_position(bool left, float* right, float* up,
-                                     float* forward)
+    // The raw controller point; vr_controller_body_position below prefers
+    // Lara's palm.
+    bool vr_controller_raw_body_position(bool left, float* right,
+                                         float* up, float* forward)
     {
         if (!g_ready || !g_system || !g_pose_valid ||
             !right || !up || !forward)
@@ -1605,6 +2065,18 @@ namespace trlvr
         const float vz = controller.vVelocity.v[2] - hmd.vVelocity.v[2];
         *speed = vx * fx + vz * fz;
         return std::isfinite(*speed);
+    }
+
+    // Every body-zone test -- holsters, belt items, the chest light, the
+    // grapple, holster setup -- uses Lara's palm where the hand model gives
+    // one (user 2026-10-10, Quest: the raw controller point sat far from
+    // the drawn hand, so holster setup placed items well off it), and the
+    // raw controller point otherwise.
+    bool vr_controller_body_position(bool left, float* right, float* up,
+                                     float* forward)
+    {
+        return vr_hand_palm_body_position(left, right, up, forward) ||
+               vr_controller_raw_body_position(left, right, up, forward);
     }
 
     bool vr_controller_body_axis_endpoint(bool left, int axis, float metres,
@@ -1801,6 +2273,8 @@ namespace trlvr
         // Where the reference hands sit, metres from the head in its
         // yaw-only frame: arms out in front, guns level.
         const float kCalSide = 0.18f, kCalUp = -0.28f, kCalForward = 0.42f;
+        // Degrees the shown hands' barrels point below level.
+        const float kCalPitchDown = 10.0f;
 
         // A tracking-space pose in the head frame, composed exactly as
         // vr_controller_head_pose composes a controller.
@@ -1859,9 +2333,455 @@ namespace trlvr
         return true;
     }
 
+    bool vr_head_forward_xz(float* x, float* z)
+    {
+        if (!x || !z || !g_ready || !g_pose_valid)
+            return false;
+        const vr::HmdMatrix34_t& hm =
+            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                .mDeviceToAbsoluteTracking;
+        const float fx = -hm.m[0][2], fz = -hm.m[2][2];
+        const float length = sqrtf(fx * fx + fz * fz);
+        if (length < 1.0e-4f)
+            return false;
+        *x = fx / length;
+        *z = fz / length;
+        return true;
+    }
+
     bool vr_controller_grip_uncorrected_head_pose(bool left, Mat4* out)
     {
         return out && uncorrected_grip_head_pose(left ? 0 : 1, out);
+    }
+
+    bool vr_hand_palm_head_position(bool left, float out[3])
+    {
+        Mat4 grip;
+        if (!out || config().hand_model != 2 ||
+            !vr_controller_grip_head_pose(left, &grip))
+            return false;
+        // The hand model puts its palm at the tuned grip position in the
+        // grip frame (first_person_grip_hand_transform); the left hand is
+        // the right mirrored across grip x.
+        float position[3]{};
+        tune_grip_hand(position, nullptr);
+        const float scale = tune_world_scale();
+        const float palm[3] = { (left ? -position[0] : position[0]) * scale,
+                                position[1] * scale, position[2] * scale };
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            out[axis] = palm[0] * grip.m[0][axis] +
+                        palm[1] * grip.m[1][axis] +
+                        palm[2] * grip.m[2][axis] + grip.m[3][axis];
+            if (!std::isfinite(out[axis]))
+                return false;
+        }
+        return true;
+    }
+
+    bool vr_head_point_body_position(const float head[3], float* right,
+                                     float* up, float* forward)
+    {
+        if (!head || !right || !up || !forward || !g_ready ||
+            !g_pose_valid)
+            return false;
+        const vr::TrackedDevicePose_t& hmd =
+            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+            return false;
+        const float scale = tune_world_scale() * tune_move_scale();
+        if (!(scale > 0.0f) || !std::isfinite(scale))
+            return false;
+        // The head frame flips OpenVR's Y and Z (as vr_project_head_point
+        // undoes); back to metres in the headset's own axes, then into
+        // tracking space.
+        const float local[3] = { head[0] / scale, -head[1] / scale,
+                                 -head[2] / scale };
+        const vr::HmdMatrix34_t& hm = hmd.mDeviceToAbsoluteTracking;
+        float d[3];
+        for (int row = 0; row < 3; ++row)
+            d[row] = hm.m[row][0] * local[0] + hm.m[row][1] * local[1] +
+                     hm.m[row][2] * local[2];
+        float fx = -hm.m[0][2], fz = -hm.m[2][2];
+        const float length = sqrtf(fx * fx + fz * fz);
+        if (length < 1.0e-4f)
+            return false;
+        fx /= length;
+        fz /= length;
+        *right = d[0] * -fz + d[2] * fx;
+        *up = d[1];
+        *forward = d[0] * fx + d[2] * fz;
+        return true;
+    }
+
+    bool vr_hand_palm_body_position(bool left, float* right, float* up,
+                                    float* forward)
+    {
+        float palm[3];
+        return vr_hand_palm_head_position(left, palm) &&
+               vr_head_point_body_position(palm, right, up, forward);
+    }
+
+    unsigned vr_theatre_surround(float (*out)[3], unsigned* colours,
+                                 unsigned max, float* alpha)
+    {
+        if (!out || !colours || !g_theatre_active || !g_pose_valid ||
+            max < 60)
+            return 0;
+        // In the anchor's frame (metres): right, up, forward. The window
+        // is 16:9, centred at eye height; the box is 30 m each way and
+        // its front wall is the window's plane.
+        const float hw = 0.5f * config().cutscene_screen_width;
+        const float hh = hw * 9.0f / 16.0f;
+        const float d = config().cutscene_screen_distance;
+        const float L = 30.0f;
+        const DWORD backdrop = config().theatre_backdrop & 0xFFFFFFu;
+        DWORD colour = backdrop;
+        unsigned used = 0;
+        const auto corner = [&](float r, float u, float f)
+        {
+            float at[3];
+            theatre_point(r, u, f, at);
+            vr::HmdMatrix34_t pose{};
+            pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
+            pose.m[0][3] = at[0];
+            pose.m[1][3] = at[1];
+            pose.m[2][3] = at[2];
+            Mat4 head;
+            if (!tracking_pose_to_head(pose, &head))
+                return false;
+            for (int k = 0; k < 3; ++k)
+                out[used][k] = head.m[3][k];
+            colours[used] = colour;
+            ++used;
+            return true;
+        };
+        // A quad from four (r, u, f) corners, as two triangles.
+        const auto quad = [&](const float a[3], const float b[3],
+                              const float c[3], const float e[3])
+        {
+            const float* order[6] = { a, b, c, a, c, e };
+            for (const float* p : order)
+                if (!corner(p[0], p[1], p[2]))
+                    return false;
+            return true;
+        };
+        const float q[9][4][3] = {
+            // Front wall round the window.
+            { { -L, hh, d }, { L, hh, d }, { L, L, d }, { -L, L, d } },
+            { { -L, -L, d }, { L, -L, d }, { L, -hh, d }, { -L, -hh, d } },
+            { { -L, -hh, d }, { -hw, -hh, d }, { -hw, hh, d }, { -L, hh, d } },
+            { { hw, -hh, d }, { L, -hh, d }, { L, hh, d }, { hw, hh, d } },
+            // Back, left, right, top, bottom.
+            { { -L, -L, -L }, { L, -L, -L }, { L, L, -L }, { -L, L, -L } },
+            { { -L, -L, -L }, { -L, -L, d }, { -L, L, d }, { -L, L, -L } },
+            { { L, -L, -L }, { L, -L, d }, { L, L, d }, { L, L, -L } },
+            { { -L, L, -L }, { L, L, -L }, { L, L, d }, { -L, L, d } },
+            { { -L, -L, -L }, { L, -L, -L }, { L, -L, d }, { -L, -L, d } } };
+        if (g_theatre_in_world)
+        {
+            const float w[4][3] = { { -hw, -hh, d }, { hw, -hh, d },
+                                    { hw, hh, d }, { -hw, hh, d } };
+            if (!quad(w[0], w[1], w[2], w[3]))
+                return 0;
+        }
+        else
+            for (const auto& face : q)
+                if (!quad(face[0], face[1], face[2], face[3]))
+                    return 0;
+        // The move handle: a bar under the window, just in front of it;
+        // yellow while a hand is on it.
+        {
+            colour = (g_theatre_drag >= 0 || g_theatre_handle_hover[0] ||
+                      g_theatre_handle_hover[1]) ? 0xFFE25Au : 0xC8C8C8u;
+            const float y = -hh - 0.07f, f = d - 0.01f;
+            const float h[4][3] = {
+                { -0.09f, y - 0.018f, f }, { 0.09f, y - 0.018f, f },
+                { 0.09f, y + 0.018f, f }, { -0.09f, y + 0.018f, f } };
+            if (!quad(h[0], h[1], h[2], h[3]))
+                return 0;
+        }
+        if (alpha)
+        {
+            const float t = (GetTickCount64() - g_theatre_since) / 400.0f;
+            *alpha = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+        }
+        return used;
+    }
+
+    unsigned vr_diorama_openings(float (*out)[3], unsigned max,
+                                 bool* eye_inside)
+    {
+        if (!out || !eye_inside || !g_diorama_active || !g_pose_valid ||
+            max < 12)
+            return 0;
+        const float hw = 0.5f * config().board_diorama_width;
+        const float hd = 0.5f * config().board_diorama_depth;
+        const float bottom = -config().board_diorama_below;
+        const float top = bottom + config().board_diorama_height;
+        // The eye in the box frame.
+        const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                              .mDeviceToAbsoluteTracking.m[0][0];
+        float centre[3];
+        diorama_point(0.0f, 0.0f, 0.0f, centre);
+        const float d[3] = { m[3] - centre[0], m[7] - centre[1],
+                             m[11] - centre[2] };
+        const float fx = g_recentre_forward[0], fz = g_recentre_forward[1];
+        const float er = d[0] * -fz + d[2] * fx;
+        const float eu = d[1];
+        const float ef = d[0] * fx + d[2] * fz;
+        *eye_inside = fabsf(er) <= hw && ef >= -hd && ef <= hd &&
+                      eu >= bottom && eu <= top;
+        // Openings to mark: from outside, those whose outer side the eye is
+        // on (the faces it looks in through); from inside, only the front
+        // -- the way back out to the room. The top shows the world from
+        // inside (user 2026-10-10).
+        const bool front = *eye_inside || ef < -hd;
+        const bool roof = !*eye_inside && eu > top;
+        unsigned used = 0;
+        const auto corner = [&](float r, float u, float f)
+        {
+            float at[3];
+            diorama_point(r, u, f, at);
+            vr::HmdMatrix34_t pose{};
+            pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
+            pose.m[0][3] = at[0];
+            pose.m[1][3] = at[1];
+            pose.m[2][3] = at[2];
+            Mat4 head;
+            if (!tracking_pose_to_head(pose, &head))
+                return false;
+            for (int k = 0; k < 3; ++k)
+                out[used][k] = head.m[3][k];
+            ++used;
+            return true;
+        };
+        const auto quad = [&](const float a[3], const float b[3],
+                              const float c[3], const float e[3])
+        {
+            const float* order[6] = { a, b, c, a, c, e };
+            for (const float* p : order)
+                if (!corner(p[0], p[1], p[2]))
+                    return false;
+            return true;
+        };
+        if (front)
+        {
+            const float q[4][3] = { { -hw, bottom, -hd }, { hw, bottom, -hd },
+                                    { hw, top, -hd }, { -hw, top, -hd } };
+            if (!quad(q[0], q[1], q[2], q[3]))
+                return 0;
+        }
+        if (roof)
+        {
+            const float q[4][3] = { { -hw, top, -hd }, { hw, top, -hd },
+                                    { hw, top, hd }, { -hw, top, hd } };
+            if (!quad(q[0], q[1], q[2], q[3]))
+                return 0;
+        }
+        return used;
+    }
+
+    unsigned vr_diorama_handle(float (*out)[3], unsigned max,
+                               unsigned* colour)
+    {
+        if (!out || !colour || !g_diorama_active || max < 6)
+            return 0;
+        *colour = (g_theatre_drag >= 0 || g_theatre_handle_hover[0] ||
+                   g_theatre_handle_hover[1]) ? 0xFFE25Au : 0xC8C8C8u;
+        const float corners[6][2] = { { -0.12f, -0.02f }, { 0.12f, -0.02f },
+                                      { 0.12f, 0.02f }, { -0.12f, -0.02f },
+                                      { 0.12f, 0.02f }, { -0.12f, 0.02f } };
+        for (unsigned i = 0; i < 6; ++i)
+        {
+            float at[3];
+            diorama_handle_point(corners[i][0], corners[i][1], at);
+            vr::HmdMatrix34_t pose{};
+            pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
+            pose.m[0][3] = at[0];
+            pose.m[1][3] = at[1];
+            pose.m[2][3] = at[2];
+            Mat4 head;
+            if (!tracking_pose_to_head(pose, &head))
+                return 0;
+            for (int k = 0; k < 3; ++k)
+                out[i][k] = head.m[3][k];
+        }
+        return 6;
+    }
+
+    void vr_theatre_handle_update(bool left_grip, bool right_grip,
+                                  bool claim[2], bool entered[2])
+    {
+        claim[0] = claim[1] = false;
+        entered[0] = entered[1] = false;
+        const bool grips[2] = { left_grip, right_grip };
+        static bool grip_was[2] = { false, false };
+        // The theatre window's handle, or in board mode the diorama's (it
+        // moves the box and the board world with it).
+        const bool board = g_diorama_active && !g_theatre_active;
+        float* offset = board ? g_board_offset : g_theatre_offset;
+        const float* frame = board ? g_recentre_forward : g_theatre_forward;
+        if (board)
+            board_offset();
+        const auto end_drag = [&]()
+        {
+            if (g_theatre_drag >= 0)
+            {
+                if (g_handle_board)
+                    tune_set_board_offset(g_board_offset);
+                else
+                    tune_set_theatre_offset(g_theatre_offset);
+            }
+            g_theatre_drag = -1;
+        };
+        if (g_theatre_drag >= 0 && g_handle_board != board)
+            end_drag();
+        if (!(g_theatre_active || g_diorama_active) || !g_pose_valid ||
+            !g_system)
+        {
+            end_drag();
+            g_theatre_handle_hover[0] = g_theatre_handle_hover[1] = false;
+            grip_was[0] = grips[0];
+            grip_was[1] = grips[1];
+            return;
+        }
+        const float s = tune_world_scale() * tune_move_scale();
+        const float hh = 0.5f * config().cutscene_screen_width * 9.0f / 16.0f;
+        float handle_tracking[3];
+        if (board)
+            diorama_handle_point(0.0f, 0.0f, handle_tracking);
+        else
+            theatre_point(0.0f, -hh - 0.07f,
+                          config().cutscene_screen_distance, handle_tracking);
+        vr::HmdMatrix34_t pose{};
+        pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
+        pose.m[0][3] = handle_tracking[0];
+        pose.m[1][3] = handle_tracking[1];
+        pose.m[2][3] = handle_tracking[2];
+        Mat4 handle_head;
+        const bool have_handle = s > 0.0f &&
+            tracking_pose_to_head(pose, &handle_head);
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            const bool left = hand == 0;
+            const bool pressed = grips[hand] && !grip_was[hand];
+            grip_was[hand] = grips[hand];
+            // The hand: Lara's palm if the hand model is on, else the
+            // controller.
+            float palm[3];
+            bool have_palm = vr_hand_palm_head_position(left, palm);
+            if (!have_palm)
+            {
+                Mat4 device;
+                if (vr_controller_head_pose(left, &device))
+                {
+                    for (int k = 0; k < 3; ++k)
+                        palm[k] = device.m[3][k];
+                    have_palm = true;
+                }
+            }
+            bool near_handle = false;
+            if (have_handle && have_palm)
+            {
+                float d2 = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float d = (palm[k] - handle_head.m[3][k]) / s;
+                    d2 += d * d;
+                }
+                near_handle = d2 < 0.10f * 0.10f;
+            }
+            if (near_handle && !g_theatre_handle_hover[hand])
+                entered[hand] = true;
+            g_theatre_handle_hover[hand] = near_handle;
+            // The controller in tracking space, for the drag.
+            const vr::TrackedDeviceIndex_t index =
+                g_system->GetTrackedDeviceIndexForControllerRole(left
+                    ? vr::TrackedControllerRole_LeftHand
+                    : vr::TrackedControllerRole_RightHand);
+            if (index == vr::k_unTrackedDeviceIndexInvalid ||
+                index >= vr::k_unMaxTrackedDeviceCount ||
+                !g_tracked_poses[index].bPoseIsValid)
+            {
+                if (g_theatre_drag == hand)
+                    end_drag();
+                continue;
+            }
+            const vr::HmdMatrix34_t& cm =
+                g_tracked_poses[index].mDeviceToAbsoluteTracking;
+            const float at[3] = { cm.m[0][3], cm.m[1][3], cm.m[2][3] };
+            if (pressed && near_handle && g_theatre_drag < 0)
+            {
+                g_theatre_drag = hand;
+                g_handle_board = board;
+                memcpy(g_theatre_drag_hand, at, sizeof(at));
+                memcpy(g_theatre_drag_offset, offset,
+                       sizeof(g_theatre_drag_offset));
+                log("%s: %s hand took the handle", board ? "diorama"
+                    : "theatre", left ? "left" : "right");
+            }
+            if (g_theatre_drag != hand)
+                continue;
+            if (!grips[hand])
+            {
+                end_drag();
+                continue;
+            }
+            claim[hand] = true;
+            const float dx = at[0] - g_theatre_drag_hand[0];
+            const float dy = at[1] - g_theatre_drag_hand[1];
+            const float dz = at[2] - g_theatre_drag_hand[2];
+            const float fx = frame[0], fz = frame[1];
+            offset[0] = g_theatre_drag_offset[0] + dx * -fz + dz * fx;
+            offset[1] = g_theatre_drag_offset[1] + dy;
+            offset[2] = g_theatre_drag_offset[2] + dx * fx + dz * fz;
+        }
+        // A hand on the handle keeps its grip from the game.
+        for (int hand = 0; hand < 2; ++hand)
+            if (g_theatre_handle_hover[hand] && grips[hand])
+                claim[hand] = true;
+    }
+
+    bool vr_head_clip_matrix(Eye eye, float out[4][4])
+    {
+        if (!out || eye == EyeCenter || !g_ready || !g_system || !g_pose_valid)
+            return false;
+        // The same mapping as vr_project_head_point, as one matrix: head
+        // game units -> OpenVR head metres -> eye metres -> clip.
+        const float s = tune_world_scale() * tune_move_scale();
+        if (!(s > 0.0f) || !std::isfinite(s))
+            return false;
+        Mat4 a = Mat4::identity();
+        a.m[0][0] = 1.0f / s;
+        a.m[1][1] = -1.0f / s;
+        a.m[2][2] = -1.0f / s;
+        const vr::HmdMatrix34_t eh = g_system->GetEyeToHeadTransform(
+            eye == EyeLeft ? vr::Eye_Left : vr::Eye_Right);
+        Mat4 b = Mat4::identity();
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                b.m[r][c] = eh.m[r][c];
+        for (int c = 0; c < 3; ++c)
+            b.m[3][c] = -(eh.m[0][3] * eh.m[0][c] + eh.m[1][3] * eh.m[1][c] +
+                          eh.m[2][3] * eh.m[2][c]);
+        const EyeInfo& in = vr_eye(eye);
+        const float dx = in.tan_right - in.tan_left;
+        const float dy = in.tan_bottom - in.tan_top;
+        if (dx < 1.0e-4f || dy < 1.0e-4f)
+            return false;
+        const float n = 0.05f, f = 500.0f;
+        Mat4 c{};
+        c.m[0][0] = 2.0f / dx;
+        c.m[1][1] = 2.0f / dy;
+        c.m[2][0] = 2.0f * in.tan_left / dx + 1.0f;
+        c.m[2][1] = -(1.0f - 2.0f * in.tan_bottom / dy);
+        c.m[2][2] = -f / (f - n);
+        c.m[2][3] = -1.0f;
+        c.m[3][2] = -n * f / (f - n);
+        const Mat4 m = a * b * c;
+        memcpy(out, m.m, sizeof(m.m));
+        return true;
     }
 
     void vr_hand_calibration_request_from_menu()
@@ -2033,6 +2953,21 @@ namespace trlvr
         // Target frame in tracking space: right, up, forward.
         const float target[3][3] = {
             { -fz, 0.0f, fx }, { 0.0f, 1.0f, 0.0f }, { fx, 0.0f, fz } };
+        // The hands' orientation: the same frame pitched kCalPitchDown
+        // nose-down (user 2026-10-11: level barrels made the wrist bend up
+        // awkwardly to match). Matching any shown pose gives the same
+        // correction, so this changes comfort only. Positions stay on the
+        // level frame.
+        const float pitch_down = kCalPitchDown * 0.0174532925f;
+        const float cp = cosf(pitch_down), sp = sinf(pitch_down);
+        const float tilted[3][3] = {
+            { target[0][0], target[0][1], target[0][2] },
+            { target[1][0] * cp + target[2][0] * sp,
+              target[1][1] * cp + target[2][1] * sp,
+              target[1][2] * cp + target[2][2] * sp },
+            { target[2][0] * cp - target[1][0] * sp,
+              target[2][1] * cp - target[1][1] * sp,
+              target[2][2] * cp - target[1][2] * sp } };
 
         // The gun's barrel in grip-local terms, as the aim ray uses it
         // (camera_head barrel_world): the grip aim, its yaw mirrored for
@@ -2069,9 +3004,9 @@ namespace trlvr
             vr::HmdMatrix34_t& pose = g_cal_reference[hand];
             for (int i = 0; i < 3; ++i)
                 for (int j = 0; j < 3; ++j)
-                    pose.m[i][j] = target[0][i] * local[0][j] +
-                                   target[1][i] * local[1][j] +
-                                   target[2][i] * local[2][j];
+                    pose.m[i][j] = tilted[0][i] * local[0][j] +
+                                   tilted[1][i] * local[1][j] +
+                                   tilted[2][i] * local[2][j];
             const float side = hand == 0 ? -kCalSide : kCalSide;
             for (int i = 0; i < 3; ++i)
                 pose.m[i][3] = head.m[i][3] + target[0][i] * side +
@@ -2083,8 +3018,9 @@ namespace trlvr
         g_cal_step = 0;
         g_cal_with_aim = with_aim;
         log("vr: hand calibration started (hands held %.2f m forward, "
-            "%.2f m down, %.2f m apart; barrel pitch %+.1f, yaw %+.1f)",
-            kCalForward, -kCalUp, 2.0f * kCalSide, pitch, yaw);
+            "%.2f m down, %.2f m apart, %.0f deg nose-down; barrel pitch "
+            "%+.1f, yaw %+.1f)", kCalForward, -kCalUp, 2.0f * kCalSide,
+            kCalPitchDown, pitch, yaw);
         return true;
     }
 
@@ -2241,6 +3177,18 @@ namespace trlvr
         g_yaw_offset = g_head_yaw_raw;
         g_head_yaw = 0.0f;
         ++g_recenter_generation;
+        {
+            const vr::HmdMatrix34_t& hm =
+                g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+                    .mDeviceToAbsoluteTracking;
+            const float fx = -hm.m[0][2], fz = -hm.m[2][2];
+            const float length = sqrtf(fx * fx + fz * fz);
+            if (g_pose_valid && length > 1.0e-4f)
+            {
+                g_recentre_forward[0] = fx / length;
+                g_recentre_forward[1] = fz / length;
+            }
+        }
 
         // Position too, or recentring leaves you standing off to one side of
         // wherever the runtime thinks its origin is.
@@ -2355,6 +3303,7 @@ namespace trlvr
 
     static void ingest_poses()
     {
+        ++g_head_state_generation;
         const vr::TrackedDevicePose_t& hmd =
             g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
         g_pose_valid = hmd.bPoseIsValid && hmd.bDeviceIsConnected;
@@ -2362,6 +3311,8 @@ namespace trlvr
             return;
 
         g_head_view = view_from_pose(&hmd.mDeviceToAbsoluteTracking.m[0][0], tune_world_scale());
+        theatre_update();
+        diorama_update();
 
         // The heading, in the same terms the camera hook uses.
         //

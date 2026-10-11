@@ -1,4 +1,5 @@
 #include "vr_submit.h"
+#include "lang.h"
 #include "perf_cpu.h"
 #include "vr_session.h"
 #include "stereo.h"
@@ -6,6 +7,7 @@
 #include "camera_head.h"
 #include "vr_input.h"
 #include "hud_capture.h"
+#include "ui_space.h"
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -957,6 +959,932 @@ namespace trlvr
         }
         bool g_gear_icons_tried = false;
 
+        // Cutscene theatre: the black box round the player with the window
+        // cut out (vr_theatre_surround), drawn once per frame with the
+        // fixed-function pipeline so it is clipped properly in 3D -- it
+        // surrounds the player, so parts are always behind the eye. Into
+        // the scene target as it stands (target null) or the back buffer.
+        bool g_theatre_drawn = false;
+
+        struct SurroundVertex
+        {
+            float x, y, z;
+            DWORD colour;
+        };
+
+        void draw_theatre_surround(IDirect3DSurface9* target)
+        {
+            if (g_theatre_drawn || !g_device || !stereo_same_frame_active())
+                return;
+            static float points[64][3];
+            static unsigned colours[64];
+            float alpha = 1.0f;
+            const unsigned count = vr_theatre_surround(points, colours, 64,
+                                                       &alpha);
+            if (!count)
+                return;
+            g_theatre_drawn = true;
+            IDirect3DSurface9* surface = target;
+            if (!surface &&
+                (FAILED(g_device->GetRenderTarget(0, &surface)) || !surface))
+                return;
+            D3DSURFACE_DESC desc{};
+            const bool sized = SUCCEEDED(surface->GetDesc(&desc)) &&
+                desc.Width >= 2 && desc.Height &&
+                (!stereo_eye_width() ||
+                 (desc.Width == 2 * stereo_eye_width() &&
+                  desc.Height == stereo_eye_height()));
+            if (!sized)
+            {
+                if (!target)
+                    surface->Release();
+                g_theatre_drawn = false;   // try again at Present
+                static bool reported = false;
+                if (!reported)
+                {
+                    reported = true;
+                    log("theatre: surround waited for the eye target "
+                        "(%ux%u)", desc.Width, desc.Height);
+                }
+                return;
+            }
+            static SurroundVertex vertices[64];
+            const DWORD fade = (DWORD)(alpha * 255.0f) << 24;
+            for (unsigned i = 0; i < count; ++i)
+                vertices[i] = { points[i][0], points[i][1], points[i][2],
+                                fade | (colours[i] & 0xFFFFFFu) };
+            IDirect3DStateBlock9* state = nullptr;
+            IDirect3DSurface9* old_target = nullptr;
+            D3DVIEWPORT9 old_viewport{};
+            if (SUCCEEDED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) &&
+                state)
+            {
+                state->Capture();
+                g_device->GetViewport(&old_viewport);
+                if (target)
+                {
+                    g_device->GetRenderTarget(0, &old_target);
+                    g_device->SetRenderTarget(0, target);
+                }
+                g_device->SetVertexShader(nullptr);
+                g_device->SetPixelShader(nullptr);
+                g_device->SetTexture(0, nullptr);
+                g_device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE);
+                // In the frame (the scene's depth-stencil still bound): the
+                // dark room skips the pixels the controller hands marked
+                // (proxy_device, kTheatreHandStencil), so they show over it
+                // (user 2026-10-10: hands vanished in the black).
+                IDirect3DSurface9* depth_surface = nullptr;
+                D3DSURFACE_DESC depth_desc{};
+                const bool hand_stencil = !target &&
+                    SUCCEEDED(g_device->GetDepthStencilSurface(
+                        &depth_surface)) && depth_surface &&
+                    SUCCEEDED(depth_surface->GetDesc(&depth_desc)) &&
+                    (depth_desc.Format == D3DFMT_D24S8 ||
+                     depth_desc.Format == D3DFMT_D24FS8 ||
+                     depth_desc.Format == D3DFMT_D24X4S4 ||
+                     depth_desc.Format == D3DFMT_D15S1);
+                if (depth_surface)
+                    depth_surface->Release();
+                static bool stencil_reported = false;
+                if (!stencil_reported && !target)
+                {
+                    stencil_reported = true;
+                    log("theatre: depth buffer format %d -- %s",
+                        (int)depth_desc.Format, hand_stencil
+                        ? "hands kept over the dark room by stencil"
+                        : "no stencil, hands stay inside the window");
+                }
+                // In the frame the dark room also seals the depth buffer:
+                // it writes the nearest depth, so world geometry drawn after
+                // it (late effects, user screenshot 2026-10-10: rock and
+                // spray below the window) fails its own depth test there.
+                // The HUD draws without depth and stays on top.
+                const bool depth_seal = !target && depth_desc.Width > 0;
+                g_device->SetRenderState(D3DRS_ZENABLE,
+                                         depth_seal ? TRUE : FALSE);
+                g_device->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+                g_device->SetRenderState(D3DRS_ZWRITEENABLE,
+                                         depth_seal ? TRUE : FALSE);
+                g_device->SetRenderState(D3DRS_STENCILENABLE,
+                                         hand_stencil ? TRUE : FALSE);
+                g_device->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
+                g_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_NOTEQUAL);
+                g_device->SetRenderState(D3DRS_STENCILREF,
+                                         kTheatreHandStencil);
+                g_device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+                g_device->SetRenderState(D3DRS_STENCILWRITEMASK, 0);
+                g_device->SetRenderState(D3DRS_STENCILPASS,
+                                         D3DSTENCILOP_KEEP);
+                g_device->SetRenderState(D3DRS_STENCILFAIL,
+                                         D3DSTENCILOP_KEEP);
+                g_device->SetRenderState(D3DRS_STENCILZFAIL,
+                                         D3DSTENCILOP_KEEP);
+                g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+                g_device->SetRenderState(D3DRS_DESTBLEND,
+                                         D3DBLEND_INVSRCALPHA);
+                g_device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+                g_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+                g_device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+                g_device->SetRenderState(D3DRS_CLIPPING, TRUE);
+                g_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+                g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0F);
+                g_device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+                g_device->SetTextureStageState(0, D3DTSS_COLOROP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_COLORARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAOP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(1, D3DTSS_COLOROP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_ALPHAOP,
+                                               D3DTOP_DISABLE);
+                D3DMATRIX identity{};
+                identity._11 = identity._22 = identity._33 =
+                    identity._44 = 1.0f;
+                g_device->SetTransform(D3DTS_WORLD, &identity);
+                g_device->SetTransform(D3DTS_VIEW, &identity);
+                const bool began = SUCCEEDED(g_device->BeginScene());
+                const DWORD eye_width = desc.Width / 2;
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    D3DMATRIX clip{};
+                    if (!vr_head_clip_matrix(eye_index ? EyeRight : EyeLeft,
+                                             clip.m))
+                        continue;
+                    const D3DVIEWPORT9 viewport = {
+                        eye_width * eye_index, 0, eye_width, desc.Height,
+                        0.0f, depth_seal ? 0.0f : 1.0f };
+                    g_device->SetViewport(&viewport);
+                    g_device->SetTransform(D3DTS_PROJECTION, &clip);
+                    g_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, count / 3,
+                                              vertices,
+                                              sizeof(SurroundVertex));
+                }
+                // The hand mark is cleared again (only its bit) for the
+                // next frame: a full-target quad, no colour, stencil only.
+                if (hand_stencil)
+                {
+                    struct ClearVertex { float x, y, z, rhw; };
+                    const float w = (float)desc.Width, h = (float)desc.Height;
+                    const ClearVertex quad[4] = {
+                        { -0.5f, -0.5f, 0.0f, 1.0f },
+                        { w - 0.5f, -0.5f, 0.0f, 1.0f },
+                        { -0.5f, h - 0.5f, 0.0f, 1.0f },
+                        { w - 0.5f, h - 0.5f, 0.0f, 1.0f } };
+                    const D3DVIEWPORT9 whole = { 0, 0, desc.Width,
+                                                 desc.Height, 0.0f, 1.0f };
+                    g_device->SetViewport(&whole);
+                    g_device->SetFVF(D3DFVF_XYZRHW);
+                    g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+                    g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                    g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+                    g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+                    // Only the pixels holding exactly the hand value go
+                    // back to zero; the game's own stencil is left alone.
+                    g_device->SetRenderState(D3DRS_STENCILFUNC,
+                                             D3DCMP_EQUAL);
+                    g_device->SetRenderState(D3DRS_STENCILREF,
+                                             kTheatreHandStencil);
+                    g_device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+                    g_device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+                    g_device->SetRenderState(D3DRS_STENCILPASS,
+                                             D3DSTENCILOP_ZERO);
+                    g_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad,
+                                              sizeof(ClearVertex));
+                }
+                if (began)
+                    g_device->EndScene();
+                if (old_target)
+                {
+                    g_device->SetRenderTarget(0, old_target);
+                    old_target->Release();
+                }
+                state->Apply();
+                g_device->SetViewport(&old_viewport);
+                state->Release();
+            }
+            if (!target)
+                surface->Release();
+            static bool reported = false;
+            if (!reported)
+            {
+                reported = true;
+                log("theatre: surround drawn (%u triangles, %s)", count / 3,
+                    target ? "at Present" : "before the interface");
+            }
+        }
+
+        // Board-mode diorama: the box's facing openings are marked in the
+        // stencil (kTheatreHandStencil + 1, never over a hand's mark), then
+        // a full-target dark quad covers everything but the marks (eye
+        // outside the box) or only the marks (eye inside: the openings look
+        // back out at the room). It seals the depth like the theatre's dark
+        // room, then the marks are cleared. Needs the scene's stencil; once
+        // per frame, before the interface.
+        bool g_diorama_drawn = false;
+
+        void draw_diorama(IDirect3DSurface9* target)
+        {
+            if (g_diorama_drawn || target || !g_device ||
+                !stereo_same_frame_active() || !vr_diorama_active())
+                return;
+            static float points[16][3];
+            bool inside = false;
+            const unsigned count = vr_diorama_openings(points, 16, &inside);
+            g_diorama_drawn = true;
+            IDirect3DSurface9* surface = nullptr;
+            if (FAILED(g_device->GetRenderTarget(0, &surface)) || !surface)
+                return;
+            D3DSURFACE_DESC desc{};
+            IDirect3DSurface9* depth = nullptr;
+            D3DSURFACE_DESC depth_desc{};
+            const bool ok = SUCCEEDED(surface->GetDesc(&desc)) &&
+                desc.Width >= 2 && desc.Height &&
+                (!stereo_eye_width() ||
+                 (desc.Width == 2 * stereo_eye_width() &&
+                  desc.Height == stereo_eye_height())) &&
+                SUCCEEDED(g_device->GetDepthStencilSurface(&depth)) &&
+                depth && SUCCEEDED(depth->GetDesc(&depth_desc)) &&
+                (depth_desc.Format == D3DFMT_D24S8 ||
+                 depth_desc.Format == D3DFMT_D24FS8 ||
+                 depth_desc.Format == D3DFMT_D24X4S4 ||
+                 depth_desc.Format == D3DFMT_D15S1);
+            if (depth)
+                depth->Release();
+            surface->Release();
+            if (!ok)
+            {
+                g_diorama_drawn = false;
+                static bool reported = false;
+                if (!reported)
+                {
+                    reported = true;
+                    log("diorama: waiting for the eye target with a stencil "
+                        "(%ux%u, depth format %d)", desc.Width, desc.Height,
+                        (int)depth_desc.Format);
+                }
+                return;
+            }
+            IDirect3DStateBlock9* state = nullptr;
+            if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
+                !state)
+                return;
+            state->Capture();
+            D3DVIEWPORT9 old_viewport{};
+            g_device->GetViewport(&old_viewport);
+            g_device->SetVertexShader(nullptr);
+            g_device->SetPixelShader(nullptr);
+            g_device->SetTexture(0, nullptr);
+            g_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+            g_device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+            g_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+            g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+            g_device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+            g_device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+            g_device->SetRenderState(D3DRS_CLIPPING, TRUE);
+            g_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+            g_device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+            g_device->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
+            g_device->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+            g_device->SetRenderState(D3DRS_STENCILFAIL, D3DSTENCILOP_KEEP);
+            g_device->SetRenderState(D3DRS_STENCILZFAIL, D3DSTENCILOP_KEEP);
+            g_device->SetTextureStageState(0, D3DTSS_COLOROP,
+                                           D3DTOP_SELECTARG2);
+            g_device->SetTextureStageState(0, D3DTSS_COLORARG2,
+                                           D3DTA_DIFFUSE);
+            g_device->SetTextureStageState(0, D3DTSS_ALPHAOP,
+                                           D3DTOP_SELECTARG2);
+            g_device->SetTextureStageState(0, D3DTSS_ALPHAARG2,
+                                           D3DTA_DIFFUSE);
+            g_device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+            g_device->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+            const bool began = SUCCEEDED(g_device->BeginScene());
+            const unsigned mark = kTheatreHandStencil + 1;
+            // 1. The openings: stencil only, never over a hand's mark.
+            if (count)
+            {
+                static SurroundVertex vertices[16];
+                for (unsigned i = 0; i < count; ++i)
+                    vertices[i] = { points[i][0], points[i][1], points[i][2],
+                                    0xFFFFFFFFu };
+                g_device->SetFVF(D3DFVF_XYZ | D3DFVF_DIFFUSE);
+                g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+                g_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_NOTEQUAL);
+                g_device->SetRenderState(D3DRS_STENCILREF, mark);
+                g_device->SetRenderState(D3DRS_STENCILMASK, 0xFE);
+                g_device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+                g_device->SetRenderState(D3DRS_STENCILPASS,
+                                         D3DSTENCILOP_REPLACE);
+                D3DMATRIX identity{};
+                identity._11 = identity._22 = identity._33 =
+                    identity._44 = 1.0f;
+                g_device->SetTransform(D3DTS_WORLD, &identity);
+                g_device->SetTransform(D3DTS_VIEW, &identity);
+                const DWORD eye_width = desc.Width / 2;
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    D3DMATRIX clip{};
+                    if (!vr_head_clip_matrix(eye_index ? EyeRight : EyeLeft,
+                                             clip.m))
+                        continue;
+                    const D3DVIEWPORT9 viewport = {
+                        eye_width * eye_index, 0, eye_width, desc.Height,
+                        0.0f, 1.0f };
+                    g_device->SetViewport(&viewport);
+                    g_device->SetTransform(D3DTS_PROJECTION, &clip);
+                    g_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, count / 3,
+                                              vertices,
+                                              sizeof(SurroundVertex));
+                }
+            }
+            // 2. The dark room: full target, depth sealed at 0.
+            struct FlatVertex { float x, y, z, rhw; DWORD colour; };
+            const float w = (float)desc.Width, h = (float)desc.Height;
+            const DWORD dark = 0xFF000000u |
+                               (config().theatre_backdrop & 0xFFFFFFu);
+            const FlatVertex quad[4] = {
+                { -0.5f, -0.5f, 0.0f, 1.0f, dark },
+                { w - 0.5f, -0.5f, 0.0f, 1.0f, dark },
+                { -0.5f, h - 0.5f, 0.0f, 1.0f, dark },
+                { w - 0.5f, h - 0.5f, 0.0f, 1.0f, dark } };
+            const D3DVIEWPORT9 whole = { 0, 0, desc.Width, desc.Height,
+                                         0.0f, 1.0f };
+            g_device->SetViewport(&whole);
+            g_device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+            g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0F);
+            g_device->SetRenderState(D3DRS_ZENABLE, TRUE);
+            g_device->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+            g_device->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+            g_device->SetRenderState(D3DRS_STENCILWRITEMASK, 0);
+            g_device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_KEEP);
+            if (inside)
+            {
+                // Inside the box: dark only through the openings.
+                g_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_EQUAL);
+                g_device->SetRenderState(D3DRS_STENCILREF, mark);
+                g_device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+            }
+            else
+            {
+                // Outside: dark but for the openings and the hands.
+                g_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_NOTEQUAL);
+                g_device->SetRenderState(D3DRS_STENCILREF,
+                                         kTheatreHandStencil);
+                g_device->SetRenderState(D3DRS_STENCILMASK, 0xFE);
+            }
+            g_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad,
+                                      sizeof(FlatVertex));
+            // The handle bar, drawn exactly like the dark room (same states,
+            // screen-space vertices at depth 0), its corners projected per
+            // eye here: drawn as a 3D triangle list it never showed (user
+            // 2026-10-10, three builds, though the log saw it drawn mid-view).
+            {
+                static float bar[6][3];
+                unsigned bar_colour = 0;
+                const unsigned bar_count = vr_diorama_handle(bar, 6,
+                                                             &bar_colour);
+                if (bar_count == 6)
+                {
+                    const DWORD colour = 0xFF000000u |
+                                         (bar_colour & 0xFFFFFFu);
+                    const float eye_w = 0.5f * w;
+                    unsigned drawn = 0;
+                    for (int eye_index = 0; eye_index < 2; ++eye_index)
+                    {
+                        FlatVertex flat[6];
+                        bool seen = true;
+                        for (unsigned i = 0; i < 6 && seen; ++i)
+                        {
+                            float u = 0.0f, v = 0.0f;
+                            seen = vr_project_head_point(
+                                eye_index ? EyeRight : EyeLeft, bar[i][0],
+                                bar[i][1], bar[i][2], &u, &v);
+                            flat[i] = { eye_w * eye_index + u * eye_w - 0.5f,
+                                        v * h - 0.5f, 0.0f, 1.0f, colour };
+                        }
+                        if (!seen)
+                            continue;
+                        // Everywhere but the hands' mark, so a hand on the
+                        // bar shows over it as in the theatre (user
+                        // 2026-10-10); not the openings' test, since from
+                        // inside the box the dark room only covers those.
+                        g_device->SetRenderState(D3DRS_STENCILFUNC,
+                                                 D3DCMP_NOTEQUAL);
+                        g_device->SetRenderState(D3DRS_STENCILREF,
+                                                 kTheatreHandStencil);
+                        g_device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
+                        g_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2,
+                                                  flat, sizeof(FlatVertex));
+                        ++drawn;
+                    }
+                    static bool bar_reported = false;
+                    if (!bar_reported && drawn)
+                    {
+                        bar_reported = true;
+                        float u = -1.0f, v = -1.0f;
+                        vr_project_head_point(EyeLeft,
+                            0.5f * (bar[0][0] + bar[2][0]),
+                            0.5f * (bar[0][1] + bar[2][1]),
+                            0.5f * (bar[0][2] + bar[2][2]), &u, &v);
+                        log("diorama: handle bar drawn in screen space "
+                            "(%u eyes) -- left-eye view position (%.2f, "
+                            "%.2f)", drawn, u, v);
+                    }
+                }
+            }
+            // 3. Clear the hand and opening marks for the next frame.
+            g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+            g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+            g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0);
+            g_device->SetRenderState(D3DRS_STENCILFUNC, D3DCMP_EQUAL);
+            g_device->SetRenderState(D3DRS_STENCILREF, kTheatreHandStencil);
+            g_device->SetRenderState(D3DRS_STENCILMASK, 0xFE);
+            g_device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+            g_device->SetRenderState(D3DRS_STENCILPASS, D3DSTENCILOP_ZERO);
+            g_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad,
+                                      sizeof(FlatVertex));
+            if (began)
+                g_device->EndScene();
+            state->Apply();
+            g_device->SetViewport(&old_viewport);
+            state->Release();
+            static bool reported = false;
+            if (!reported)
+            {
+                reported = true;
+                log("diorama: drawn (%u opening triangles, eye %s the box)",
+                    count / 3, inside ? "inside" : "outside");
+            }
+        }
+
+        // gear_cross_debug: wire spheres for each icon's and the handle's
+        // grab zone, and a small sphere at each hand's tested point --
+        // green on Lara's palm, red on a controller origin (no hand
+        // model) -- yellow while that hand is on something. A small grey
+        // one marks the controller's own origin, for comparison.
+        void draw_gear_cross_debug(IDirect3DSurface9* back,
+                                   const VrGearCross& cross)
+        {
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float metre = tune_world_scale() * tune_move_scale();
+            if (!(metre > 0.0f))
+                return;
+            const float eye_width = desc.Width * 0.5f;
+            static DebugLineVertex lines[2 * 2 * 600];
+            unsigned used = 0;
+            const auto segment = [&](const float a[3], const float b[3],
+                                     DWORD colour)
+            {
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    const Eye eye = eye_index ? EyeRight : EyeLeft;
+                    float ua = 0, va = 0, ub = 0, vb = 0;
+                    if (used + 2 > _countof(lines) ||
+                        !vr_project_head_point(eye, a[0], a[1], a[2],
+                                               &ua, &va) ||
+                        !vr_project_head_point(eye, b[0], b[1], b[2],
+                                               &ub, &vb) ||
+                        ua < 0.0f || ua > 1.0f || ub < 0.0f || ub > 1.0f ||
+                        va < 0.0f || va > 1.0f || vb < 0.0f || vb > 1.0f)
+                        continue;
+                    lines[used++] = { eye_width * (eye_index + ua),
+                                      desc.Height * va, 0.0f, 1.0f, colour };
+                    lines[used++] = { eye_width * (eye_index + ub),
+                                      desc.Height * vb, 0.0f, 1.0f, colour };
+                }
+            };
+            // Three great circles of a sphere at a head-space centre.
+            const auto sphere = [&](const float c[3], float radius_m,
+                                    DWORD colour)
+            {
+                const float r = radius_m * metre;
+                for (int plane = 0; plane < 3; ++plane)
+                    for (int i = 0; i < 16; ++i)
+                    {
+                        const float a0 = 6.2831853f * i / 16.0f;
+                        const float a1 = 6.2831853f * (i + 1) / 16.0f;
+                        float p0[3] = { c[0], c[1], c[2] };
+                        float p1[3] = { c[0], c[1], c[2] };
+                        const int u = plane == 2 ? 1 : 0;
+                        const int v = plane == 0 ? 1 : 2;
+                        p0[u] += r * cosf(a0); p0[v] += r * sinf(a0);
+                        p1[u] += r * cosf(a1); p1[v] += r * sinf(a1);
+                        segment(p0, p1, colour);
+                    }
+            };
+            for (int item = 0; item < 4; ++item)
+            {
+                float c[3];
+                if (vr_body_point_head_position(cross.items[item][0],
+                        cross.items[item][1], cross.items[item][2], c))
+                    sphere(c, cross.item_radius,
+                           (cross.hover[0] == item || cross.hover[1] == item)
+                               ? 0xFFFFFF55u : 0xFF55DFFFu);
+            }
+            float handle[3];
+            if (vr_body_point_head_position(cross.centre[0], cross.centre[1],
+                                            cross.centre[2], handle))
+                sphere(handle, cross.handle_radius,
+                       cross.handle_hover ? 0xFFFFFF55u : 0xFFFFB25Au);
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                Mat4 device;
+                if (vr_controller_head_pose(hand == 0, &device))
+                    sphere(device.m[3], 0.008f, 0xFF909090u);
+                float point[3];
+                if (!cross.hand_point_valid[hand] ||
+                    !vr_body_point_head_position(cross.hand_point[hand][0],
+                        cross.hand_point[hand][1], cross.hand_point[hand][2],
+                        point))
+                    continue;
+                sphere(point, 0.015f, cross.hover[hand] >= 0
+                    ? 0xFFFFFF55u
+                    : cross.hand_point_palm[hand] ? 0xFF55FF66u
+                                                  : 0xFFFF5555u);
+            }
+            static bool reported = false;
+            if (!reported)
+            {
+                reported = true;
+                log("gear cross debug: drawing %u line ends", used);
+            }
+            draw_hand_lines(back, desc, lines, used);
+        }
+
+        // [developer] finger_debug: SteamVR's hand skeleton at each
+        // controller (thumb red, index orange, middle yellow, ring green,
+        // pinky blue, wrist white) and above the hand five bars, one per
+        // finger in the same colours: how curled the mod reads it (grey =
+        // fully curled; dark red frames = no finger data).
+        void draw_finger_debug(IDirect3DSurface9* back)
+        {
+            if (!g_device || !tune_finger_debug() ||
+                !stereo_same_frame_active())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float metre = tune_world_scale() * tune_move_scale();
+            if (!(metre > 0.0f))
+                return;
+            const float eye_width = desc.Width * 0.5f;
+            static DebugLineVertex lines[2 * 2 * 160];
+            unsigned used = 0;
+            const auto segment = [&](const float a[3], const float b[3],
+                                     DWORD colour)
+            {
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    const Eye eye = eye_index ? EyeRight : EyeLeft;
+                    float ua = 0, va = 0, ub = 0, vb = 0;
+                    if (used + 2 > _countof(lines) ||
+                        !vr_project_head_point(eye, a[0], a[1], a[2],
+                                               &ua, &va) ||
+                        !vr_project_head_point(eye, b[0], b[1], b[2],
+                                               &ub, &vb) ||
+                        ua < 0.0f || ua > 1.0f || ub < 0.0f || ub > 1.0f ||
+                        va < 0.0f || va > 1.0f || vb < 0.0f || vb > 1.0f)
+                        continue;
+                    lines[used++] = { eye_width * (eye_index + ua),
+                                      desc.Height * va, 0.0f, 1.0f, colour };
+                    lines[used++] = { eye_width * (eye_index + ub),
+                                      desc.Height * vb, 0.0f, 1.0f, colour };
+                }
+            };
+            static const DWORD finger_colour[5] = {
+                0xFFFF5050u, 0xFFFFA040u, 0xFFFFFF50u, 0xFF60FF60u,
+                0xFF60A0FFu };
+            // OpenVR hand skeleton: parents of bones 1..25.
+            static const int parent[26] = {
+                -1, 0, 1, 2, 3, 4, 1, 6, 7, 8, 9, 1, 11, 12, 13, 14,
+                1, 16, 17, 18, 19, 1, 21, 22, 23, 24 };
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                Mat4 device;
+                if (!vr_controller_head_pose(hand == 0, &device))
+                    continue;
+                float axis[3][3];
+                bool ok = true;
+                for (int r = 0; r < 3; ++r)
+                {
+                    const float len = sqrtf(device.m[r][0] * device.m[r][0] +
+                                            device.m[r][1] * device.m[r][1] +
+                                            device.m[r][2] * device.m[r][2]);
+                    ok = ok && len > 1e-6f;
+                    for (int k = 0; k < 3; ++k)
+                        axis[r][k] = len > 1e-6f ? device.m[r][k] / len : 0.0f;
+                }
+                if (!ok)
+                    continue;
+                // Controller-local OpenVR metres -> head space (engine axes:
+                // y and z flipped, game units).
+                const auto to_head = [&](const float p[3], float out[3])
+                {
+                    const float local[3] = { p[0] * metre, -p[1] * metre,
+                                             -p[2] * metre };
+                    for (int k = 0; k < 3; ++k)
+                        out[k] = device.m[3][k] + local[0] * axis[0][k] +
+                                 local[1] * axis[1][k] +
+                                 local[2] * axis[2][k];
+                };
+                static float bones[31][3];
+                if (vr_input_finger_bones(hand == 0, bones))
+                {
+                    float head[26][3];
+                    for (int b = 0; b < 26; ++b)
+                        to_head(bones[b], head[b]);
+                    for (int b = 1; b < 26; ++b)
+                    {
+                        const int finger = b < 2 ? -1 : (b - 2) / 5;
+                        segment(head[parent[b]], head[b], finger < 0
+                            ? 0xFFFFFFFFu : finger_colour[finger]);
+                    }
+                }
+                float curl[5]{}, splay[4]{};
+                const bool have = vr_input_finger_pose(hand == 0, curl,
+                                                       splay);
+                for (int i = 0; i < 5; ++i)
+                {
+                    const float x = (i - 2) * 0.012f * (hand == 0 ? -1.0f
+                                                                  : 1.0f);
+                    const float base[3] = { x, 0.05f, 0.06f };
+                    const float top[3] = { x, 0.10f, 0.06f };
+                    float a[3], b[3];
+                    to_head(base, a);
+                    to_head(top, b);
+                    segment(a, b, have ? 0xFF707070u : 0xFF801010u);
+                    if (!have || curl[i] < 0.01f)
+                        continue;
+                    const float bar[3] = { x, 0.05f + 0.05f * curl[i],
+                                           0.06f };
+                    to_head(bar, b);
+                    segment(a, b, finger_colour[i]);
+                }
+            }
+            static bool reported = false;
+            if (!reported)
+            {
+                reported = true;
+                log("finger debug: drawing %u line ends", used);
+            }
+            draw_hand_lines(back, desc, lines, used);
+        }
+
+        // Untextured head-space triangles, alpha-blended, projected into
+        // each eye (a triangle with a corner off-screen is skipped).
+        void draw_head_triangles(IDirect3DSurface9* back,
+                                 const D3DSURFACE_DESC& desc,
+                                 const float (*points)[3],
+                                 const DWORD* colours, unsigned count)
+        {
+            if (!count || !g_device)
+                return;
+            static DebugLineVertex verts[2 * 600];
+            unsigned used = 0;
+            const float eye_w = desc.Width * 0.5f;
+            for (int eye_index = 0; eye_index < 2; ++eye_index)
+            {
+                const Eye eye = eye_index ? EyeRight : EyeLeft;
+                for (unsigned t = 0; t + 2 < count && used + 3 <=
+                     _countof(verts); t += 3)
+                {
+                    DebugLineVertex tri[3];
+                    bool ok = true;
+                    for (int k = 0; k < 3 && ok; ++k)
+                    {
+                        float u = 0.0f, v = 0.0f;
+                        const float* p = points[t + k];
+                        ok = vr_project_head_point(eye, p[0], p[1], p[2], &u,
+                                                   &v) &&
+                             u > -1.0f && u < 2.0f && v > -1.0f && v < 2.0f;
+                        tri[k] = { eye_w * (eye_index + u), desc.Height * v,
+                                   0.0f, 1.0f, colours[t + k] };
+                    }
+                    if (!ok)
+                        continue;
+                    for (int k = 0; k < 3; ++k)
+                        verts[used++] = tri[k];
+                }
+            }
+            if (!used)
+                return;
+            IDirect3DStateBlock9* state = nullptr;
+            if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
+                !state)
+                return;
+            state->Capture();
+            IDirect3DSurface9* old_target = nullptr;
+            D3DVIEWPORT9 old_viewport{};
+            g_device->GetRenderTarget(0, &old_target);
+            g_device->GetViewport(&old_viewport);
+            if (SUCCEEDED(g_device->SetRenderTarget(0, back)))
+            {
+                const D3DVIEWPORT9 viewport = { 0, 0, desc.Width,
+                                                desc.Height, 0.0f, 1.0f };
+                g_device->SetViewport(&viewport);
+                g_device->SetVertexShader(nullptr);
+                g_device->SetPixelShader(nullptr);
+                g_device->SetTexture(0, nullptr);
+                g_device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+                g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_SRCALPHA);
+                g_device->SetRenderState(D3DRS_DESTBLEND,
+                                         D3DBLEND_INVSRCALPHA);
+                g_device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+                g_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+                g_device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+                g_device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+                g_device->SetTextureStageState(0, D3DTSS_COLOROP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_COLORARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAOP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(1, D3DTSS_COLOROP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_ALPHAOP,
+                                               D3DTOP_DISABLE);
+                if (SUCCEEDED(g_device->BeginScene()))
+                {
+                    g_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, used / 3,
+                                              verts, sizeof(DebugLineVertex));
+                    g_device->EndScene();
+                }
+            }
+            if (old_target)
+            {
+                g_device->SetRenderTarget(0, old_target);
+                old_target->Release();
+            }
+            state->Apply();
+            g_device->SetViewport(&old_viewport);
+            state->Release();
+        }
+
+        // The third-person scale / zoom sliders (vr_input_tp_sliders):
+        // translucent blue bars, white knobs (yellow under the hand, bright
+        // while dragged), and a small icon left of each -- a figure for
+        // scale, a magnifier for zoom -- drawn as simple shapes so no
+        // language is needed.
+        void draw_tp_sliders(IDirect3DSurface9* back)
+        {
+            VrTpSliders s{};
+            if (!g_device || !stereo_same_frame_active() ||
+                !vr_input_tp_sliders(&s))
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            static float pts[600][3];
+            static DWORD cols[600];
+            unsigned n = 0;
+            const auto alpha = [&](DWORD rgb, float a)
+            {
+                const DWORD aa = (DWORD)(fminf(1.0f, a * s.opacity) * 255.0f);
+                return (aa << 24) | (rgb & 0xFFFFFFu);
+            };
+            const auto head = [&](const float body[3], float dr, float du,
+                                  float out[3])
+            {
+                return vr_body_point_head_position(body[0] + dr, body[1] + du,
+                                                   body[2] - 0.002f, out);
+            };
+            // A flat quad in the body's right / up plane.
+            const auto quad = [&](const float c[3], float r0, float u0,
+                                  float r1, float u1, DWORD colour)
+            {
+                if (n + 6 > 600)
+                    return;
+                float a[3], b[3], d[3], e[3];
+                if (!head(c, r0, u0, a) || !head(c, r1, u0, b) ||
+                    !head(c, r1, u1, d) || !head(c, r0, u1, e))
+                    return;
+                const float* order[6] = { a, b, d, a, d, e };
+                for (const float* p : order)
+                {
+                    memcpy(pts[n], p, sizeof(pts[n]));
+                    cols[n++] = colour;
+                }
+            };
+            const auto disc = [&](const float c[3], float radius,
+                                  DWORD colour)
+            {
+                float centre[3];
+                if (!head(c, 0.0f, 0.0f, centre))
+                    return;
+                for (int i = 0; i < 16 && n + 3 <= 600; ++i)
+                {
+                    const float a0 = 6.2831853f * i / 16.0f;
+                    const float a1 = 6.2831853f * (i + 1) / 16.0f;
+                    float p0[3], p1[3];
+                    if (!head(c, radius * cosf(a0), radius * sinf(a0), p0) ||
+                        !head(c, radius * cosf(a1), radius * sinf(a1), p1))
+                        return;
+                    memcpy(pts[n], centre, sizeof(pts[n]));
+                    cols[n++] = colour;
+                    memcpy(pts[n], p0, sizeof(pts[n]));
+                    cols[n++] = colour;
+                    memcpy(pts[n], p1, sizeof(pts[n]));
+                    cols[n++] = colour;
+                }
+            };
+            const auto ring = [&](const float c[3], float r_in, float r_out,
+                                  DWORD colour)
+            {
+                for (int i = 0; i < 16 && n + 6 <= 600; ++i)
+                {
+                    const float a0 = 6.2831853f * i / 16.0f;
+                    const float a1 = 6.2831853f * (i + 1) / 16.0f;
+                    float p[4][3];
+                    if (!head(c, r_in * cosf(a0), r_in * sinf(a0), p[0]) ||
+                        !head(c, r_out * cosf(a0), r_out * sinf(a0), p[1]) ||
+                        !head(c, r_out * cosf(a1), r_out * sinf(a1), p[2]) ||
+                        !head(c, r_in * cosf(a1), r_in * sinf(a1), p[3]))
+                        return;
+                    const int order[6] = { 0, 1, 2, 0, 2, 3 };
+                    for (int k : order)
+                    {
+                        memcpy(pts[n], p[k], sizeof(pts[n]));
+                        cols[n++] = colour;
+                    }
+                }
+            };
+            for (int i = 0; i < 2; ++i)
+            {
+                float mid[3];
+                for (int k = 0; k < 3; ++k)
+                    mid[k] = 0.5f * (s.start[i][k] + s.end[i][k]);
+                const float half = 0.5f * (s.end[i][0] - s.start[i][0]);
+                // Bar: translucent blue, a lighter filled part to the knob.
+                quad(mid, -half, -0.006f, half, 0.006f,
+                     alpha(0x3A7BD5u, 0.45f));
+                const float fill = s.knob[i][0] - mid[0];
+                quad(mid, -half, -0.006f, fill, 0.006f,
+                     alpha(0x6FB2FFu, 0.55f));
+                // Knob.
+                const DWORD knob = s.held[i] ? 0xFFFFFFu
+                                 : s.hover[i] ? 0xFFE25Au : 0xF0F0F0u;
+                disc(s.knob[i], s.held[i] ? 0.016f : 0.013f,
+                     alpha(knob, 0.95f));
+                // Icon.
+                const DWORD ink = alpha(0xFFFFFFu, 0.85f);
+                if (i == 0)
+                {
+                    // A little figure: head and body.
+                    float h[3] = { s.icon[i][0], s.icon[i][1] + 0.009f,
+                                   s.icon[i][2] };
+                    disc(h, 0.0045f, ink);
+                    quad(s.icon[i], -0.004f, -0.012f, 0.004f, 0.004f, ink);
+                }
+                else
+                {
+                    // A magnifier: ring and handle.
+                    float g[3] = { s.icon[i][0] - 0.002f,
+                                   s.icon[i][1] + 0.003f, s.icon[i][2] };
+                    ring(g, 0.0055f, 0.0085f, ink);
+                    float hd[3] = { s.icon[i][0] + 0.007f,
+                                    s.icon[i][1] - 0.007f, s.icon[i][2] };
+                    disc(hd, 0.0035f, ink);
+                }
+            }
+            draw_head_triangles(back, desc, pts, cols, n);
+        }
+
+        void draw_gear_cross_debug_pass(IDirect3DSurface9* back)
+        {
+            VrGearCross cross{};
+            if (!g_device || !tune_gear_cross_debug() ||
+                !stereo_same_frame_active() ||
+                camera_first_person_active() ||
+                !vr_input_gear_cross(&cross) || !cross.visible)
+                return;
+            draw_gear_cross_debug(back, cross);
+        }
+
         void draw_gear_cross(IDirect3DSurface9* back)
         {
             VrGearCross cross{};
@@ -1513,7 +2441,7 @@ namespace trlvr
         // 0.6 m in front (yaw-only body frame), saying what each hand holds
         // and how to place it. Rebuilt when the text changes.
         IDirect3DTexture9* g_tuning_panel = nullptr;
-        wchar_t g_tuning_panel_text[512] = {};
+        wchar_t g_tuning_panel_text[1024] = {};
 
         // A text panel floating in front of the player (yaw-only body frame),
         // drawn over the finished frame in both eyes.
@@ -1649,28 +2577,40 @@ namespace trlvr
             const float metre = tune_world_scale();
             if (!(metre > 0.0f))
                 return;
-            wchar_t hands[2][96]{};
+            // In the game's language (lang.cpp).
+            wchar_t hands[2][192]{};
             for (int hand = 0; hand < 2; ++hand)
             {
                 const int gear = tune_gear_tuning_slot(hand);
                 if (gear < 0)
-                    swprintf_s(hands[hand], L"%s hand: nothing this step",
-                               hand ? L"Right" : L"Left");
+                    wcscpy_s(hands[hand], trw(hand
+                        ? L"Right hand: nothing this step"
+                        : L"Left hand: nothing this step"));
                 else
-                    swprintf_s(hands[hand], L"%s hand: %S%s",
-                               hand ? L"Right" : L"Left",
-                               tune_gear_name(gear),
-                               tune_gear_tuning_placed(gear)
-                                   ? L"  (placed)" : L"");
+                {
+                    wchar_t item[128]{};
+                    MultiByteToWideChar(CP_UTF8, 0,
+                                        tr(tune_gear_name(gear)), -1, item,
+                                        (int)_countof(item));
+                    swprintf_s(hands[hand], trw(hand ? L"Right hand: %s"
+                                                     : L"Left hand: %s"),
+                               item);
+                    if (tune_gear_tuning_placed(gear))
+                        wcscat_s(hands[hand], trw(L"  (placed)"));
+                }
             }
-            wchar_t body[512]{};
-            swprintf_s(body,
-                L"Step %d of %d\n%s\n%s\n\nMove each item to where it feels "
-                L"comfortable on your body and pull that hand's trigger to "
-                L"place it. Pull again to pick it back up.\nThe last item "
-                L"saves. Press the menu button (left stick) to cancel.",
-                tune_gear_tuning_step() + 1, tune_gear_tuning_step_count(),
-                hands[0], hands[1]);
+            wchar_t step[96]{};
+            swprintf_s(step, trw(L"Step %d of %d"),
+                       tune_gear_tuning_step() + 1,
+                       tune_gear_tuning_step_count());
+            wchar_t body[1024]{};
+            swprintf_s(body, L"%s\n%s\n%s\n\n%s\n%s", step, hands[0],
+                hands[1],
+                trw(L"Move each item to where it feels comfortable on your "
+                    L"body and pull that hand's trigger to place it. Pull "
+                    L"again to pick it back up."),
+                trw(L"The last item saves. Press the menu button (left "
+                    L"stick) to cancel."));
             if (!g_tuning_panel || wcscmp(body, g_tuning_panel_text) != 0)
             {
                 if (g_tuning_panel)
@@ -1679,7 +2619,8 @@ namespace trlvr
                     g_tuning_panel = nullptr;
                 }
                 wcscpy_s(g_tuning_panel_text, body);
-                g_tuning_panel = make_text_texture(L"VR Holster Setup", body,
+                g_tuning_panel = make_text_texture(trw(L"VR Holster Setup"),
+                                                   body,
                                                    1024, 640);
                 if (!g_tuning_panel)
                 {
@@ -1897,7 +2838,7 @@ namespace trlvr
         // vr_submit_notice: shown for kNoticeMs, rebuilt when it changes.
         IDirect3DTexture9* g_notice_panel = nullptr;
         wchar_t g_notice_title[64] = {};
-        wchar_t g_notice_body[384] = {};
+        wchar_t g_notice_body[768] = {};
         bool g_notice_dirty = false;
         ULONGLONG g_notice_at = 0;
         const ULONGLONG kNoticeMs = 6000;
@@ -2120,7 +3061,7 @@ namespace trlvr
 
         // Hand calibration instructions, above the held-out hands.
         IDirect3DTexture9* g_calibration_panel = nullptr;
-        wchar_t g_calibration_panel_text[512] = {};
+        wchar_t g_calibration_panel_text[1024] = {};
 
         void draw_hand_calibration_panel(IDirect3DSurface9* back)
         {
@@ -2131,30 +3072,39 @@ namespace trlvr
             if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
                 !desc.Height)
                 return;
-            wchar_t body[512]{};
+            // In the game's language (lang.cpp).
+            wchar_t body[1024]{};
             if (vr_hand_calibration_step() == 1)
-                swprintf_s(body,
-                    L"Step 2: pistol aim\n"
-                    L"Point your %s pistol at the target ahead, lining up "
-                    L"its sights the way you would aim, then pull that "
-                    L"trigger. Your aim is saved for both hands.\n\n"
-                    L"A: skip (keep your current aim)\n"
-                    L"Menu button: stop here",
-                    config().left_handed ? L"left" : L"right");
+            {
+                wchar_t aim[512]{};
+                swprintf_s(aim, trw(L"Point your %s pistol at the target "
+                    L"ahead, lining up its sights the way you would aim, "
+                    L"then pull that trigger. Your aim is saved for both "
+                    L"hands."),
+                    trw(config().left_handed ? L"left" : L"right"));
+                swprintf_s(body, L"%s\n%s\n\n%s\n%s",
+                    trw(L"Step 2: pistol aim"), aim,
+                    trw(L"A: skip (keep your current aim)"),
+                    trw(L"Menu button: stop here"));
+            }
             else
-                swprintf_s(body,
-                    L"Step 1: hand alignment\n"
-                    L"The boxes are your controllers: yellow arrow where it "
-                    L"points, green arrow its top. Move each one to where "
-                    L"it should sit in Lara's hand, then squeeze its grip "
-                    L"to lock it.\n"
-                    L"Left hand: %s     Right hand: %s\n\n"
-                    L"A: skip (keep your current alignment)\n"
-                    L"Menu button: stop here",
-                    vr_hand_calibration_locked(true) ? L"locked"
-                                                     : L"squeeze grip",
-                    vr_hand_calibration_locked(false) ? L"locked"
-                                                      : L"squeeze grip");
+            {
+                wchar_t state[256]{};
+                swprintf_s(state, trw(L"Left hand: %s     Right hand: %s"),
+                    trw(vr_hand_calibration_locked(true) ? L"locked"
+                                                         : L"squeeze grip"),
+                    trw(vr_hand_calibration_locked(false) ? L"locked"
+                                                          : L"squeeze grip"));
+                swprintf_s(body, L"%s\n%s\n%s\n\n%s\n%s",
+                    trw(L"Step 1: hand alignment"),
+                    trw(L"The boxes are your controllers: yellow arrow where "
+                        L"it points, green arrow its top. Move each one to "
+                        L"where it should sit in Lara's hand, then squeeze "
+                        L"its grip to lock it."),
+                    state,
+                    trw(L"A: skip (keep your current alignment)"),
+                    trw(L"Menu button: stop here"));
+            }
             if (!g_calibration_panel ||
                 wcscmp(body, g_calibration_panel_text) != 0)
             {
@@ -2165,7 +3115,7 @@ namespace trlvr
                 }
                 wcscpy_s(g_calibration_panel_text, body);
                 g_calibration_panel = make_text_texture(
-                    L"VR Hand Calibration", body, 1024, 640);
+                    trw(L"VR Hand Calibration"), body, 1024, 640);
             }
             // Higher during the aim step, clear of the target below it.
             draw_world_panel(back, desc, g_calibration_panel,
@@ -2192,16 +3142,23 @@ namespace trlvr
             {
                 float body[3]{};
                 int held = -1;
-                if (!vr_input_pouch_item(item, body, &held))
+                if (camera_pouch_model_shown(item) ||
+                    !vr_input_pouch_item(item, body, &held))
                     continue;
                 float centre[3]{};
                 if (held >= 0)
                 {
-                    Mat4 pose;
-                    if (!vr_controller_head_pose(held == 0, &pose))
-                        continue;
-                    for (int k = 0; k < 3; ++k)
-                        centre[k] = pose.m[3][k];
+                    // In Lara's palm, like the game's own gear (user
+                    // 2026-10-10, Quest: it floated off the hand at the raw
+                    // controller point); that point without a hand model.
+                    if (!vr_hand_palm_head_position(held == 0, centre))
+                    {
+                        Mat4 pose;
+                        if (!vr_controller_head_pose(held == 0, &pose))
+                            continue;
+                        for (int k = 0; k < 3; ++k)
+                            centre[k] = pose.m[3][k];
+                    }
                 }
                 else if (!vr_body_point_head_position(body[0], body[1],
                                                       body[2], centre))
@@ -2893,6 +3850,15 @@ namespace trlvr
     void vr_submit_note_draw()
     {
         InterlockedIncrement(&g_perf_draws);
+        // Theatre: the surround goes in before the first interface draw,
+        // when both eyes' scene is finished, so subtitles and menus stay
+        // on top of it.
+        if (vr_theatre_active() && ui_drawing_interface() &&
+            !ui_drawing_world_marker())
+            draw_theatre_surround(nullptr);
+        if (vr_diorama_active() && ui_drawing_interface() &&
+            !ui_drawing_world_marker())
+            draw_diorama(nullptr);
     }
 
     void vr_submit_wait()
@@ -2948,6 +3914,10 @@ namespace trlvr
         // from the same instant.
         if (stereo_same_frame_active())
         {
+            // No interface draw this frame: the surround goes on here.
+            draw_theatre_surround(back_buffer);
+            g_theatre_drawn = false;
+            g_diorama_drawn = false;
             draw_holster_debug(back_buffer);
             draw_hand_tuning_debug(back_buffer);
             draw_handhold_debug(back_buffer);
@@ -2960,6 +3930,9 @@ namespace trlvr
             draw_hand_ruler(back_buffer);
             draw_secure_grab_badge(back_buffer);
             draw_gear_cross(back_buffer);
+            draw_gear_cross_debug_pass(back_buffer);
+            draw_finger_debug(back_buffer);
+            draw_tp_sliders(back_buffer);
             draw_pluck_ring(back_buffer);
             draw_comfort_vignette(back_buffer, camera_comfort_vignette());
             draw_aim_crosshair(back_buffer);

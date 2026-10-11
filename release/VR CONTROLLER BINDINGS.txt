@@ -11,7 +11,9 @@ HP REVERB G2 / OCULUS TOUCH
 Left stick                  Move Lara (W / A / S / D)
 Left stick short click      Pause; menu back (Escape)
 Left stick double click     Recenter the VR view
-Left stick long click       Use health pack (Home)
+Left stick long click       Gear menu: keep holding, push the stick towards
+                            an item (up health pack, right binoculars,
+                            down switch weapon, left personal light)
 
 Right stick                 Turn the camera (mouse movement)
 Right stick short click     Switch weapons (End)
@@ -51,7 +53,8 @@ Left A                      Accurate/free aim (Z)
 Left B short press          Grenade / flare (K)
 Left B long press           Personal light / flashlight (Delete)
 Left B held                 Board mode: flick Lara over (board_god_hand)
-Left trackpad click         Use health pack (Home)
+Left trackpad click         Gear menu (then push the left joystick
+                            towards an item, as above)
 Right trackpad click        Use binoculars (Page Down)
 
 
@@ -60,7 +63,7 @@ ORIGINAL WINDOWS MIXED REALITY CONTROLLERS
 Left joystick               Move Lara (W / A / S / D)
 Left joystick short click   Pause; menu back (Escape)
 Left joystick double click  Recenter the VR view
-Left joystick long click    Use health pack (Home)
+Left joystick long click    Gear menu (push the stick towards an item)
 
 Right joystick              Turn the camera (mouse movement)
 Right joystick short click  Switch weapons (End)
@@ -109,6 +112,7 @@ The grips become your hands; changes from the tables above:
   * Belt: grab the grapple (fling and let go to throw) or the binoculars
     (bring them to your face). Pouches: grenade/flare at the front of the belt
     (fling to throw), medipack on the right chest (bring it to your mouth).
+    The pouches show the game's own models while you carry any.
   * Personal light: left grip at the left chest.
   * Action trigger: precision aim with guns out, otherwise Action (E). With the
     grapple attached, hold a trigger and pull your hand back to yank.
@@ -122,7 +126,8 @@ THIRD PERSON
 The full button layout above still works. In addition a floating gear cross
 of the game's own item icons sits in front of you: grip an icon to use it,
 grip its centre handle to move the cross. The left grip at the left chest
-toggles the light.
+toggles the light. With [controls] gear_menu = radial the cross is replaced
+by the hold-and-push gear menu of the classic layout.
 
 In first person, pause menu > VR Settings > VR Holster Setup places the
 holsters, belt gear and pouches for your body: hold each item where you want

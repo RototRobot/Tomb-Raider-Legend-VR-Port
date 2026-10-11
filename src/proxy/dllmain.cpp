@@ -5,6 +5,7 @@
 // no launcher, no injector, nothing patched on disk.
 
 #include "../vr/hook.h"
+#include "../vr/tune.h"
 #include "backend.h"
 #include "proxy_d3d9.h"
 
@@ -122,12 +123,19 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     {
         DisableThreadLibraryCalls(module);
         load_config();
+        // Before anything reads the hand tuning.
+        const int tuning_reset = tune_reset_controller_tuning_on_load();
         if (config().logging)
         {
             log_open();
             wchar_t exe[MAX_PATH]{};
             GetModuleFileNameW(nullptr, exe, MAX_PATH);
             log("host: %S", exe);
+            if (tuning_reset >= 0)
+                log("config: reset_controller_tuning_on_load -- removed %d "
+                    "saved hand tuning value%s; the controller profile's "
+                    "defaults apply", tuning_reset,
+                    tuning_reset == 1 ? "" : "s");
             if (config_defaults_added() != 0)
             {
                 log("config: added %u missing setting%s to trlvr.ini",

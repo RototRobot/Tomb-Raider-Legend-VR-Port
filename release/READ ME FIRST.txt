@@ -1,5 +1,5 @@
 ================================================================
-  Tomb Raider: Legend  --  VR mod          PREVIEW 3 (testers)
+  Tomb Raider: Legend  --  VR mod          PREVIEW 4 (testers)
 ================================================================
 
 This is an early preview for testers. Expect rough edges. Please report what
@@ -16,6 +16,42 @@ The original game files are not modified. The mod adds files beside trl.exe,
 and its launcher writes a separate patched copy named trl_vr.exe.
 
 
+NEW IN PREVIEW 4
+----------------
+  * Pause menu > VR Settings now changes VR options on the spot: Theatre,
+    Third Person camera, Hand Collision, Body (hands / full), Left Handed and
+    Hardcore Mode, besides Holster Setup and Hand Calibration. Press an entry
+    to step through its choices; it is saved to trlvr.ini. In all five of the
+    game's languages.
+  * Quest (Oculus Touch) controllers get their own tuned defaults for hands,
+    aim and holsters; other controllers keep the Reverb G2 defaults.
+  * Theatre mode: cutscenes (and optionally third-person play) on a big
+    window fixed in the room, still in 3D.
+  * Radial gear menu with the classic layout: hold the left stick and push
+    it towards an item.
+  * Roomscale: walk around your room in first person and Lara follows,
+    stopping at walls.
+  * Finger tracking on Quest and Index (finger_tracking = 1).
+  * Full body: the torso gives a little as she moves; hands stop at her body.
+  * Third person: palm-up off hand shows scale and zoom sliders; Lara runs
+    her hand along walls she walks beside.
+  * Board mode: optional tabletop diorama you can grab and move.
+  * Hardcore mode (off by default): the view turns with Lara through flips
+    and rolls.
+  * First person: the chest pouches show the game's own medipack and grenade
+    models; the light's glow and the grapple rope follow your hands; vine
+    climbing fixed (each grip climbs one way -- let go and grip again to
+    change direction).
+  * The game's rumble reaches the VR controllers.
+  * The sky no longer slides with the look stick or precision aim.
+  * Sharper distance: Depth of Field and Fullscreen Effects are switched off
+    by the mod, and anti-aliasing switched on (see PREPARE THE GAME).
+  * Faster pause menu, and many smaller fixes.
+
+  If you placed your holsters before (Preview 3 or earlier), run
+  VR Holster Setup once more: positions are now measured from Lara's palm.
+
+
 ------------------------------------------------------------
 1. PREPARE THE GAME
 ------------------------------------------------------------
@@ -24,10 +60,15 @@ Run Tomb Raider: Legend normally once, reach the main menu, then quit.
 Open the game's Setup dialog and turn OFF:
 
     Next Generation Content     (its renderer gives a black scene in VR)
-    Fullscreen Effects          (flat-screen post effects smear the two eyes)
 
-Depth of Field is switched off by the mod itself (trlvr.ini, depth_of_field).
-Anti-aliasing (FSAA) may stay on; the mod limits it to a VR-friendly level.
+The mod sets three other options itself at every start, whatever the Setup
+dialog says (trlvr.ini, [vr]):
+
+    depth_of_field = off        blurs the distance in VR
+    fullscreen_effects = off    flat-screen glow that smears the two eyes
+    fsaa = on                   anti-aliasing, its strength capped by msaa
+
+Set any of them to "game" to keep the Setup dialog's choice instead.
 
 
 ------------------------------------------------------------
@@ -93,13 +134,23 @@ You then see through Lara's eyes with your own tracked hands:
   * Pistols: reach to a hip and lift to draw; hold the gun back at the hip to
     holster. Reach over a shoulder and grip to swap to the long gun.
   * Gear: grapple, binoculars and light hang on your belt -- grab them with
-    either hand. Grenades/flares and medipacks are chest pouches.
+    either hand. Grenades/flares and medipacks sit in pouches, shown as the
+    game's own models while you carry any.
   * Climbing: grip a ledge, vine, chain or bar with your hands and pull your
     body along it. Pull down with both hands to climb up onto a ledge.
     Alternate hands quickly to shimmy fast. One-hand catches: grab the hold
     (or set auto_secure_catch = bars or all to have them secured for you).
   * Crouch for real to crouch. Jumping off a chain goes where you look.
-  * Pause menu > "VR Settings" (the old Display menu):
+  * Pause menu > "VR Settings" (the old Display menu). Each entry changes a
+    VR option on the spot and saves it to trlvr.ini:
+      Theatre            Off / Cutscenes / Always
+      Third Person       Classic / Shoulder / Board / All
+      Hand Collision     Off / On / On + Body
+      Body               Hands / Full
+      Left Handed        Off / On
+      Hardcore Mode      Off / On
+    (The On/Off column on the right still shows the game's own setting; the
+    label is what counts.)
       "VR Holster Setup" (the old Widescreen entry) places the holsters,
       gear and pouches where they suit your body.
       "Hand Calibration" (the old Next Generation Content entry):
@@ -123,6 +174,10 @@ Other camera options (third person, immersive controls on):
 
 Optional body:  first_person_body = full   (whole body instead of hands only)
 
+Third person extras: turn your off hand palm up for two sliders that scale
+the world and zoom the camera (saved per camera style). Walking beside a
+wall with nothing drawn, Lara runs her hand along it (wall_touch).
+
 
 ------------------------------------------------------------
 VR CONTROLLERS (classic layout)
@@ -130,7 +185,9 @@ VR CONTROLLERS (classic layout)
     Left stick                 move
     Left stick click           pause / back (Esc)
     Left stick double click    recenter the VR view
-    Left stick long press      use health pack
+    Left stick long press      gear menu: keep holding and push the stick
+                               up health pack, right binoculars,
+                               down switch weapon, left personal light
     Right stick                turn
     Right stick click          switch weapons
     Right stick double click   open the PDA
@@ -163,7 +220,8 @@ Aim for a steady frame rate rather than the highest resolution:
     fixed half rate with Motion Smoothing usually feels smoother than a
     frame rate that keeps jumping.
   * trlvr.ini, [vr]:
-      msaa = 4                       anti-aliasing cap: 0 (off), 2, 4 or 8
+      msaa = 4                       anti-aliasing strength: 0 (off), 2, 4, 8
+      fsaa = off                     anti-aliasing off altogether
       first_person_object_culling = frustum   (open = draw everything)
       terrain_culling = frustum                (open = draw every terrain strip)
     The "open" settings exist only in case something visibly pops in or
@@ -190,13 +248,20 @@ are added on start-up; values you chose are never replaced.
                                 themselves on swing bars, or everywhere
         first_person_no_spread  shots go exactly where the gun points
         ui_scale, hud_follow    size and head-follow of the HUD
-        depth_of_field          off / on / game
+        cutscene_mode           normal / theatre (gameplay_theatre = 1 too)
+        roomscale               walk in your room (first person)
+        finger_tracking         Lara's fingers follow yours (Quest, Index)
+        first_person_hardcore   the view turns with Lara through flips
+        wall_touch              third person: her hand along walls
+        depth_of_field, fullscreen_effects, fsaa     off / on / game
   [controls]
         immersive_controls      gestures, holsters, hand climbing
         left_handed             swap the main hand
         pistol_mode             akimbo / single
         aim_mode                hand / hands / hands_head
         turn_mode               smooth / snap  (snap_turn_degrees)
+        hand_collision          hands stop at walls and floors
+        gear_menu               cross / radial (immersive third person)
 
 To start over with all defaults, rename trlvr.ini and start the game once.
 
@@ -207,8 +272,9 @@ KNOWN LIMITATIONS
   * Next Generation Content is not supported (black scene). Keep it off.
   * Water reflections and the full-screen water effect are skipped (they only
     exist for one eye), so deep water looks flatter than on a monitor.
-  * Changing anti-aliasing in the in-game options crashes the game. Change it
-    in the Setup dialog before starting instead.
+  * Graphics options can only be changed in the Setup dialog (or with the
+    trlvr.ini settings above): during a level the in-game Display menu is
+    the VR Settings menu instead.
   * Cinematics play in third person on a world-locked view.
   * Some original wet-rock "sheen" decals flicker by view angle -- the flat
     game does the same.

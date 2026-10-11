@@ -155,6 +155,7 @@ namespace trlvr
                               pPresentationParameters->BackBufferHeight);
 
         vr_submit_release_targets();
+        reflection_stereo_release();
         const HRESULT hr = _device->Reset(pPresentationParameters);
         gpu_profile_set_device(_device);
 
@@ -215,6 +216,7 @@ namespace trlvr
             D3DSURFACE_DESC desc{};
             if (pRenderTarget && SUCCEEDED(pRenderTarget->GetDesc(&desc)))
                 vr_set_render_target_size(desc.Width, desc.Height);
+            reflection_stereo_note_render_target(_device, 0, pRenderTarget);
         }
         return _device->SetRenderTarget(RenderTargetIndex, pRenderTarget);
     }

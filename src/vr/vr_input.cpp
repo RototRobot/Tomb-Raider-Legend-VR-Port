@@ -37,6 +37,7 @@
 // on every change, because if HUD elements turn out to live on the same stack
 // the menu set would be live during play -- and the log would say so at once.
 #include "vr_input.h"
+#include "lang.h"
 #include "../proxy/window.h"
 
 #include "camera_head.h"
@@ -127,6 +128,34 @@ namespace trlvr
         bool g_trigger_held[2] = { false, false };
         // /actions/gameplay/in/hand_left|right, bound to /pose/grip.
         vr::VRActionHandle_t g_hand_pose[2] = { 0, 0 };
+        // SteamVR skeletal input (finger tracking, 2026-10-10): per hand,
+        // the finger curls and splays read after each UpdateActionState.
+        vr::VRActionHandle_t g_skeleton[2] = { 0, 0 };
+        struct FingerState
+        {
+            bool valid = false;
+            int level = -1;            // EVRSkeletalTrackingLevel
+            float curl[5]{};
+            float splay[4]{};
+            // Each finger's sideways angle from the middle finger (index,
+            // middle = 0, ring, pinky; radians, pinky-ward positive),
+            // measured on SteamVR's bones.
+            float spread[4]{};
+            bool spread_valid = false;
+            // The thumb tip in the hand's own frame (thumb_from_bones) and
+            // how far it has closed on the index tip (0..1).
+            float thumb[4]{};
+            bool thumb_valid = false;
+            float palm_sign = 0.0f;    // which side of the knuckles is palm
+            bool reported_on = false;
+            bool reported_off = false;
+        };
+        FingerState g_fingers[2];
+        // finger_debug: SteamVR's bone positions (model space, metres,
+        // without the controller) and its animation-side curls.
+        float g_finger_bones[2][31][3];
+        bool g_finger_bones_valid[2] = { false, false };
+        ULONGLONG g_finger_debug_logged = 0;
         unsigned g_grip_samples[2] = { 0, 0 };
         vr::TrackedDeviceIndex_t g_grip_device[2] = {
             vr::k_unTrackedDeviceIndexInvalid,
@@ -169,6 +198,26 @@ namespace trlvr
         int g_last_vine_pull_side = 0;
         int g_vine_look_side = 0;
         unsigned g_vine_look_reports = 0;
+        // A vine pull holds its direction at least kVineStrokeMs while a
+        // hand still holds (user 2026-10-11: pulls failed now and then).
+        // Lara's climb carries the controller up past the anchor within a
+        // fraction of a second, which released the key before the game's
+        // climb step had started or finished.
+        const DWORD kVineStrokeMs = 800;   // was 500 (still missed pulls)
+        // Each held climb key's effect, for diagnosing missed pulls.
+        DWORD g_vine_key_at = 0;
+        int g_vine_key_dir = 0;
+        float g_vine_key_height = 0.0f;
+        unsigned g_vine_key_reports = 0;
+        DWORD g_vine_stroke_until = 0;
+        int g_vine_stroke_dir = 0;
+        // One direction per grip (user 2026-10-11): the first clear pull of
+        // the driving grip decides up or down; after climbing past the hand
+        // it reads the other way, which pulled Lara back. A new grip
+        // decides again.
+        unsigned g_vine_lock_serial = 0;
+        int g_vine_lock_dir = 0;
+        bool g_vine_lock_reported = false;
         unsigned g_vine_pull_reports = 0;
         unsigned g_ledge_pull_reports = 0;
         // Hand-over-hand on a ledge or swing bar. A "stroke" is one fresh
@@ -203,6 +252,28 @@ namespace trlvr
         FastShimmyState g_fast_climb;
         // Raw left stick this frame: x right, y forward.
         float g_move_raw[2] = { 0.0f, 0.0f };
+        // Radial gear menu (user 2026-10-09): the medipack button (left
+        // stick long press) opens it, the left stick then picks a direction
+        // instead of moving -- up medipack (Home), right binoculars (Page
+        // Down), down weapon switch (End), left light (Delete) -- with the
+        // game's own flat cross shown. Closes on a pick, the button again,
+        // a menu or after 4 s; the stick then moves Lara only once it has
+        // been back near centre.
+        bool      g_radial_open = false;
+        bool      g_radial_button_was = false;
+        bool      g_radial_wait_centre = false;
+        ULONGLONG g_radial_open_at = 0;
+        WORD      g_radial_key = 0;
+        ULONGLONG g_radial_key_until = 0;
+
+        // Immersive off: always. Immersive third person: gear_menu = radial.
+        // Immersive first person keeps its hand gestures.
+        bool radial_gear_menu_enabled()
+        {
+            if (!config().immersive_controls)
+                return true;
+            return config().gear_menu_radial && !camera_first_person_active();
+        }
 
         float g_mouse_rem[2] = { 0.0f, 0.0f };
         float g_first_person_turn = 0.0f;
@@ -225,8 +296,24 @@ namespace trlvr
         // ([controls] gear_cross_right/up/forward).
         float kGearCross[3] = { 0.0f, -0.42f, 0.34f };
         bool  g_gear_loaded = false;
+        // How much the cross stays put when the head turns (user
+        // 2026-10-08): 0 = turns with the head (the old behaviour), 1 =
+        // fixed in the room at the recentred forward, between = follows that
+        // fraction less. [controls] gear_cross_x_rate.
+        float g_gear_x_rate = 1.0f;
+        bool  g_gear_anchor_valid = false;
+        float g_gear_anchor = 0.0f;         // tracking-space yaw, radians
+        // Cross frame -> body frame: right = r0*a + f0*b, forward =
+        // r0*c + f0*d (a rotation about the vertical).
+        float g_gear_basis[4] = { 1.0f, 0.0f, 0.0f, 1.0f };
         const float kGearSpacing = 0.10f;
-        const float kGearRadius = 0.06f;      // grab reach per icon
+        // Grab reach per icon, a sphere round each (6 cm was too small to
+        // hit easily, user 2026-10-08); neighbours overlap and the nearest
+        // icon wins. The middle handle keeps a smaller sphere. Both 40%
+        // smaller once tested from Lara's palm (user 2026-10-09, with the
+        // debug spheres): 9 -> 5.4 cm, 5 -> 3 cm.
+        const float kGearRadius = 0.054f;
+        const float kGearHandleRadius = 0.03f;
         const float kGearNearRange = 0.35f;   // icons brighten inside this
         // The retail gear cross (user, 2026-10-01): up = medipack,
         // right = binoculars, down = weapon switch, left = flashlight.
@@ -249,15 +336,40 @@ namespace trlvr
                                        L"gear_cross_forward" };
             for (int k = 0; k < 3; ++k)
             {
-                GetPrivateProfileStringW(L"controls", keys[k], L"", value,
-                                         32, path);
+                // The controller profile supplies a default (tune.cpp).
+                tune_profile_read(L"controls", keys[k], value, 32);
                 wchar_t* end = nullptr;
                 const float v = wcstof(value, &end);
                 if (end != value && std::isfinite(v) && fabsf(v) < 1.5f)
                     kGearCross[k] = v;
             }
-            log("controls: gear cross centre (%+.2f, %+.2f, %+.2f) m",
-                kGearCross[0], kGearCross[1], kGearCross[2]);
+            wchar_t rate[32]{};
+            GetPrivateProfileStringW(L"controls", L"gear_cross_x_rate",
+                                     L"1.0", rate, 32, path);
+            const float r = (float)_wtof(rate);
+            g_gear_x_rate = std::isfinite(r) ? fminf(fmaxf(r, 0.0f), 1.0f)
+                                             : 1.0f;
+            log("controls: gear cross centre (%+.2f, %+.2f, %+.2f) m, "
+                "stays put for %.0f%% of head turns", kGearCross[0],
+                kGearCross[1], kGearCross[2], g_gear_x_rate * 100.0f);
+        }
+
+        // Within arm's reach of the body (user 2026-10-08: players could drag
+        // it somewhere they could not get back to): 0.65 m round the body
+        // horizontally, in front of it, from 0.9 m below the eyes to 0.2 m
+        // above.
+        void gear_cross_clamp()
+        {
+            const float kReach = 0.65f;
+            const float h = sqrtf(kGearCross[0] * kGearCross[0] +
+                                  kGearCross[2] * kGearCross[2]);
+            if (h > kReach)
+            {
+                kGearCross[0] *= kReach / h;
+                kGearCross[2] *= kReach / h;
+            }
+            kGearCross[2] = fmaxf(kGearCross[2], 0.05f);
+            kGearCross[1] = fminf(fmaxf(kGearCross[1], -0.9f), 0.2f);
         }
 
         void gear_cross_save()
@@ -285,14 +397,60 @@ namespace trlvr
         ULONGLONG g_gear_flash_at = 0;
         float     g_gear_nearness = 0.0f;
 
+        // The cross's own yaw: the anchor (recentred forward) plus
+        // (1 - rate) of the head's turn away from it.
+        void gear_cross_frame_update()
+        {
+            float hx = 0.0f, hz = 1.0f;
+            if (!vr_head_forward_xz(&hx, &hz))
+                return;
+            const float head = atan2f(hx, hz);
+            if (!g_gear_anchor_valid)
+            {
+                g_gear_anchor = head;
+                g_gear_anchor_valid = true;
+            }
+            float turn = head - g_gear_anchor;
+            while (turn > 3.14159265f) turn -= 6.28318531f;
+            while (turn < -3.14159265f) turn += 6.28318531f;
+            const float yaw = g_gear_anchor + (1.0f - g_gear_x_rate) * turn;
+            const float cx = sinf(yaw), cz = cosf(yaw);
+            // Right vectors are (-z, x) of the forwards (as the body frame).
+            const float crx = -cz, crz = cx;
+            const float hrx = -hz, hrz = hx;
+            g_gear_basis[0] = crx * hrx + crz * hrz;   // cr . hr
+            g_gear_basis[1] = cx * hrx + cz * hrz;     // c  . hr
+            g_gear_basis[2] = crx * hx + crz * hz;     // cr . h
+            g_gear_basis[3] = cx * hx + cz * hz;       // c  . h
+        }
+
+        void gear_cross_to_body(const float in[3], float out[3])
+        {
+            const float r = in[0], f = in[2];
+            out[0] = r * g_gear_basis[0] + f * g_gear_basis[1];
+            out[1] = in[1];
+            out[2] = r * g_gear_basis[2] + f * g_gear_basis[3];
+        }
+
+        void body_to_gear_cross(const float in[3], float out[3])
+        {
+            const float r = in[0], f = in[2];
+            out[0] = r * g_gear_basis[0] + f * g_gear_basis[2];
+            out[1] = in[1];
+            out[2] = r * g_gear_basis[1] + f * g_gear_basis[3];
+        }
+
+        // Positions in the body frame (head yaw), as the hands are measured.
         void gear_item_position(int item, float out[3])
         {
             static const float dir[4][2] = {
                 { 0.0f, 1.0f }, { 1.0f, 0.0f }, { 0.0f, -1.0f },
                 { -1.0f, 0.0f } };
-            out[0] = kGearCross[0] + dir[item][0] * kGearSpacing;
-            out[1] = kGearCross[1] + dir[item][1] * kGearSpacing;
-            out[2] = kGearCross[2];
+            const float local[3] = {
+                kGearCross[0] + dir[item][0] * kGearSpacing,
+                kGearCross[1] + dir[item][1] * kGearSpacing,
+                kGearCross[2] };
+            gear_cross_to_body(local, out);
         }
         // Third-person immersive test log: button press edges (capped).
         bool     g_tp_button_was[32] = { false };
@@ -355,6 +513,33 @@ namespace trlvr
 
         void vr_input_handhold_haptic_fwd(bool left);
 
+        // The point of each hand tested against the cross: the palm of
+        // Lara's hand model (user 2026-10-09: relative to the game's hand,
+        // not the controller -- a controller held 15 degrees differently
+        // moves its own origin, but hand calibration keeps her palm on the
+        // real palm). The controller's tracked origin without the model.
+        float g_gear_hand_point[2][3]{};
+        bool  g_gear_hand_valid[2] = { false, false };
+        bool  g_gear_hand_palm[2] = { false, false };
+
+        bool gear_hand_point(int hand, float* r, float* u, float* fw)
+        {
+            const bool left = hand == 0;
+            const bool palm = vr_hand_palm_body_position(left, r, u, fw);
+            if (!palm && !vr_controller_body_position(left, r, u, fw))
+                return false;
+            static int reported[2] = { -1, -1 };
+            if (reported[hand] != (palm ? 1 : 0))
+            {
+                reported[hand] = palm ? 1 : 0;
+                log("controls: gear cross tests the %s hand's %s", left
+                    ? "left" : "right", palm ? "palm (Lara's hand model)"
+                                             : "controller origin");
+            }
+            g_gear_hand_palm[hand] = palm;
+            return true;
+        }
+
         // Hover and grab on the third-person gear cross. A grip press on a
         // hovered icon pulses that item's game key for 120 ms and claims
         // the grip (no grapple / lock-on key) until it is released.
@@ -363,6 +548,35 @@ namespace trlvr
         {
             const bool grips[2] = { left_grip, right_grip };
             gear_cross_load();
+            // A recentre (left stick double-click, F1) also brings the
+            // cross back to its default if it was left out of reach --
+            // including positions saved before the drag limit existed.
+            static unsigned recentre_seen = vr_recenter_generation();
+            if (vr_recenter_generation() != recentre_seen)
+            {
+                recentre_seen = vr_recenter_generation();
+                g_gear_anchor_valid = false;   // back in front of you
+                const float before[3] = {
+                    kGearCross[0], kGearCross[1], kGearCross[2] };
+                gear_cross_clamp();
+                const bool moved = before[0] != kGearCross[0] ||
+                                   before[1] != kGearCross[1] ||
+                                   before[2] != kGearCross[2];
+                if (moved)
+                {
+                    const wchar_t* keys[3] = { L"gear_cross_right",
+                        L"gear_cross_up", L"gear_cross_forward" };
+                    const float fallback[3] = { 0.0f, -0.42f, 0.34f };
+                    for (int k = 0; k < 3; ++k)
+                        if (!tune_profile_default(L"controls", keys[k],
+                                                  &kGearCross[k]))
+                            kGearCross[k] = fallback[k];
+                    log("controls: gear cross was out of reach -- reset by "
+                        "the recentre");
+                    gear_cross_save();
+                }
+            }
+            gear_cross_frame_update();
             if (active != g_gear_active)
             {
                 g_gear_active = active;
@@ -379,8 +593,12 @@ namespace trlvr
                 const bool pressed = grips[hand] && !g_gear_grip_was[hand];
                 g_gear_grip_was[hand] = grips[hand];
                 float r = 0.0f, u = 0.0f, fw = 0.0f;
-                if (!active || !vr_controller_body_position(hand == 0, &r,
-                                                            &u, &fw))
+                g_gear_hand_valid[hand] = active &&
+                    gear_hand_point(hand, &r, &u, &fw);
+                g_gear_hand_point[hand][0] = r;
+                g_gear_hand_point[hand][1] = u;
+                g_gear_hand_point[hand][2] = fw;
+                if (!g_gear_hand_valid[hand])
                 {
                     g_gear_hover[hand] = -1;
                     g_gear_handle_hover[hand] = -1;
@@ -395,9 +613,11 @@ namespace trlvr
                     g_gear_hover[hand] = -1;
                     if (grips[hand])
                     {
-                        kGearCross[0] = r + g_gear_drag_offset[0];
-                        kGearCross[1] = u + g_gear_drag_offset[1];
-                        kGearCross[2] = fw + g_gear_drag_offset[2];
+                        const float body[3] = { r + g_gear_drag_offset[0],
+                                                u + g_gear_drag_offset[1],
+                                                fw + g_gear_drag_offset[2] };
+                        body_to_gear_cross(body, kGearCross);
+                        gear_cross_clamp();
                     }
                     else
                     {
@@ -407,9 +627,11 @@ namespace trlvr
                     nearest = 0.0f;
                     continue;
                 }
-                const float cx = r - kGearCross[0];
-                const float cy = u - kGearCross[1];
-                const float cz = fw - kGearCross[2];
+                float centre[3];
+                gear_cross_to_body(kGearCross, centre);
+                const float cx = r - centre[0];
+                const float cy = u - centre[1];
+                const float cz = fw - centre[2];
                 const float to_centre = sqrtf(cx * cx + cy * cy + cz * cz);
                 nearest = to_centre < nearest ? to_centre : nearest;
                 int hover = -1;
@@ -426,7 +648,7 @@ namespace trlvr
                         hover = item;
                     }
                 }
-                const int handle = to_centre <= kGearRadius &&
+                const int handle = to_centre <= kGearHandleRadius &&
                     (hover < 0 || to_centre * to_centre < best) ? 1 : -1;
                 if (handle > 0)
                     hover = -1;
@@ -439,9 +661,9 @@ namespace trlvr
                 {
                     g_gear_grip_claim[hand] = true;
                     g_gear_drag_hand = hand;
-                    g_gear_drag_offset[0] = kGearCross[0] - r;
-                    g_gear_drag_offset[1] = kGearCross[1] - u;
-                    g_gear_drag_offset[2] = kGearCross[2] - fw;
+                    g_gear_drag_offset[0] = centre[0] - r;
+                    g_gear_drag_offset[1] = centre[1] - u;
+                    g_gear_drag_offset[2] = centre[2] - fw;
                     log("controls: [3P] %s hand took the gear cross handle",
                         hand == 0 ? "left" : "right");
                 }
@@ -520,6 +742,10 @@ namespace trlvr
         // The menu button that cancelled a setup does not also pause the
         // game: held back until it is released.
         bool     g_pause_hold = false;
+        // Controller type for the tuning profile: decided once a controller
+        // reports its type (SteamVR Prop_ControllerType_String).
+        bool      g_profile_decided = false;
+        ULONGLONG g_profile_next_check = 0;
         // The A press that skipped the last calibration step is not a jump.
         bool     g_cal_jump_hold = false;
         // View switch: right stick long press (the binoculars action, free
@@ -1382,6 +1608,7 @@ namespace trlvr
             g_last_vine_pull_dir = 0;
             g_last_vine_pull_side = 0;
             g_vine_look_side = 0;
+            g_vine_stroke_dir = 0;
             for (bool& d : g_nav_dir)  d = false;
             g_mouse_rem[0] = g_mouse_rem[1] = 0.0f;
             g_light_grip_was = false;
@@ -1787,6 +2014,16 @@ namespace trlvr
                     !g_hand_pose[hand])
                     log("controls: optional action %s did not resolve",
                         pose_paths[hand]);
+            const char* skeleton_paths[2] = {
+                "/actions/gameplay/in/skeleton_left",
+                "/actions/gameplay/in/skeleton_right"
+            };
+            for (int hand = 0; hand < 2; ++hand)
+                if (g_input->GetActionHandle(skeleton_paths[hand],
+                        &g_skeleton[hand]) != vr::VRInputError_None ||
+                    !g_skeleton[hand])
+                    log("controls: optional action %s did not resolve",
+                        skeleton_paths[hand]);
             QueryPerformanceFrequency(&g_qpf);
             QueryPerformanceCounter(&g_last);
 
@@ -1811,6 +2048,343 @@ namespace trlvr
         // device pose. Sample both at the same instant ("now", seated space)
         // and hand the offset to vr_session, which applies it to the
         // render-time (WaitGetPoses) raw poses -- same latency as before.
+        // Each finger's sideways angle from the middle finger, on SteamVR's
+        // model-space bones (OpenVR hand skeleton: knuckles 7 index, 12
+        // middle, 17 ring, 22 pinky; the next bone ends the proximal
+        // phalanx). Sideways = index knuckle -> pinky knuckle, square to
+        // the middle metacarpal (11 -> 12). asin of the sideways part of
+        // each proximal phalanx: a curl turns about that axis and leaves it.
+        bool finger_spread_from_bones(const float b[31][3], float out[4])
+        {
+            const auto sub = [&](int to, int from, float v[3])
+            {
+                for (int k = 0; k < 3; ++k)
+                    v[k] = b[to][k] - b[from][k];
+                const float len = sqrtf(v[0] * v[0] + v[1] * v[1] +
+                                        v[2] * v[2]);
+                if (!(len > 1e-5f))
+                    return false;
+                for (int k = 0; k < 3; ++k)
+                    v[k] /= len;
+                return true;
+            };
+            float fwd[3], lat[3];
+            if (!sub(12, 11, fwd) || !sub(22, 7, lat))
+                return false;
+            const float along = lat[0] * fwd[0] + lat[1] * fwd[1] +
+                                lat[2] * fwd[2];
+            for (int k = 0; k < 3; ++k)
+                lat[k] -= along * fwd[k];
+            const float len = sqrtf(lat[0] * lat[0] + lat[1] * lat[1] +
+                                    lat[2] * lat[2]);
+            if (!(len > 1e-5f))
+                return false;
+            for (int k = 0; k < 3; ++k)
+                lat[k] /= len;
+            const int knuckle[4] = { 7, 12, 17, 22 };
+            float angle[4];
+            for (int i = 0; i < 4; ++i)
+            {
+                float dir[3];
+                if (!sub(knuckle[i] + 1, knuckle[i], dir))
+                    return false;
+                float s = dir[0] * lat[0] + dir[1] * lat[1] + dir[2] * lat[2];
+                s = s < -1.0f ? -1.0f : s > 1.0f ? 1.0f : s;
+                angle[i] = asinf(s);
+            }
+            for (int i = 0; i < 4; ++i)
+                out[i] = angle[i] - angle[1];
+            return std::isfinite(out[0]) && std::isfinite(out[2]) &&
+                   std::isfinite(out[3]);
+        }
+
+        // The thumb tip in the hand's own frame, for Lara's thumb (user
+        // 2026-10-10: the curl-only thumb had no base-joint movement): from
+        // the index knuckle (7) along forward (middle metacarpal 11 -> 12),
+        // sideways (index -> pinky knuckle 22) and palm-ward, in knuckle
+        // spans (index -> pinky knuckle). Palm-ward is the side a curled
+        // middle finger's tip (15) goes to, learned per hand. out[3]: the
+        // thumb tip (5) closing on the index tip (10), 0 at 3.5 cm .. 1 at
+        // 1.5 cm.
+        bool thumb_from_bones(const float b[31][3], float middle_curl,
+                              float& palm_sign, float out[4])
+        {
+            float fwd[3], lat[3], n[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                fwd[k] = b[12][k] - b[11][k];
+                lat[k] = b[22][k] - b[7][k];
+            }
+            const auto norm = [](float v[3])
+            {
+                const float len = sqrtf(v[0] * v[0] + v[1] * v[1] +
+                                        v[2] * v[2]);
+                if (!(len > 1e-5f))
+                    return 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    v[k] /= len;
+                return len;
+            };
+            const float span = norm(lat);
+            if (!norm(fwd) || !(span > 0.02f))
+                return false;
+            const float along = lat[0] * fwd[0] + lat[1] * fwd[1] +
+                                lat[2] * fwd[2];
+            for (int k = 0; k < 3; ++k)
+                lat[k] -= along * fwd[k];
+            if (!norm(lat))
+                return false;
+            n[0] = fwd[1] * lat[2] - fwd[2] * lat[1];
+            n[1] = fwd[2] * lat[0] - fwd[0] * lat[2];
+            n[2] = fwd[0] * lat[1] - fwd[1] * lat[0];
+            float curled = 0.0f;
+            for (int k = 0; k < 3; ++k)
+                curled += (b[15][k] - b[12][k]) * n[k];
+            // Learned only from a clearly curled middle finger: a flat or
+            // slightly over-straightened one flipped it, throwing the
+            // thumb behind the hand (user 2026-10-10, log: palm-ward -0.98).
+            if (middle_curl > 0.4f && fabsf(curled) > 0.02f)
+                palm_sign = curled > 0.0f ? 1.0f : -1.0f;
+            if (palm_sign == 0.0f)
+                return false;
+            float rel[3];
+            for (int k = 0; k < 3; ++k)
+                rel[k] = b[5][k] - b[7][k];
+            out[0] = (rel[0] * fwd[0] + rel[1] * fwd[1] + rel[2] * fwd[2]) /
+                     span;
+            out[1] = (rel[0] * lat[0] + rel[1] * lat[1] + rel[2] * lat[2]) /
+                     span;
+            out[2] = palm_sign *
+                     (rel[0] * n[0] + rel[1] * n[1] + rel[2] * n[2]) / span;
+            // Never more than a little behind the palm.
+            if (out[2] < -0.15f)
+                out[2] = -0.15f;
+            float gap = 0.0f;
+            for (int k = 0; k < 3; ++k)
+                gap += (b[5][k] - b[10][k]) * (b[5][k] - b[10][k]);
+            gap = sqrtf(gap);
+            const float pinch = (0.035f - gap) / 0.02f;
+            out[3] = pinch < 0.0f ? 0.0f : pinch > 1.0f ? 1.0f : pinch;
+            return std::isfinite(out[0]) && std::isfinite(out[1]) &&
+                   std::isfinite(out[2]);
+        }
+
+        // Finger tracking: each hand's skeleton summary (curl per finger,
+        // splay between neighbours) as SteamVR reports it from the device
+        // -- estimated from the controller's touch sensors on Touch / Index
+        // controllers, full with hand tracking.
+        void read_fingers()
+        {
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                FingerState& f = g_fingers[hand];
+                const bool was = f.valid;
+                f.valid = false;
+                if (!config().finger_tracking || !g_skeleton[hand])
+                    continue;
+                vr::InputSkeletalActionData_t data{};
+                vr::VRSkeletalSummaryData_t summary{};
+                if (g_input->GetSkeletalActionData(g_skeleton[hand], &data,
+                        sizeof(data)) != vr::VRInputError_None ||
+                    !data.bActive ||
+                    g_input->GetSkeletalSummaryData(g_skeleton[hand],
+                        vr::VRSummaryType_FromDevice, &summary) !=
+                        vr::VRInputError_None)
+                {
+                    if (was)
+                        log("fingers: %s hand skeleton lost (active %d) -- "
+                            "switching between controllers and hand "
+                            "tracking, or SteamVR paused the input; the "
+                            "game's own hand pose until it returns",
+                            hand == 0 ? "left" : "right", (int)data.bActive);
+                    else if (!f.reported_off && !f.reported_on &&
+                             g_frames_in_set > 300)
+                    {
+                        f.reported_off = true;
+                        log("fingers: %s hand has no skeleton from SteamVR "
+                            "(active %d) -- the game's own hand pose is "
+                            "kept. A custom SteamVR binding without the "
+                            "\"%s hand fingers\" skeleton causes this.",
+                            hand == 0 ? "left" : "right", (int)data.bActive,
+                            hand == 0 ? "Left" : "Right");
+                    }
+                    continue;
+                }
+                vr::EVRSkeletalTrackingLevel level =
+                    vr::VRSkeletalTracking_Estimated;
+                g_input->GetSkeletalTrackingLevel(g_skeleton[hand], &level);
+                bool finite = true;
+                for (int i = 0; i < 5; ++i)
+                {
+                    const float c = summary.flFingerCurl[i];
+                    finite = finite && std::isfinite(c);
+                    f.curl[i] = c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c;
+                }
+                for (int i = 0; i < 4; ++i)
+                {
+                    const float s = summary.flFingerSplay[i];
+                    finite = finite && std::isfinite(s);
+                    f.splay[i] = s < 0.0f ? 0.0f : s > 1.0f ? 1.0f : s;
+                }
+                if (!finite)
+                    continue;
+                f.valid = true;
+                if (!f.reported_on || f.level != (int)level)
+                {
+                    f.reported_on = true;
+                    log("fingers: %s hand skeleton active, tracking level "
+                        "%s", hand == 0 ? "left" : "right",
+                        level == vr::VRSkeletalTracking_Full
+                            ? "full (hand tracking)"
+                            : level == vr::VRSkeletalTracking_Partial
+                            ? "partial (controller finger sensors)"
+                            : "estimated (controller buttons)");
+                }
+                f.level = (int)level;
+            }
+            // finger_debug: the skeleton itself, and once a second both
+            // summaries (device = what the fingers use, animation = what
+            // SteamVR's own hand shows).
+            const bool debug = tune_finger_debug();
+            const bool log_now = debug &&
+                GetTickCount64() - g_finger_debug_logged >= 1000;
+            if (log_now)
+                g_finger_debug_logged = GetTickCount64();
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                g_finger_bones_valid[hand] = false;
+                g_fingers[hand].spread_valid = false;
+                g_fingers[hand].thumb_valid = false;
+                vr::VRBoneTransform_t bones[31]{};
+                if (g_fingers[hand].valid && g_skeleton[hand] &&
+                    g_input->GetSkeletalBoneData(g_skeleton[hand],
+                        vr::VRSkeletalTransformSpace_Model,
+                        vr::VRSkeletalMotionRange_WithoutController, bones,
+                        31) == vr::VRInputError_None)
+                {
+                    for (int b = 0; b < 31; ++b)
+                        for (int k = 0; k < 3; ++k)
+                            g_finger_bones[hand][b][k] =
+                                bones[b].position.v[k];
+                    g_finger_bones_valid[hand] = true;
+                    g_fingers[hand].spread_valid = finger_spread_from_bones(
+                        g_finger_bones[hand], g_fingers[hand].spread);
+                    g_fingers[hand].thumb_valid = thumb_from_bones(
+                        g_finger_bones[hand], g_fingers[hand].curl[2],
+                        g_fingers[hand].palm_sign,
+                        g_fingers[hand].thumb);
+                }
+                if (!log_now)
+                    continue;
+                vr::VRSkeletalSummaryData_t anim{};
+                const bool have_anim = g_input->GetSkeletalSummaryData(
+                    g_skeleton[hand], vr::VRSummaryType_FromAnimation,
+                    &anim) == vr::VRInputError_None;
+                const FingerState& f = g_fingers[hand];
+                log("finger debug: %s level %d device %s curl %.2f %.2f %.2f "
+                    "%.2f %.2f splay %.2f %.2f %.2f %.2f | animation %s curl "
+                    "%.2f %.2f %.2f %.2f %.2f | bones %s, spread from the "
+                    "middle %s index %+.0f ring %+.0f pinky %+.0f deg | "
+                    "thumb tip %s (%.2f, %.2f, %.2f) spans, pinch %.2f",
+                    hand == 0 ? "L" : "R", f.level,
+                    f.valid ? "ok" : "NONE", f.curl[0], f.curl[1], f.curl[2],
+                    f.curl[3], f.curl[4], f.splay[0], f.splay[1], f.splay[2],
+                    f.splay[3], have_anim ? "ok" : "NONE",
+                    anim.flFingerCurl[0], anim.flFingerCurl[1],
+                    anim.flFingerCurl[2], anim.flFingerCurl[3],
+                    anim.flFingerCurl[4],
+                    g_finger_bones_valid[hand] ? "ok" : "NONE",
+                    f.spread_valid ? "" : "(none)",
+                    f.spread[0] * 57.29578f, f.spread[2] * 57.29578f,
+                    f.spread[3] * 57.29578f, f.thumb_valid ? "ok" : "NONE",
+                    f.thumb[0], f.thumb[1], f.thumb[2], f.thumb[3]);
+            }
+            // finger_record: numpad / starts and stops a recording of both
+            // hands' poses (20 per second) into trlvr_finger_poses.csv --
+            // exactly what drives Lara's fingers (curls, spread from the
+            // middle, thumb tip in the hand's frame, pinch), so a recorded
+            // pose can be replayed as the pinch or the flick.
+            {
+                static FILE* file = nullptr;
+                static int take = 0;
+                static unsigned rows = 0;
+                static ULONGLONG started = 0, last_row = 0;
+                const bool toggle = (GetAsyncKeyState(VK_DIVIDE) & 1) != 0;
+                if (toggle && !file && tune_finger_record())
+                {
+                    wchar_t path[MAX_PATH]{};
+                    swprintf_s(path, L"%strlvr_finger_poses.csv", exe_dir());
+                    const bool fresh =
+                        GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES;
+                    _wfopen_s(&file, path, L"ab");
+                    if (file)
+                    {
+                        if (fresh)
+                            fputs("take,ms,hand,level,curl_thumb,curl_index,"
+                                  "curl_middle,curl_ring,curl_pinky,"
+                                  "spread_index_deg,spread_ring_deg,"
+                                  "spread_pinky_deg,thumb_forward,"
+                                  "thumb_side,thumb_palm,pinch,thumb_ok\r\n",
+                                  file);
+                        ++take;
+                        rows = 0;
+                        started = last_row = GetTickCount64();
+                        log("fingers: recording take %d to "
+                            "trlvr_finger_poses.csv (numpad / stops)", take);
+                    }
+                    else
+                        log("fingers: could not open trlvr_finger_poses.csv");
+                }
+                else if (toggle && file)
+                {
+                    fclose(file);
+                    file = nullptr;
+                    log("fingers: take %d stopped -- %u rows over %.1f s",
+                        take, rows, (GetTickCount64() - started) / 1000.0);
+                }
+                if (file && GetTickCount64() - last_row >= 50)
+                {
+                    last_row = GetTickCount64();
+                    const unsigned ms = (unsigned)(last_row - started);
+                    for (int hand = 0; hand < 2; ++hand)
+                    {
+                        const FingerState& f = g_fingers[hand];
+                        if (!f.valid)
+                            continue;
+                        fprintf(file, "%d,%u,%s,%d,%.3f,%.3f,%.3f,%.3f,%.3f,"
+                                "%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%d\r\n",
+                                take, ms, hand == 0 ? "left" : "right",
+                                f.level, f.curl[0], f.curl[1], f.curl[2],
+                                f.curl[3], f.curl[4],
+                                f.spread[0] * 57.29578f,
+                                f.spread[2] * 57.29578f,
+                                f.spread[3] * 57.29578f,
+                                f.thumb[0], f.thumb[1], f.thumb[2],
+                                f.thumb[3], f.thumb_valid ? 1 : 0);
+                        ++rows;
+                    }
+                }
+            }
+            // Numpad 0: a snapshot of both hands' fingers, for designing
+            // poses (hold the pose, press the key, send the log).
+            if (GetAsyncKeyState(VK_NUMPAD0) & 1)
+                for (int hand = 0; hand < 2; ++hand)
+                {
+                    const FingerState& f = g_fingers[hand];
+                    if (!f.valid)
+                        log("fingers: snapshot %s -- no skeleton",
+                            hand == 0 ? "left" : "right");
+                    else
+                        log("fingers: snapshot %s -- curl thumb %.2f index "
+                            "%.2f middle %.2f ring %.2f pinky %.2f; splay "
+                            "%.2f %.2f %.2f %.2f (level %d)",
+                            hand == 0 ? "left" : "right", f.curl[0],
+                            f.curl[1], f.curl[2], f.curl[3], f.curl[4],
+                            f.splay[0], f.splay[1], f.splay[2], f.splay[3],
+                            f.level);
+                }
+        }
+
         void measure_grip_offsets()
         {
             if (!g_input || !g_system || config().hand_model != 2)
@@ -1915,13 +2489,199 @@ namespace trlvr
         }
     }
 
+    namespace
+    {
+        // Third-person scale / zoom sliders (user 2026-10-10). The off hand
+        // held palm-up 1.2 s opens two translucent bars above it (scale
+        // nearer the palm, zoom above), following it, facing the player.
+        // The other hand's palm on a knob plus its grip drags it along the
+        // bar: the view changes live (camera_set_tp_view) and is saved on
+        // release. Turning the palm down (0.4 s) closes them. Scale runs
+        // 1x-25x (Lara life size to ~7 cm), zoom 0.3x-3.5x, both on a log
+        // scale along the 20 cm bars.
+        struct TpSliderState
+        {
+            bool open = false;
+            ULONGLONG up_since = 0, down_since = 0, opened_at = 0;
+            int grabbed = -1;               // slider held, -1 none
+            int grab_hand = -1;
+            bool grip_was[2] = { false, false };
+            VrTpSliders draw;
+        };
+        TpSliderState g_tp_sliders;
+        const float kSliderHalf = 0.10f;    // metres
+        const float kScaleMin = 1.0f, kScaleMax = 25.0f;
+        const float kZoomMin = 0.3f, kZoomMax = 3.5f;
+
+        float slider_fraction(float value, float lo, float hi)
+        {
+            const float t = logf(value / lo) / logf(hi / lo);
+            return t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+        }
+
+        float slider_value(float t, float lo, float hi)
+        {
+            t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+            return lo * powf(hi / lo, t);
+        }
+
+        // Called each frame in gameplay; claims a grip that holds a knob.
+        void update_tp_sliders(bool left_grip, bool right_grip, bool menu,
+                               bool claim[2])
+        {
+            TpSliderState& s = g_tp_sliders;
+            const bool grips[2] = { left_grip, right_grip };
+            const int off = config().left_handed ? 1 : 0;
+            const int other = 1 - off;
+            const ULONGLONG now = GetTickCount64();
+            const bool available = !menu && camera_tp_view_available();
+            const float up = available ? camera_palm_up(off) : -2.0f;
+            float palm[3]{};
+            const bool have_palm = available &&
+                vr_hand_palm_body_position(off == 0, &palm[0], &palm[1],
+                                           &palm[2]);
+            if (!s.open)
+            {
+                s.grabbed = -1;
+                if (have_palm && up > 0.8f)
+                {
+                    if (!s.up_since)
+                        s.up_since = now;
+                    if (now - s.up_since >= 1200)
+                    {
+                        s.open = true;
+                        s.opened_at = now;
+                        s.down_since = 0;
+                        vr_input_handhold_haptic(off == 0);
+                        log("view: scale / zoom sliders open on the %s palm "
+                            "(scale x%.2f, zoom x%.2f)", off == 0 ? "left"
+                            : "right", camera_tp_scale(), camera_tp_zoom());
+                    }
+                }
+                else
+                    s.up_since = 0;
+            }
+            else
+            {
+                const bool down = !have_palm || up < 0.4f;
+                if (down && s.grabbed < 0)
+                {
+                    if (!s.down_since)
+                        s.down_since = now;
+                    if (now - s.down_since >= 400 || !available)
+                    {
+                        s.open = false;
+                        s.up_since = 0;
+                        log("view: scale / zoom sliders closed");
+                    }
+                }
+                else
+                    s.down_since = 0;
+            }
+            s.draw.visible = s.open && have_palm;
+            if (!s.draw.visible)
+            {
+                for (int h = 0; h < 2; ++h)
+                    s.grip_was[h] = grips[h];
+                return;
+            }
+            s.draw.opacity = fminf(1.0f, (now - s.opened_at) / 250.0f);
+            const float values[2] = { camera_tp_scale(), camera_tp_zoom() };
+            const float lows[2] = { kScaleMin, kZoomMin };
+            const float highs[2] = { kScaleMax, kZoomMax };
+            for (int i = 0; i < 2; ++i)
+            {
+                const float y = palm[1] + 0.07f + 0.06f * i;
+                s.draw.start[i][0] = palm[0] - kSliderHalf;
+                s.draw.end[i][0] = palm[0] + kSliderHalf;
+                s.draw.start[i][1] = s.draw.end[i][1] = y;
+                s.draw.start[i][2] = s.draw.end[i][2] = palm[2];
+                const float t = slider_fraction(values[i], lows[i],
+                                                highs[i]);
+                s.draw.knob[i][0] = palm[0] - kSliderHalf +
+                                    2.0f * kSliderHalf * t;
+                s.draw.knob[i][1] = y;
+                s.draw.knob[i][2] = palm[2];
+                s.draw.icon[i][0] = palm[0] - kSliderHalf - 0.035f;
+                s.draw.icon[i][1] = y;
+                s.draw.icon[i][2] = palm[2];
+                s.draw.hover[i] = s.draw.held[i] = false;
+            }
+            // The other hand: hover, grab, drag.
+            float hand[3]{};
+            const bool have_hand = vr_hand_palm_body_position(
+                other == 0, &hand[0], &hand[1], &hand[2]);
+            int knob_near = -1;
+            if (have_hand)
+            {
+                float best = 0.045f * 0.045f;
+                for (int i = 0; i < 2; ++i)
+                {
+                    float d = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                        d += (hand[k] - s.draw.knob[i][k]) *
+                             (hand[k] - s.draw.knob[i][k]);
+                    if (d < best)
+                    {
+                        best = d;
+                        knob_near = i;
+                    }
+                }
+            }
+            const bool grip = grips[other];
+            if (s.grabbed < 0 && knob_near >= 0 && grip && !s.grip_was[other])
+            {
+                s.grabbed = knob_near;
+                s.grab_hand = other;
+                vr_input_handhold_haptic(other == 0);
+            }
+            if (s.grabbed >= 0 && (!grip || !have_hand))
+            {
+                camera_set_tp_view(camera_tp_scale(), camera_tp_zoom(), true);
+                s.grabbed = -1;
+            }
+            if (s.grabbed >= 0)
+            {
+                const int i = s.grabbed;
+                const float t = (hand[0] - (palm[0] - kSliderHalf)) /
+                                (2.0f * kSliderHalf);
+                const float value = slider_value(t, lows[i], highs[i]);
+                if (i == 0)
+                    camera_set_tp_view(value, camera_tp_zoom(), false);
+                else
+                    camera_set_tp_view(camera_tp_scale(), value, false);
+                s.draw.knob[i][0] = palm[0] - kSliderHalf +
+                    2.0f * kSliderHalf *
+                    slider_fraction(value, lows[i], highs[i]);
+                s.draw.held[i] = true;
+                claim[other] = true;
+            }
+            else if (knob_near >= 0)
+            {
+                s.draw.hover[knob_near] = true;
+                // A grip pressed on a knob is the slider's, not Q / G.
+                if (grip)
+                    claim[other] = true;
+            }
+            for (int h = 0; h < 2; ++h)
+                s.grip_was[h] = grips[h];
+        }
+    }
+
+    bool vr_input_tp_sliders(VrTpSliders* out)
+    {
+        if (!out || !g_tp_sliders.draw.visible)
+            return false;
+        *out = g_tp_sliders.draw;
+        return true;
+    }
+
     bool vr_input_gear_cross(VrGearCross* out)
     {
         if (!out || !g_ready || !g_gear_active)
             return false;
         out->visible = true;
-        for (int k = 0; k < 3; ++k)
-            out->centre[k] = kGearCross[k];
+        gear_cross_to_body(kGearCross, out->centre);
         for (int item = 0; item < 4; ++item)
             gear_item_position(item, out->items[item]);
         out->hover[0] = g_gear_hover[0];
@@ -1929,6 +2689,15 @@ namespace trlvr
         out->handle_hover = g_gear_handle_hover[0] > 0 ||
                             g_gear_handle_hover[1] > 0;
         out->dragging = g_gear_drag_hand >= 0;
+        out->item_radius = kGearRadius;
+        out->handle_radius = kGearHandleRadius;
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            out->hand_point_valid[hand] = g_gear_hand_valid[hand];
+            out->hand_point_palm[hand] = g_gear_hand_palm[hand];
+            for (int k = 0; k < 3; ++k)
+                out->hand_point[hand][k] = g_gear_hand_point[hand][k];
+        }
         out->flash_item = g_gear_flash_item;
         const ULONGLONG age = GetTickCount64() - g_gear_flash_at;
         out->flash = g_gear_flash_item >= 0 && age < 400
@@ -1957,6 +2726,53 @@ namespace trlvr
         return g_ready && g_trigger_held[left ? 0 : 1];
     }
 
+    bool vr_input_stick_moving()
+    {
+        return g_move_dir[0] || g_move_dir[1] || g_move_dir[2] ||
+               g_move_dir[3];
+    }
+
+    bool vr_input_finger_bones(bool left, float out[31][3])
+    {
+        const int hand = left ? 0 : 1;
+        if (!out || !g_finger_bones_valid[hand])
+            return false;
+        memcpy(out, g_finger_bones[hand], sizeof(g_finger_bones[hand]));
+        return true;
+    }
+
+    bool vr_input_thumb_target(bool left, float out[4])
+    {
+        const FingerState& f = g_fingers[left ? 0 : 1];
+        if (!f.valid || !f.thumb_valid || !out)
+            return false;
+        for (int i = 0; i < 4; ++i)
+            out[i] = f.thumb[i];
+        return true;
+    }
+
+    bool vr_input_finger_spread(bool left, float angle[4])
+    {
+        const FingerState& f = g_fingers[left ? 0 : 1];
+        if (!f.valid || !f.spread_valid || !angle)
+            return false;
+        for (int i = 0; i < 4; ++i)
+            angle[i] = f.spread[i];
+        return true;
+    }
+
+    bool vr_input_finger_pose(bool left, float curl[5], float splay[4])
+    {
+        const FingerState& f = g_fingers[left ? 0 : 1];
+        if (!f.valid || !curl || !splay)
+            return false;
+        for (int i = 0; i < 5; ++i)
+            curl[i] = f.curl[i];
+        for (int i = 0; i < 4; ++i)
+            splay[i] = f.splay[i];
+        return true;
+    }
+
     bool vr_input_grip_held(bool left)
     {
         return g_ready && g_grip_held[left ? 0 : 1];
@@ -1978,10 +2794,72 @@ namespace trlvr
             vr::k_ulInvalidInputValueHandle);
     }
 
+    // The game's own rumble, as it would drive a pad (user 2026-10-09:
+    // the made-up ramped rumble did not feel like the original). The
+    // game's PadShock mixer -- authored curves started by sounds, plus the
+    // simple shocks -- runs against a stand-in two-motor pad (camera_head)
+    // and its motor levels arrive here every frame. They are replayed as
+    // short overlapping pulses (50 ms every 25 ms) so the curve is
+    // followed closely and stops when the game stops it. The big motor is
+    // a low thump, the small one a higher buzz; mixed, the frequency
+    // slides between them by their share.
+    namespace
+    {
+        float g_motor[2] = { 0.0f, 0.0f };
+        ULONGLONG g_motor_at = 0, g_rumble_next = 0;
+        bool g_motor_quiet = true;
+
+        void rumble_tick()
+        {
+            const ULONGLONG now = GetTickCount64();
+            // No update for a while (paused mixer, loading): silent.
+            if (!g_motor_at || now - g_motor_at > 200)
+                return;
+            const float low = g_motor[0], high = g_motor[1];
+            const float amplitude = fmaxf(low, high);
+            if (amplitude < 0.02f || now < g_rumble_next || !g_ready ||
+                !g_input || !game_has_focus())
+                return;
+            g_rumble_next = now + 25;
+            const float frequency = (low * 55.0f + high * 170.0f) /
+                                    (low + high);
+            for (int hand = 0; hand < 2; ++hand)
+                if (g_handhold_haptic[hand])
+                    g_input->TriggerHapticVibrationAction(
+                        g_handhold_haptic[hand], 0.0f, 0.05f, frequency,
+                        amplitude, vr::k_ulInvalidInputValueHandle);
+        }
+    }
+
+    void vr_input_game_motors(float low, float high)
+    {
+        const auto clamp01 = [](float v)
+        {
+            return std::isfinite(v) ? fminf(fmaxf(v, 0.0f), 1.0f) : 0.0f;
+        };
+        if (!config().shake_rumble)
+            low = high = 0.0f;
+        g_motor[0] = clamp01(low);
+        g_motor[1] = clamp01(high);
+        g_motor_at = GetTickCount64();
+        // Each rumble's start, for matching against what was felt.
+        const bool quiet = fmaxf(g_motor[0], g_motor[1]) < 0.02f;
+        static unsigned reports = 0;
+        if (g_motor_quiet && !quiet && reports < 40)
+        {
+            ++reports;
+            log("controls: game rumble starts (big motor %.2f, small %.2f)",
+                g_motor[0], g_motor[1]);
+        }
+        g_motor_quiet = quiet;
+        rumble_tick();
+    }
+
     void vr_input_update()
     {
         if (!config().controllers || !connect())
             return;
+        rumble_tick();
 
         LARGE_INTEGER now{};
         QueryPerformanceCounter(&now);
@@ -2054,6 +2932,7 @@ namespace trlvr
             report_bound();
         }
         measure_grip_offsets();
+        read_fingers();
 
         if (!game_has_focus())
         {
@@ -2163,9 +3042,10 @@ namespace trlvr
             {
                 log("controls: hand calibration needs immersive controls "
                     "with tracked hands");
-                vr_submit_notice(L"Hand Calibration", L"Hand calibration "
-                    L"needs Lara's hands on your controllers: first person "
-                    L"with first_person_tracked_hands = 1, or third person.");
+                vr_submit_notice(trw(L"Hand Calibration"),
+                    trw(L"Hand calibration needs Lara's hands on your "
+                        L"controllers: first person with "
+                        L"first_person_tracked_hands = 1, or third person."));
             }
             else if (tune_gear_tuning_active())
                 log("controls: hand calibration waits for holster setup");
@@ -2219,9 +3099,10 @@ namespace trlvr
                 }
                 if (!vr_hand_calibration_begin(pistols))
                 {
-                    vr_submit_notice(L"Hand Calibration", L"Your controllers' "
-                        L"grip poses are not available yet. Make sure both "
-                        L"controllers are on and tracked, then try again.");
+                    vr_submit_notice(trw(L"Hand Calibration"),
+                        trw(L"Your controllers' grip poses are not available "
+                            L"yet. Make sure both controllers are on and "
+                            L"tracked, then try again."));
                     if (g_cal_drew_guns)
                     {
                         g_holster_drawn[0] = g_holster_drawn[1] = false;
@@ -2324,6 +3205,32 @@ namespace trlvr
             }
         }
 
+        // Tuning profile by controller type (2026-10-08): oculus_touch gets
+        // the Quest tester's hand/aim/holster defaults, anything else the
+        // Reverb G2 ones. Checked every 2 s until a controller reports.
+        if (!g_profile_decided && g_system &&
+            GetTickCount64() >= g_profile_next_check)
+        {
+            g_profile_next_check = GetTickCount64() + 2000;
+            for (vr::TrackedDeviceIndex_t i = 0;
+                 i < vr::k_unMaxTrackedDeviceCount && !g_profile_decided; ++i)
+            {
+                if (g_system->GetTrackedDeviceClass(i) !=
+                    vr::TrackedDeviceClass_Controller)
+                    continue;
+                char type[128]{};
+                vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+                g_system->GetStringTrackedDeviceProperty(i,
+                    vr::Prop_ControllerType_String, type, sizeof(type), &err);
+                if (!type[0])
+                    continue;
+                g_profile_decided = true;
+                tune_set_controller_profile(
+                    _stricmp(type, "oculus_touch") == 0 ? 1 : 0, type);
+                g_gear_loaded = false;   // the gear cross re-reads too
+            }
+        }
+
         // Live first/third-person switch (user request 2026-10-06). Not in
         // menus, setups or calibration; guns and held gear are put away
         // first so neither view inherits the other's hand state.
@@ -2375,9 +3282,10 @@ namespace trlvr
             {
                 log("controls: holster setup needs immersive first person "
                     "with tracked hands");
-                vr_submit_notice(L"VR Holster Setup", L"Holster setup works "
-                    L"in first person with tracked hands. Set first_person = "
-                    L"1 and first_person_tracked_hands = 1 in trlvr.ini.");
+                vr_submit_notice(trw(L"VR Holster Setup"),
+                    trw(L"Holster setup works in first person with tracked "
+                        L"hands. Set first_person = 1 and "
+                        L"first_person_tracked_hands = 1 in trlvr.ini."));
             }
         }
         const bool tuning_possible =
@@ -2405,9 +3313,9 @@ namespace trlvr
             {
                 log("controls: gear tuning needs pistols holstered and no "
                     "belt item in hand");
-                vr_submit_notice(L"VR Holster Setup", L"Holster your pistols "
-                    L"and put down any item in your hands, then choose VR "
-                    L"Holster Setup again.");
+                vr_submit_notice(trw(L"VR Holster Setup"),
+                    trw(L"Holster your pistols and put down any item in your "
+                        L"hands, then choose VR Holster Setup again."));
             }
             else
             {
@@ -2453,6 +3361,21 @@ namespace trlvr
                 if (!pressed || !vr_controller_body_position(
                         hand == 0, &body[0], &body[1], &body[2]))
                     continue;
+                {
+                    // How far the palm (used) is from the controller's raw
+                    // point (used before 2026-10-10), per headset.
+                    float raw[3]{};
+                    if (vr_controller_raw_body_position(hand == 0, &raw[0],
+                                                        &raw[1], &raw[2]))
+                        log("tune: %s hand -- Lara's palm is %.3f m from the "
+                            "controller's raw point (right %+.3f, up %+.3f, "
+                            "forward %+.3f m)", hand == 0 ? "left" : "right",
+                            sqrtf((body[0] - raw[0]) * (body[0] - raw[0]) +
+                                  (body[1] - raw[1]) * (body[1] - raw[1]) +
+                                  (body[2] - raw[2]) * (body[2] - raw[2])),
+                            body[0] - raw[0], body[1] - raw[1],
+                            body[2] - raw[2]);
+                }
                 if (tune_gear_tuning_trigger(hand == 0, body) != 0)
                     vr_input_handhold_haptic(hand == 0);
                 if (!tune_gear_tuning_active())
@@ -2499,6 +3422,18 @@ namespace trlvr
             vine_climbing;
         const bool left_grip = digital(g_game[GameGrapple].handle);
         const bool right_grip = digital(g_game[GameLockOn].handle);
+        // The theatre window's move handle claims a grip that holds it.
+        bool theatre_claim[2] = { false, false };
+        {
+            bool entered[2] = { false, false };
+            vr_theatre_handle_update(left_grip, right_grip, theatre_claim,
+                                     entered);
+            for (int hand = 0; hand < 2; ++hand)
+                if (entered[hand])
+                    vr_input_handhold_haptic(hand == 0);
+            // The palm scale / zoom sliders claim a grip on a knob too.
+            update_tp_sliders(left_grip, right_grip, menu, theatre_claim);
+        }
         camera_first_person_ledge_grip_input(
             true, left_grip, handhold_active);
         camera_first_person_ledge_grip_input(
@@ -2532,7 +3467,8 @@ namespace trlvr
         // Not with first person on: between levels and in loads the
         // first-person view is not active yet, which read as third person
         // and showed the cross (user, 2026-10-04).
-        update_gear_cross(tp_gameplay && !camera_view_first_person(), left_grip,
+        update_gear_cross(tp_gameplay && !camera_view_first_person() &&
+                          !radial_gear_menu_enabled(), left_grip,
                           right_grip, gear_now);
         // Board mode: a grip around the tiny Lara picks her up (after the
         // gear cross, which keeps any grip on or hovering it).
@@ -2592,6 +3528,10 @@ namespace trlvr
                     (i == GameWeapon || i == GameBinoculars ||
                      i == GameMedkit || i == GameLight))
                     continue;
+                // Radial gear menu: the medipack button opens it (the
+                // medipack is its up item).
+                if (i == GameMedkit && radial_gear_menu_enabled())
+                    continue;
                 if (i == GamePause && g_pause_hold)
                 {
                     g_pause_hold = digital(g_game[GamePause].handle);
@@ -2604,9 +3544,11 @@ namespace trlvr
                 }
                 // A grip that grabbed from the gear cross, or holds Lara.
                 if ((i == GameGrapple && (g_gear_grip_claim[0] ||
-                                          pluck_claim[0])) ||
+                                          pluck_claim[0] ||
+                                          theatre_claim[0])) ||
                     (i == GameLockOn && (g_gear_grip_claim[1] ||
-                                         pluck_claim[1])))
+                                         pluck_claim[1] ||
+                                         theatre_claim[1])))
                     continue;
                 // While Lara is held she neither jumps nor rolls.
                 // On a palm she may jump and crouch (2026-10-04).
@@ -2915,6 +3857,41 @@ namespace trlvr
                 // longer adds a sideways move (on a chain that turned Lara
                 // round it): sideways counts only when it clearly
                 // dominates. The vertical pull wins otherwise.
+                {
+                    int drive = -1;
+                    for (int h = 0; h < 2; ++h)
+                        if (hand_pulls[h].grip_serial &&
+                            ledge_pull_up != 0.0f &&
+                            hand_pulls[h].up_metres == ledge_pull_up)
+                            drive = h;
+                    if (drive >= 0)
+                    {
+                        const unsigned serial = hand_pulls[drive].grip_serial;
+                        if (serial != g_vine_lock_serial)
+                        {
+                            g_vine_lock_serial = serial;
+                            g_vine_lock_dir = 0;
+                            g_vine_lock_reported = false;
+                        }
+                        if (g_vine_lock_dir == 0 &&
+                            fabsf(ledge_pull_up) >= 0.12f)
+                            g_vine_lock_dir = ledge_pull_up > 0.0f ? 1 : -1;
+                        if (g_vine_lock_dir != 0 &&
+                            ledge_pull_up * g_vine_lock_dir < 0.0f)
+                        {
+                            if (!g_vine_lock_reported &&
+                                fabsf(ledge_pull_up) >= 0.12f)
+                            {
+                                g_vine_lock_reported = true;
+                                log("controls: vine grip locked %s; its "
+                                    "%+.2f m the other way is ignored",
+                                    g_vine_lock_dir > 0 ? "up" : "down",
+                                    ledge_pull_up);
+                            }
+                            ledge_pull_up = 0.0f;
+                        }
+                    }
+                }
                 if (fabsf(ledge_pull) < 1.3f * fabsf(ledge_pull_up))
                     ledge_pull = 0.0f;
                 // On an attached vine, ladder or vertical pole, the latest
@@ -2930,8 +3907,19 @@ namespace trlvr
                                          -ledge_pull, 0.10f, 0.04f);
                 g_vine_pull_right = latch(g_vine_pull_right,
                                           ledge_pull, 0.10f, 0.04f);
-                const int climb = climb_hand_over_hand(
-                    hand_pulls, int(g_vine_pull_up) - int(g_vine_pull_down));
+                int pulled = int(g_vine_pull_up) - int(g_vine_pull_down);
+                const DWORD now_ms = GetTickCount();
+                if (pulled != 0)
+                {
+                    g_vine_stroke_dir = pulled;
+                    g_vine_stroke_until = now_ms + kVineStrokeMs;
+                }
+                else if (g_vine_stroke_dir != 0 &&
+                         (int)(g_vine_stroke_until - now_ms) > 0)
+                    pulled = g_vine_stroke_dir;
+                else
+                    g_vine_stroke_dir = 0;
+                const int climb = climb_hand_over_hand(hand_pulls, pulled);
                 g_move_dir[0] = climb > 0;
                 g_move_dir[2] = climb < 0;
                 g_move_dir[1] = g_vine_pull_left;
@@ -3168,10 +4156,141 @@ namespace trlvr
                     zoom_was = zoom;
                 }
             }
+            {
+                const bool enabled = radial_gear_menu_enabled();
+                const bool button = enabled &&
+                    digital(g_game[GameMedkit].handle);
+                const ULONGLONG t = GetTickCount64();
+                const float mx = g_move_raw[0], my = g_move_raw[1];
+                const float reach = mx * mx + my * my;
+                const auto close_menu = [&](const char* why)
+                {
+                    g_radial_open = false;
+                    g_radial_wait_centre = true;
+                    log("controls: radial gear menu closed (%s)", why);
+                };
+                if (button && !g_radial_button_was)
+                {
+                    if (g_radial_open)
+                        close_menu("button again");
+                    else
+                    {
+                        g_radial_open = true;
+                        g_radial_open_at = t;
+                        vr_input_handhold_haptic(true);
+                        log("controls: radial gear menu open -- left stick "
+                            "up medipack, right binoculars, down weapon, "
+                            "left light");
+                    }
+                }
+                g_radial_button_was = button;
+                if (g_radial_open && (!enabled || t - g_radial_open_at > 4000))
+                    close_menu(enabled ? "4 s without a pick"
+                                       : "gear menu off here");
+                if (g_radial_open)
+                {
+                    camera_show_retail_gear_cross();
+                    // The stick that pressed the button may still be off
+                    // centre: a pick needs it pushed well out.
+                    if (reach >= 0.7f * 0.7f && t - g_radial_open_at > 150)
+                    {
+                        // Order as kGearKeys: up, right, down, left.
+                        const int item = fabsf(mx) > fabsf(my)
+                            ? (mx > 0.0f ? 1 : 3) : (my > 0.0f ? 0 : 2);
+                        g_radial_key = kGearKeys[item];
+                        g_radial_key_until = t + 120;
+                        vr_input_handhold_haptic(true);
+                        log("controls: radial gear menu -- %s",
+                            kGearNames[item]);
+                        close_menu("picked");
+                    }
+                }
+                if (g_radial_wait_centre && !g_radial_open &&
+                    reach < 0.3f * 0.3f)
+                    g_radial_wait_centre = false;
+                if (g_radial_open || g_radial_wait_centre)
+                    for (bool& d : g_move_dir)
+                        d = false;
+                if (g_radial_key && t < g_radial_key_until)
+                    want[g_radial_key] = true;
+            }
             const WORD keys[4] = { 'W', 'A', 'S', 'D' };
             for (int i = 0; i < 4; ++i)
                 if (g_move_dir[i])
                     want[keys[i]] = true;
+            // Vine climb log: each held stretch of up or down, how long and
+            // how far Lara actually moved (user 2026-10-11: pulls that
+            // "didn't work").
+            {
+                const int dir = vine_climbing
+                    ? (g_move_dir[0] ? 1 : g_move_dir[2] ? -1 : 0) : 0;
+                if (dir != g_vine_key_dir)
+                {
+                    float height = 0.0f;
+                    const bool have = camera_first_person_lara_height(&height);
+                    if (g_vine_key_dir != 0 && have &&
+                        g_vine_key_reports < 200)
+                    {
+                        ++g_vine_key_reports;
+                        log("controls: vine stroke %s held %u ms -> Lara "
+                            "moved %+.2f m", g_vine_key_dir > 0 ? "up"
+                                                               : "down",
+                            (unsigned)(GetTickCount() - g_vine_key_at),
+                            height - g_vine_key_height);
+                    }
+                    g_vine_key_dir = dir;
+                    g_vine_key_at = GetTickCount();
+                    g_vine_key_height = have ? height : 0.0f;
+                }
+            }
+            // Roomscale walk: Lara walks to the player's real position with
+            // the game's own walk (never while the stick moves her).
+            if (!(g_move_dir[0] || g_move_dir[1] || g_move_dir[2] ||
+                  g_move_dir[3]))
+            {
+                bool room[4] = { false, false, false, false };
+                if (camera_roomscale_walk_keys(room))
+                {
+                    for (int i = 0; i < 4; ++i)
+                        if (room[i])
+                            want[keys[i]] = true;
+                    want[config().walk_vk] = true;
+                }
+            }
+            // Analog walk: a light push holds the game's Walk key.
+            {
+                static int pace_was = 0;   // 0 still, 1 walk, 2 run
+                int pace = 0;
+                // Only for the stick on the ground: a vine, ledge or bar
+                // hand pull sends the keys with the stick at rest, and the
+                // held Walk key stopped Lara climbing a vine at all (user
+                // 2026-10-11: ten pulls, no climb; log: "stick walk" with
+                // every pull).
+                const bool stick_moving = g_stick_dir[0] || g_stick_dir[1] ||
+                                          g_stick_dir[2] || g_stick_dir[3];
+                if (stick_moving && !vine_climbing && !ledge_hanging &&
+                    !bar_hanging &&
+                    (g_move_dir[0] || g_move_dir[1] || g_move_dir[2] ||
+                     g_move_dir[3]))
+                {
+                    const float push = sqrtf(g_move_raw[0] * g_move_raw[0] +
+                                             g_move_raw[1] * g_move_raw[1]);
+                    pace = config().stick_walk &&
+                           push < config().stick_walk_threshold ? 1 : 2;
+                    if (pace == 1)
+                        want[config().walk_vk] = true;
+                }
+                if (pace != pace_was && pace != 0)
+                {
+                    static unsigned reports = 0;
+                    if (reports++ < 40)
+                        log("controls: stick %s%s", pace == 1 ? "walk"
+                            : "run", pace == 1 ? (config().walk_vk == 0xA2
+                                ? " (Left Ctrl held)" : " (Left Shift held)")
+                                : "");
+                }
+                pace_was = pace;
+            }
             for (bool& d : g_nav_dir) d = false;
 
             // The look stick as a mouse: pixels per second at full

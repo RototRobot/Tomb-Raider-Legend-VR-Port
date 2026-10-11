@@ -61,6 +61,8 @@ namespace trlvr
             { L"vr", L"first_person_object_culling", L"frustum" },
             { L"vr", L"terrain_culling", L"frustum" },
             { L"vr", L"depth_of_field", L"off" },
+            { L"vr", L"fullscreen_effects", L"off" },
+            { L"vr", L"fsaa", L"on" },
             { L"vr", L"comfort_vignette", L"off" },
             { L"vr", L"third_person_mode", L"classic" },
             { L"vr", L"third_person_smoothing", L"0.12" },
@@ -77,6 +79,41 @@ namespace trlvr
             { L"vr", L"mission_prep_backdrop_lag", L"0.4" },
             { L"vr", L"weapon_recoil", L"1.0" },
             { L"vr", L"weapon_haptics", L"1" },
+            { L"vr", L"shake_rumble", L"1" },
+            { L"vr", L"roomscale", L"1" },
+            { L"vr", L"roomscale_deadzone", L"0.15" },
+            { L"vr", L"roomscale_walk", L"1" },
+            { L"vr", L"wall_touch", L"1" },
+            { L"vr", L"water_reflection", L"0" },
+            { L"vr", L"water_effects", L"0" },
+            { L"vr", L"wall_touch_max_speed", L"2.6" },
+            { L"vr", L"first_person_hardcore", L"0" },
+            { L"vr", L"first_person_hardcore_threshold", L"20" },
+            { L"vr", L"hand_collision", L"0" },
+            { L"vr", L"hand_body_collision", L"1" },
+            { L"vr", L"body_spring", L"1" },
+            { L"vr", L"body_spring_angle", L"4" },
+            { L"vr", L"body_soft", L"1" },
+            { L"vr", L"body_soft_angle", L"12" },
+            { L"vr", L"cutscene_mode", L"normal" },
+            { L"vr", L"cutscene_screen_width", L"3.0" },
+            { L"vr", L"cutscene_screen_distance", L"2.5" },
+            { L"vr", L"cutscene_scale", L"auto" },
+            { L"vr", L"gameplay_theatre", L"0" },
+            { L"vr", L"theatre_backdrop", L"000000" },
+            { L"vr", L"board_diorama", L"0" },
+            { L"vr", L"board_diorama_width", L"0.6" },
+            { L"vr", L"board_diorama_depth", L"0.6" },
+            { L"vr", L"board_diorama_height", L"0.45" },
+            { L"vr", L"board_diorama_below", L"0.15" },
+            { L"controls", L"gear_cross_x_rate", L"1.0" },
+            { L"controls", L"gear_menu", L"cross" },
+            { L"controls", L"stick_walk", L"1" },
+            { L"controls", L"finger_tracking", L"0" },
+            { L"controls", L"finger_rest_curl", L"0" },
+            { L"controls", L"reset_controller_tuning_on_load", L"0" },
+            { L"controls", L"stick_walk_threshold", L"0.7" },
+            { L"controls", L"walk_key", L"shift" },
             { L"vr", L"first_person_eye_height", L"70" },
             { L"vr", L"first_person_smoothing", L"0.08" },
             { L"vr", L"ui_passthrough", L"1" },
@@ -119,13 +156,6 @@ namespace trlvr
             { L"developer", L"first_person_belt_height", L"12" },
             { L"developer", L"ledge_grab_height", L"0.12" },
             { L"developer", L"ledge_grab_debug_draw", L"0" },
-            { L"developer", L"holster_left_x", L"-0.24" },
-            { L"developer", L"holster_right_x", L"0.24" },
-            { L"developer", L"holster_y", L"-0.63" },
-            { L"developer", L"holster_z", L"-0.07" },
-            { L"developer", L"holster_radius_x", L"0.13" },
-            { L"developer", L"holster_radius_y", L"0.15" },
-            { L"developer", L"holster_radius_z", L"0.18" },
             { L"developer", L"holster_debug_draw", L"0" },
             { L"developer", L"gear_tuning", L"0" },
             { L"developer", L"aim_tuning_debug", L"0" },
@@ -191,8 +221,8 @@ namespace trlvr
             L"; off = grab the hold to secure it, bars = swing bars secure\r\n"
             L"; themselves, all = ledges and bars secure themselves.\r\n"
             L"auto_secure_catch = off\r\n"
-            L"; Most anti-aliasing samples the game may use when its FSAA option\r\n"
-            L"; is on: 0 (off), 2, 4 or 8. The game picks the most offered; 8 on\r\n"
+            L"; Most anti-aliasing samples the game may use when FSAA is on\r\n"
+            L"; (fsaa above): 0 (off), 2, 4 or 8. The game picks the most offered; 8 on\r\n"
             L"; a VR-sized image costs the GPU heavily. Takes effect at start-up.\r\n"
             L"msaa = 4\r\n"
             L"; First-person object culling: frustum culls objects against the wide\r\n"
@@ -206,6 +236,13 @@ namespace trlvr
             L"; Depth of field: off (recommended in VR: it is a flat-screen blur\r\n"
             L"; pass), on, or game (keep the launcher's setting). Read at start.\r\n"
             L"depth_of_field = off\r\n"
+            L"; Fullscreen Effects (the game's glow/bloom): off (recommended\r\n"
+            L"; in VR: it softens the view and treats both eyes as one\r\n"
+            L"; picture), on, or game (keep the launcher's setting).\r\n"
+            L"fullscreen_effects = off\r\n"
+            L"; Anti-aliasing (the game's FSAA): on, off, or game (keep the\r\n"
+            L"; launcher's setting). How strong is set by msaa below.\r\n"
+            L"fsaa = on\r\n"
             L"; Darkens the edge of view: off, jumps (jumping and rolling) or\r\n"
             L"; full (any movement, shimmying, climbing and smooth turning).\r\n"
             L"comfort_vignette = off\r\n"
@@ -243,6 +280,72 @@ namespace trlvr
             L"weapon_recoil = 1.0\r\n"
             L"; 1 = the firing controller vibrates on each shot.\r\n"
             L"weapon_haptics = 1\r\n"
+            L"; 1 = the game's controller rumble (screen shakes, explosions)\r\n"
+            L"; plays on both VR controllers.\r\n"
+            L"shake_rumble = 1\r\n"
+            L"; Roomscale (first person): 1 = walking in your room moves Lara;\r\n"
+            L"; walls stop her and your view. Leaning within the deadzone\r\n"
+            L"; (metres) moves only your head.\r\n"
+            L"roomscale = 1\r\n"
+            L"roomscale_deadzone = 0.15\r\n"
+            L"; 1 = a real step of more than 0.4 m makes Lara walk to you with\r\n"
+            L"; her own walk (smaller steps move her quietly).\r\n"
+            L"roomscale_walk = 1\r\n"
+            L"; 1 = third person: walking beside a wall with nothing drawn,\r\n"
+            L"; Lara puts her near hand out and runs it along the wall. Only\r\n"
+            L"; up to wall_touch_max_speed metres per second (walking).\r\n"
+            L"wall_touch = 1\r\n"
+            L"; Experimental: 1 = water reflections drawn for each eye\r\n"
+            L"; (Reflections must also be on in the game's Setup dialog).\r\n"
+            L"water_reflection = 0\r\n"
+            L"; Experimental, not working yet: 1 = water effects (the\r\n"
+            L"; distortion at and under the surface) for each eye.\r\n"
+            L"water_effects = 0\r\n"
+            L"wall_touch_max_speed = 2.6\r\n"
+            L"; 1 = hardcore first person: the view turns with Lara through\r\n"
+            L"; flips, rolls and spins instead of staying level.\r\n"
+            L"first_person_hardcore = 0\r\n"
+            L"; Tilts under first_person_hardcore_threshold degrees stay level\r\n"
+            L"; (walking); bigger ones (flips, rolls) are followed fully.\r\n"
+            L"first_person_hardcore_threshold = 20\r\n"
+            L"; 1 = first-person hands stop at walls and the ground.\r\n"
+            L"hand_collision = 0\r\n"
+            L"; 1 = first-person hands cannot go into Lara's own body.\r\n"
+            L"hand_body_collision = 1\r\n"
+            L"; 1 = first-person full body: her chest sways a little on a spring\r\n"
+            L"; (turning, steps, your hands pushing it); at most\r\n"
+            L"; body_spring_angle degrees (0..15).\r\n"
+            L"body_spring = 1\r\n"
+            L"body_spring_angle = 4\r\n"
+            L"; 1 = her soft parts bounce (mostly up and down) and give under\r\n"
+            L"; your hands; at most body_soft_angle degrees (0..30).\r\n"
+            L"body_soft = 1\r\n"
+            L"body_soft_angle = 12\r\n"
+            L"; Cutscenes: normal (your head turns the cutscene camera) or\r\n"
+            L"; theatre (comfort: the cutscene plays through a big window fixed\r\n"
+            L"; in front of you in a dark space, still 3D -- lean to look\r\n"
+            L"; round into the scene). Screen width and distance in metres.\r\n"
+            L"cutscene_mode = normal\r\n"
+            L"cutscene_screen_width = 3.0\r\n"
+            L"cutscene_screen_distance = 2.5\r\n"
+            L"; Theatre scene scale: auto (every shot scaled so Lara sits at\r\n"
+            L"; the screen, like a 3D film) or a number (1 = life size).\r\n"
+            L"cutscene_scale = auto\r\n"
+            L"; 1 = third-person play (not board mode) through the same window.\r\n"
+            L"; Grip the bar under the window to move it; it is remembered.\r\n"
+            L"gameplay_theatre = 0\r\n"
+            L"; Colour of the room round the window (RRGGBB). For mixed reality\r\n"
+            L"; with a chroma-key passthrough (e.g. Virtual Desktop on Quest), set\r\n"
+            L"; it to the key colour, e.g. 00FF00.\r\n"
+            L"theatre_backdrop = 000000\r\n"
+            L"; 1 = board mode is a diorama: the tabletop world inside a box open\r\n"
+            L"; at the front and top, the rest of the room dark. Box size in\r\n"
+            L"; metres; below = how far it reaches under Lara's floor.\r\n"
+            L"board_diorama = 0\r\n"
+            L"board_diorama_width = 0.6\r\n"
+            L"board_diorama_depth = 0.6\r\n"
+            L"board_diorama_height = 0.45\r\n"
+            L"board_diorama_below = 0.15\r\n"
             L"; Eye height above Lara's HeadSegment joint, in game units.\r\n"
             L"first_person_eye_height = 70\r\n"
             L"; Legacy setting: the eye anchor now stays fixed relative to Lara's root.\r\n"
@@ -265,6 +368,26 @@ namespace trlvr
             L"controllers = 1\r\n"
             L"; 1 enables body-relative gestures. Chest + left grip toggles the personal light.\r\n"
             L"immersive_controls = 0\r\n"
+            L"; Gear in immersive third person: cross (the 3D gear cross by your\r\n"
+            L"; hip) or radial (hold the left stick in, then push it toward the\r\n"
+            L"; item: up medipack, right binoculars, down weapon, left light).\r\n"
+            L"; With immersive_controls = 0 the radial menu is always used.\r\n"
+            L"gear_menu = cross\r\n"
+            L"; 1 = a light push of the move stick walks (holds the game's Walk\r\n"
+            L"; key), a full push runs. walk_key = shift or ctrl.\r\n"
+            L"stick_walk = 1\r\n"
+            L"stick_walk_threshold = 0.7\r\n"
+            L"walk_key = shift\r\n"
+            L"; 1 = Lara's fingers follow your own (SteamVR finger tracking:\r\n"
+            L"; controller finger sensors, or hand tracking) instead of her\r\n"
+            L"; animations. finger_rest_curl = how curled her straight hand\r\n"
+            L"; already is (0..0.6).\r\n"
+            L"finger_tracking = 0\r\n"
+            L"finger_rest_curl = 0\r\n"
+            L"; 1 = every start clears your saved hand tuning (Hand Calibration,\r\n"
+            L"; hand alignment, aim offsets) so the defaults for your controllers\r\n"
+            L"; apply (Quest's for Oculus Touch, the standard ones otherwise).\r\n"
+            L"reset_controller_tuning_on_load = 0\r\n"
             L"; 1 = left-handed: long guns and aiming follow the left controller,\r\n"
             L"; the left trigger fires and the right trigger does Action/aim.\r\n"
             L"left_handed = 0\r\n"
@@ -326,13 +449,9 @@ namespace trlvr
             L"; Holster grab zones in metres relative to headset yaw. F5 reloads.\r\n"
             L"; Cyan: ready; yellow: hand inside; magenta: guns drawn.\r\n"
             L"; Click either controller grip in a zone to draw or holster both pistols.\r\n"
-            L"holster_left_x = -0.24\r\n"
-            L"holster_right_x = 0.24\r\n"
-            L"holster_y = -0.63\r\n"
-            L"holster_z = -0.07\r\n"
-            L"holster_radius_x = 0.13\r\n"
-            L"holster_radius_y = 0.15\r\n"
-            L"holster_radius_z = 0.18\r\n"
+            L"; The zones themselves (holster_left_x, holster_right_x,\r\n"
+            L"; holster_y, holster_z, holster_radius_x/y/z) default to the\r\n"
+            L"; built-in profile for your controllers; add them to override.\r\n"
             L"holster_debug_draw = 0\r\n"
             L"; 1 enables gear placement: double-click the right stick (or F6) in\r\n"
             L"; first person, then place pistols, binoculars/grapple and the light\r\n"
@@ -382,6 +501,67 @@ namespace trlvr
     const Config& config()
     {
         return g_config;
+    }
+
+    void config_set_first_person_hardcore(bool on)
+    {
+        g_config.first_person_hardcore = on;
+        wchar_t path[MAX_PATH]{};
+        swprintf_s(path, L"%strlvr.ini", exe_dir());
+        WritePrivateProfileStringW(L"vr", L"first_person_hardcore",
+                                   on ? L"1" : L"0", path);
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
+    }
+
+    namespace
+    {
+        void save_setting(const wchar_t* section, const wchar_t* key,
+                          const wchar_t* value)
+        {
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%strlvr.ini", exe_dir());
+            WritePrivateProfileStringW(section, key, value, path);
+            WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
+        }
+    }
+
+    void config_set_left_handed(bool on)
+    {
+        g_config.left_handed = on;
+        save_setting(L"controls", L"left_handed", on ? L"1" : L"0");
+    }
+
+    void config_set_theatre(int mode)
+    {
+        g_config.cutscene_theatre = mode >= 1;
+        g_config.gameplay_theatre = mode >= 2;
+        save_setting(L"vr", L"cutscene_mode",
+                     mode >= 1 ? L"theatre" : L"normal");
+        save_setting(L"vr", L"gameplay_theatre", mode >= 2 ? L"1" : L"0");
+    }
+
+    void config_set_third_person_mode(int mode)
+    {
+        g_config.view_cycle_all = mode == 3;
+        g_config.third_person_mode = mode >= 0 && mode <= 2 ? mode : 0;
+        static const wchar_t* const kNames[4] = {
+            L"classic", L"shoulder", L"board", L"all" };
+        save_setting(L"vr", L"third_person_mode",
+                     kNames[mode >= 0 && mode <= 3 ? mode : 0]);
+    }
+
+    void config_set_full_body(bool on)
+    {
+        g_config.first_person_full_body = on;
+        save_setting(L"vr", L"first_person_body", on ? L"full" : L"hands");
+    }
+
+    void config_set_hand_collision(bool world, bool body)
+    {
+        g_config.hand_collision = world;
+        g_config.hand_body_collision = body;
+        save_setting(L"vr", L"hand_collision", world ? L"1" : L"0");
+        save_setting(L"vr", L"hand_body_collision", body ? L"1" : L"0");
     }
 
     void load_config()
@@ -488,6 +668,16 @@ namespace trlvr
             g_config.depth_of_field =
                 _wcsnicmp(culling, L"on", 2) == 0 ? 1
                 : _wcsnicmp(culling, L"game", 4) == 0 ? -1 : 0;
+            GetPrivateProfileStringW(L"vr", L"fsaa", L"on", culling, 32,
+                                     path);
+            g_config.fsaa =
+                _wcsnicmp(culling, L"off", 3) == 0 ? 0
+                : _wcsnicmp(culling, L"game", 4) == 0 ? -1 : 1;
+            GetPrivateProfileStringW(L"vr", L"fullscreen_effects", L"off",
+                                     culling, 32, path);
+            g_config.fullscreen_effects =
+                _wcsnicmp(culling, L"on", 2) == 0 ? 1
+                : _wcsnicmp(culling, L"game", 4) == 0 ? -1 : 0;
         }
         {
             const float backdrop = read_float(
@@ -549,6 +739,97 @@ namespace trlvr
             ? (value < 0.0f ? 0.0f : value > 2.0f ? 2.0f : value) : 1.0f;
         g_config.weapon_haptics = read_bool(
             L"vr", L"weapon_haptics", true, path);
+        g_config.shake_rumble = read_bool(
+            L"vr", L"shake_rumble", true, path);
+        g_config.roomscale = read_bool(L"vr", L"roomscale", true, path);
+        g_config.hand_collision =
+            read_bool(L"vr", L"hand_collision", false, path);
+        g_config.hand_body_collision =
+            read_bool(L"vr", L"hand_body_collision", true, path);
+        g_config.body_spring = read_bool(L"vr", L"body_spring", true, path);
+        g_config.body_soft = read_bool(L"vr", L"body_soft", true, path);
+        value = read_float(L"vr", L"body_soft_angle", L"12", path);
+        g_config.body_soft_angle = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 30.0f ? 30.0f : value) : 12.0f;
+        value = read_float(L"vr", L"body_spring_angle", L"4", path);
+        g_config.body_spring_angle = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 15.0f ? 15.0f : value) : 4.0f;
+        g_config.roomscale_walk =
+            read_bool(L"vr", L"roomscale_walk", true, path);
+        g_config.wall_touch = read_bool(L"vr", L"wall_touch", true, path);
+        g_config.water_reflection =
+            read_bool(L"vr", L"water_reflection", false, path);
+        g_config.water_effects =
+            read_bool(L"vr", L"water_effects", false, path);
+        value = read_float(L"vr", L"wall_touch_max_speed", L"2.6", path);
+        g_config.wall_touch_max_speed = std::isfinite(value)
+            ? (value < 0.5f ? 0.5f : value > 10.0f ? 10.0f : value) : 2.6f;
+        g_config.first_person_hardcore =
+            read_bool(L"vr", L"first_person_hardcore", false, path);
+        value = read_float(L"vr", L"first_person_hardcore_threshold", L"20",
+                           path);
+        g_config.first_person_hardcore_threshold = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 60.0f ? 60.0f : value) : 20.0f;
+        value = read_float(L"vr", L"roomscale_deadzone", L"0.15", path);
+        g_config.roomscale_deadzone = std::isfinite(value)
+            ? (value < 0.02f ? 0.02f : value > 0.6f ? 0.6f : value) : 0.15f;
+        {
+            wchar_t mode[32] = {};
+            GetPrivateProfileStringW(L"vr", L"cutscene_mode", L"normal",
+                                     mode, 32, path);
+            g_config.cutscene_theatre = _wcsicmp(mode, L"theatre") == 0 ||
+                                        _wcsicmp(mode, L"theater") == 0 ||
+                                        _wcsicmp(mode, L"1") == 0;
+        }
+        value = read_float(L"vr", L"cutscene_screen_width", L"3.0", path);
+        g_config.cutscene_screen_width = std::isfinite(value)
+            ? (value < 0.5f ? 0.5f : value > 20.0f ? 20.0f : value) : 3.0f;
+        g_config.gameplay_theatre =
+            read_bool(L"vr", L"gameplay_theatre", false, path);
+        g_config.board_diorama =
+            read_bool(L"vr", L"board_diorama", false, path);
+        {
+            const wchar_t* keys[4] = { L"board_diorama_width",
+                L"board_diorama_depth", L"board_diorama_height",
+                L"board_diorama_below" };
+            const wchar_t* defaults[4] = { L"0.6", L"0.6", L"0.45", L"0.15" };
+            float* fields[4] = { &g_config.board_diorama_width,
+                &g_config.board_diorama_depth, &g_config.board_diorama_height,
+                &g_config.board_diorama_below };
+            const float fallback[4] = { 0.6f, 0.6f, 0.45f, 0.15f };
+            for (int k = 0; k < 4; ++k)
+            {
+                const float v = read_float(L"vr", keys[k], defaults[k], path);
+                *fields[k] = std::isfinite(v) && v >= 0.0f && v <= 5.0f
+                    ? v : fallback[k];
+            }
+        }
+        {
+            wchar_t colour[32] = {};
+            GetPrivateProfileStringW(L"vr", L"theatre_backdrop", L"000000",
+                                     colour, 32, path);
+            const wchar_t* digits = colour;
+            if (digits[0] == L'#')
+                ++digits;
+            else if (digits[0] == L'0' &&
+                     (digits[1] == L'x' || digits[1] == L'X'))
+                digits += 2;
+            g_config.theatre_backdrop =
+                (unsigned)wcstoul(digits, nullptr, 16) & 0xFFFFFFu;
+        }
+        value = read_float(L"vr", L"cutscene_screen_distance", L"2.5", path);
+        g_config.cutscene_screen_distance = std::isfinite(value)
+            ? (value < 0.5f ? 0.5f : value > 20.0f ? 20.0f : value) : 2.5f;
+        {
+            wchar_t scale[32] = {};
+            GetPrivateProfileStringW(L"vr", L"cutscene_scale", L"auto",
+                                     scale, 32, path);
+            const float fixed = (float)_wtof(scale);
+            g_config.cutscene_scale = _wcsicmp(scale, L"auto") != 0 &&
+                std::isfinite(fixed) && fixed > 0.0f
+                ? (fixed < 0.1f ? 0.1f : fixed > 50.0f ? 50.0f : fixed)
+                : 0.0f;
+        }
         value = read_float(L"vr", L"first_person_eye_height", L"70", path);
         g_config.first_person_eye_height =
             value >= 0.0f && value <= 180.0f ? value : 70.0f;
@@ -570,6 +851,29 @@ namespace trlvr
         g_config.controllers = read_bool(L"controls", L"controllers", true, path);
         g_config.immersive_controls =
             read_bool(L"controls", L"immersive_controls", false, path);
+        {
+            wchar_t menu[32] = {};
+            GetPrivateProfileStringW(L"controls", L"gear_menu", L"cross",
+                                     menu, 32, path);
+            g_config.gear_menu_radial = _wcsicmp(menu, L"radial") == 0;
+        }
+        g_config.stick_walk = read_bool(L"controls", L"stick_walk", true, path);
+        g_config.finger_tracking =
+            read_bool(L"controls", L"finger_tracking", false, path);
+        value = read_float(L"controls", L"finger_rest_curl", L"0", path);
+        g_config.finger_rest_curl = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 0.6f ? 0.6f : value) : 0.0f;
+        value = read_float(L"controls", L"stick_walk_threshold", L"0.7", path);
+        g_config.stick_walk_threshold = std::isfinite(value)
+            ? (value < 0.3f ? 0.3f : value > 1.0f ? 1.0f : value) : 0.7f;
+        {
+            wchar_t key[32] = {};
+            GetPrivateProfileStringW(L"controls", L"walk_key", L"shift",
+                                     key, 32, path);
+            g_config.walk_vk = _wcsicmp(key, L"ctrl") == 0 ||
+                               _wcsicmp(key, L"control") == 0
+                ? (unsigned short)0xA2 : (unsigned short)0xA0;
+        }
         g_config.left_handed =
             read_bool(L"controls", L"left_handed", false, path);
         g_config.two_handed_guns =

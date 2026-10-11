@@ -13,6 +13,11 @@ namespace trlvr
     // one, matching every other camera mode and preserving physical IPD.
     float camera_stereo_scale();
 
+    // Cutscene theatre: how much larger than life the current shot is
+    // shown (head movement and eye separation are multiplied by it), so
+    // the shot's subject sits at the screen. 1 outside the theatre.
+    float camera_theatre_scale();
+
     // The accurate-aim camera uses a much more aggressive close camera and a
     // different depth range. Projection replacement needs to know the mode at
     // draw time so it can use a VR-safe near plane.
@@ -32,6 +37,12 @@ namespace trlvr
     // True only while the opt-in first-person path has a validated gameplay
     // Lara/head anchor. Menus and cinematics deliberately fall back safely.
     bool camera_first_person_active();
+    // A pouch item (0 grenade, 1 medipack) was drawn as the game's own
+    // model this frame, so its outline is not needed.
+    bool camera_pouch_model_shown(int item);
+    // Show the game's own flat gear cross (HUD fade group 5) for a moment;
+    // called every frame keeps it up. For the radial gear menu.
+    void camera_show_retail_gear_cross();
     // The chosen view: first_person in trlvr.ini at start, switched live
     // (user request 2026-10-06) by camera_toggle_view -- right stick long
     // press with immersive controls, or \ on the keyboard. First person is
@@ -42,9 +53,22 @@ namespace trlvr
     // third_person_mode at start; with third_person_mode = all the view
     // switch steps through every preset and first person in turn.
     int camera_third_person_mode();
+    // The pause menu's third-person setting: the preset in use now (all
+    // starts the cycle at classic).
+    void camera_set_third_person_mode(int mode);
     // 1 normally; the tabletop factor (Lara's real height / board height)
     // while the board-game third-person camera is in use.
     float camera_world_scale_factor();
+    // Third-person scale and zoom (palm sliders, 2026-10-10), for the
+    // current preset: scale = the world factor (1 = life size), zoom = the
+    // preset's camera-distance multiplier. Available in third-person
+    // gameplay only. save = write them to trlvr.ini.
+    bool camera_tp_view_available();
+    float camera_tp_scale();
+    float camera_tp_zoom();
+    void camera_set_tp_view(float scale, float zoom, bool save);
+    // How much a drawn third-person hand's palm faces up (-2 unknown).
+    float camera_palm_up(int hand);
     // Main camera to Lara after the head pose, world units (world-marker
     // stereo depth).
     float camera_marker_depth();
@@ -73,6 +97,9 @@ namespace trlvr
     bool camera_board_pluck_held();
     // Board mode finger flick: left hand, held = loaded, release = snap.
     void camera_board_flick_update(bool active, bool held);
+    // Roomscale walk: true while Lara is walking to the player's real
+    // position; dir = the W A S D keys to hold (with the walk key).
+    bool camera_roomscale_walk_keys(bool dir[4]);
     // Held by a pinch (not standing on a palm, where she may walk).
     bool camera_board_pluck_carried();
     // Developer pose tools ([developer] board_pose_debug = 1; keys read in
@@ -110,6 +137,9 @@ namespace trlvr
     // hanging state has released the tracked hand anchors.
     bool camera_first_person_ledge_climbing();
     bool camera_first_person_vine_climbing();
+    // First-person Lara's height (instance position z, metres), for the
+    // vine stroke log. False when not available.
+    bool camera_first_person_lara_height(float* metres);
     // A free-standing vertical pole or chain (VertPoleAttached /
     // VertPoleAirAttach): Lara can turn around it, unlike a wall vine.
     bool camera_first_person_free_pole();

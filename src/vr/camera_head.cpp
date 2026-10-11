@@ -87,6 +87,25 @@ namespace trlvr
         const unsigned char kSetIndicesPtrSignature[6] =
             { 0x56, 0x57, 0x8B, 0x7C, 0x24, 0x0C };
         const uintptr_t kGetHMarkerTransform = 0x00425AD0;
+        // Its trampoline once hooked (detour_marker_transform); the mod's
+        // own lookups go through it and see the game's own markers.
+        PFN_GetHMarkerTransform g_marker_original = nullptr;
+        // Each first-person hand's world move (animated wrist -> VR hand)
+        // as last drawn, and the light's move (marker 17) -- applied to
+        // the game's own marker lookups (user 2026-10-11: the grapple rope
+        // and the light's glow stayed at the animated hand / chest).
+        Mat4 g_fp_hand_delta[2] = { Mat4::identity(), Mat4::identity() };
+        DWORD g_fp_hand_delta_tick[2] = { 0, 0 };
+        Mat4 g_fp_light_delta = Mat4::identity();
+        DWORD g_fp_light_delta_tick = 0;
+
+        int raw_marker_transform(void* instance, int marker, Mat4* out,
+                                 bool flag)
+        {
+            return (g_marker_original ? g_marker_original
+                    : reinterpret_cast<PFN_GetHMarkerTransform>(
+                          kGetHMarkerTransform))(instance, marker, out, flag);
+        }
         const uintptr_t kPlayerInvEndCombatMode = 0x005AC4B0;
         const uintptr_t kFilteredInputUpdate = 0x0058A4D0;
         const uintptr_t kProcessMovement = 0x005B90E0;
@@ -313,6 +332,10 @@ namespace trlvr
         };
         Recoil g_recoil[2];
         bool first_person_controller_world_pose(bool left, Mat4* world);
+        // Presented frames (camera_first_person_gpu_frame_end).
+        unsigned g_present_count = 0;
+        void hand_world_collision(bool left, const Mat4& camera_to_world,
+                                  Mat4* world);
         bool weapon_is_pistol(const char* name);
         bool weapon_is_long_gun(const char* name);
         void recoil_register_shot(void* weapon);
@@ -482,6 +505,10 @@ namespace trlvr
         uint32_t g_first_person_saved_fx = 0;
         bool g_first_person_head_hidden = false;
         int g_first_person_head_segment = -1;
+        // Her waist: the root's child on the path to the head. The root
+        // (pelvis) carries translation only (2026-10-03 measurement); her
+        // facing and body turns start here (hardcore first person).
+        int g_first_person_waist_segment = -1;
         int g_first_person_shoulder_segment[2] = { -1, -1 };
         int g_first_person_elbow_segment[2] = { -1, -1 };
         int g_first_person_wrist_segment[2] = { -1, -1 };
@@ -1299,6 +1326,59 @@ namespace trlvr
         // The same retail MULTIBODY_LegacyLineProbe call (flags, PCollideInfo
         // layout, Lara ignored) the accurate-aim close-surface probe uses.
         // Writes the first hit, or the end of the ray at weapon range.
+        bool aim_probe(const float* origin, const float* direction,
+                       float range, float* point, void** hit_instance);
+
+        // The line probe for the player's body (roomscale, leaning, hands):
+        // it ignores Lara herself but not her linked instances -- holstered
+        // guns, backpack, the gun in hand -- which stopped sidesteps short
+        // (user 2026-10-09: "some push back" stepping sideways). Those
+        // hits are passed through, up to four times.
+        bool body_probe(const float* origin, const float* direction,
+                        float range, float* point)
+        {
+            void* lara = nullptr;
+            __try
+            {
+                lara = *reinterpret_cast<void* const*>(kPlayerInstance);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                lara = nullptr;
+            }
+            float from[3] = { origin[0], origin[1], origin[2] };
+            float travelled = 0.0f;
+            for (int pass = 0; pass < 4; ++pass)
+            {
+                void* hit = nullptr;
+                if (!aim_probe(from, direction, range - travelled, point, &hit))
+                    return false;
+                bool own = false;
+                __try
+                {
+                    own = hit && lara && (hit == lara ||
+                        *reinterpret_cast<void* const*>(
+                            static_cast<const unsigned char*>(hit) + 0xB8) ==
+                            lara);
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    own = false;
+                }
+                if (!own)
+                    return true;
+                float step = 2.0f;
+                for (int k = 0; k < 3; ++k)
+                    step += (point[k] - from[k]) * direction[k];
+                travelled += step;
+                if (travelled >= range)
+                    return false;
+                for (int k = 0; k < 3; ++k)
+                    from[k] += direction[k] * step;
+            }
+            return false;
+        }
+
         bool aim_probe(const float* origin, const float* direction,
                        float range, float* point, void** hit_instance)
         {
@@ -3292,6 +3372,27 @@ namespace trlvr
                     return false;
                 }
 
+                {
+                    const ModelSegment* segs =
+                        *reinterpret_cast<ModelSegment* const*>(
+                            static_cast<unsigned char*>(model) +
+                            kOffModelSegments);
+                    int waist = -1;
+                    if (segs)
+                        for (int seg = head_segment, guard = 0;
+                             seg >= 0 && seg < segment_count && guard < 64;
+                             seg = segs[seg].parent, ++guard)
+                        {
+                            const int parent = segs[seg].parent;
+                            if (parent >= 0 && parent < segment_count &&
+                                segs[parent].parent < 0)
+                            {
+                                waist = seg;
+                                break;
+                            }
+                        }
+                    g_first_person_waist_segment = waist;
+                }
                 const float* head = matrices + head_segment * 16 + 12;
                 float raw_head[3] = { 0.0f, 0.0f, 0.0f };
                 for (int axis = 0; axis < 3; ++axis)
@@ -4291,12 +4392,380 @@ namespace trlvr
                 two_hand_adjust(left, camera_to_world, world);
                 apply_recoil(left, world);
                 two_hand_pin_off_hand(left, world);
+                hand_world_collision(left, camera_to_world, world);
             }
             for (int row = 0; row < 4; ++row)
                 for (int column = 0; column < 4; ++column)
                     if (!std::isfinite(world->m[row][column]))
                         return false;
             return true;
+        }
+
+        // Hand collision (user 2026-10-09: hands went through the
+        // landscape). Once a frame per hand: the line from the eye to the
+        // hand; if the world is in the way the hand (and whatever it holds)
+        // is drawn 4 cm short of it along that line, the same shift for the
+        // rest of the frame.
+        struct HandClip
+        {
+            unsigned frame = ~0u;
+            float shift[3]{};
+            bool reported = false;
+        };
+        HandClip g_hand_clip[2];
+
+        // Her upper body as rounded shapes (user 2026-10-10: hands clipped
+        // through her upper torso -- the upright 13 cm cylinder below
+        // tested only the wrist; "torso collision like the female avatar in
+        // Bonelab"). Every model segment has its own mesh box (min / max in
+        // its frame from its joint, as measure.cpp places them); the
+        // torso's are used: the bones from the chest down to the waist (not
+        // the pelvis), the chest's own children that are neither arm nor
+        // neck, and the blended (virtual) joints between those bones --
+        // most of her torso skin hangs on those (test 2: the waist bone has
+        // no mesh, the spine's is 3 cm thin). Each box becomes an ellipsoid
+        // 1.1x its half-sizes, carried by its matrix every full-body draw.
+        // A hand (wrist, palm, fingertips) inside one is put back on its
+        // surface along the surface normal, so it rests and slides on the
+        // body instead of catching on box corners. Soft give: a pressed
+        // real bone squashes toward the hand (half the depth, at most 3 cm)
+        // and springs back; the press also leans the torso spring, and a
+        // hand arriving fast kicks it (a tap wobbles more than a press).
+        struct BodyBox
+        {
+            int seg = -1;           // segment, count + v for a blended one
+            bool blended = false;
+            int a = -1, b = -1;     // blended: its two bones
+            float weight = 0.0f;
+            float lo[3]{}, hi[3]{}; // its frame, game units
+            Mat4 world = Mat4::identity();     // posed, before the squash
+            Mat4 inverse = Mat4::identity();
+            // Squash (real bones): along `dir` (its frame, unit, outward
+            // at the pressed side) by `amount` (world units), easing
+            // toward `target`.
+            float dir[3] = { 1.0f, 0.0f, 0.0f };
+            float amount = 0.0f, target = 0.0f;
+            DWORD target_time = 0;
+            int soft = -1;          // the soft part it belongs to, -1 firm
+        };
+        // A soft part (user 2026-10-10: only the chest's front children --
+        // her breast bones -- give and bounce; the chest itself is firm):
+        // its own spring at the bone's tip, turning the bone about its
+        // joint. Hands press and kick it.
+        struct SoftSpring
+        {
+            int seg = -1, tip = -1;     // the bone, its child (-1 none)
+            bool valid = false;
+            float p[3]{}, v[3]{};       // root-relative mass
+            LARGE_INTEGER last{};
+            float press[2][3]{};        // world, into the body
+            DWORD press_time[2] = { 0, 0 };
+            float kick[3]{};
+            bool kick_pending = false;
+        };
+        SoftSpring g_soft[4];
+        int g_soft_count = 0;
+        struct ChestBox
+        {
+            const ModelSegment* model = nullptr;
+            int chest = -1;             // box 0 is the chest's
+            int boxes = 0;
+            BodyBox box[16];
+            DWORD time = 0;
+            DWORD squash_time = 0;
+            float press[2][3]{};        // world, into the body
+            DWORD press_time[2] = { 0, 0 };
+            // A hand's arrival speed into the body, for the spring.
+            float kick[3]{};
+            bool kick_pending = false;
+            float last_point[2][3]{};
+            DWORD last_point_time[2] = { 0, 0 };
+            bool touching[2] = { false, false };
+        };
+        ChestBox g_chest_box;
+
+        bool first_person_grip_model_ready(int hand);
+        bool first_person_grip_hand_transform(int hand, Mat4* out);
+
+        // The deepest of a hand's points inside any ellipsoid: the world
+        // push that puts it back on that surface (1 cm clear), less what a
+        // squash there already gives; the outward normal and the full depth
+        // too. A pressed real bone gets its squash target. False when no
+        // point is inside.
+        bool chest_box_push(const float (*points)[3], int n, float push[3],
+                            float normal[3], float* raw_depth,
+                            int* box_index)
+        {
+            const float metre = config().world_scale;
+            const float margin = 0.01f * metre;
+            float best = 0.0f, best_raw = 0.0f;
+            int best_box = -1;
+            float best_dir_local[3] = { 1.0f, 0.0f, 0.0f };
+            push[0] = push[1] = push[2] = 0.0f;
+            for (int b = 0; b < g_chest_box.boxes; ++b)
+            {
+                const BodyBox& box = g_chest_box.box[b];
+                float c[3], r[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    c[k] = 0.5f * (box.lo[k] + box.hi[k]);
+                    r[k] = 0.55f * (box.hi[k] - box.lo[k]);
+                }
+                for (int p = 0; p < n; ++p)
+                {
+                    float local[3], q[3];
+                    for (int k = 0; k < 3; ++k)
+                        local[k] = points[p][0] * box.inverse.m[0][k] +
+                                   points[p][1] * box.inverse.m[1][k] +
+                                   points[p][2] * box.inverse.m[2][k] +
+                                   box.inverse.m[3][k];
+                    for (int k = 0; k < 3; ++k)
+                        q[k] = (local[k] - c[k]) / r[k];
+                    float s = sqrtf(dot3(q, q));
+                    if (!std::isfinite(s) || s >= 1.0f)
+                        continue;
+                    if (s < 1e-4f)
+                    {
+                        q[0] = 1.0f;
+                        q[1] = q[2] = 0.0f;
+                        s = 1.0f;
+                    }
+                    // Back to the surface along the ellipsoid's own radius,
+                    // then 1 cm out along its normal (q / r).
+                    float surface[3], nl[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        surface[k] = c[k] + q[k] / s * r[k];
+                        nl[k] = q[k] / r[k];
+                    }
+                    if (normalise3(nl) < 1e-8f)
+                        continue;
+                    float move_local[3], move[3], nw[3];
+                    for (int k = 0; k < 3; ++k)
+                        move_local[k] = surface[k] - local[k];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        move[k] = move_local[0] * box.world.m[0][k] +
+                                  move_local[1] * box.world.m[1][k] +
+                                  move_local[2] * box.world.m[2][k];
+                        nw[k] = nl[0] * box.world.m[0][k] +
+                                nl[1] * box.world.m[1][k] +
+                                nl[2] * box.world.m[2][k];
+                    }
+                    if (normalise3(nw) < 1e-8f)
+                        continue;
+                    const float raw = fmaxf(0.0f, dot3(move, nw)) + margin;
+                    float give = raw;
+                    if (!box.blended && box.soft >= 0 &&
+                        dot3(box.dir, nl) > 0.7f)
+                        give = fmaxf(0.0f, raw - box.amount);
+                    if (raw > best_raw)
+                    {
+                        best_raw = raw;
+                        best_box = b;
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            best_dir_local[k] = nl[k];
+                            normal[k] = nw[k];
+                        }
+                    }
+                    if (give > best)
+                    {
+                        best = give;
+                        for (int k = 0; k < 3; ++k)
+                            push[k] = nw[k] * give;
+                    }
+                }
+            }
+            if (best_box < 0)
+                return false;
+            *raw_depth = best_raw;
+            *box_index = best_box;
+            BodyBox& box = g_chest_box.box[best_box];
+            if (!box.blended && box.soft >= 0)
+            {
+                if (dot3(box.dir, best_dir_local) < 0.7f)
+                    box.amount = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    box.dir[k] = best_dir_local[k];
+                box.target = fminf(0.5f * best_raw, 0.03f * metre);
+                box.target_time = GetTickCount();
+            }
+            return true;
+        }
+
+        // Hands and Lara's own body (user 2026-10-10): her torso as an
+        // upright cylinder under the neck point the full body is drawn from
+        // (0.08 m behind the eye along the view's heading), from 0.12 m to
+        // 0.85 m below the eye, radius 0.13 m. A hand inside is pushed out
+        // sideways to its surface; holsters sit outside it. With the
+        // full body drawn, her measured chest box is used instead.
+        void hand_body_collision(bool left, const Mat4& camera_to_world,
+                                 Mat4* world)
+        {
+            const int hand = left ? 0 : 1;
+            if (g_chest_box.boxes > 0 && GetTickCount() - g_chest_box.time < 200)
+            {
+                Mat4 wrist = *world;
+                Mat4 grip_hand;
+                if (first_person_grip_model_ready(hand) &&
+                    first_person_grip_hand_transform(hand, &grip_hand))
+                    wrist = grip_hand * *world;
+                float points[3][3];
+                int n = 0;
+                for (int k = 0; k < 3; ++k)
+                    points[n][k] = wrist.m[3][k];
+                ++n;
+                float palm_local[3];
+                if (first_person_palm_local(hand, palm_local))
+                {
+                    for (int k = 0; k < 3; ++k)
+                        points[n][k] = palm_local[0] * wrist.m[0][k] +
+                                       palm_local[1] * wrist.m[1][k] +
+                                       palm_local[2] * wrist.m[2][k] +
+                                       wrist.m[3][k];
+                    for (int k = 0; k < 3; ++k)
+                        points[n + 1][k] = wrist.m[3][k] +
+                            (points[n][k] - wrist.m[3][k]) * 2.2f;
+                    n += 2;
+                }
+                float push[3], normal[3], depth = 0.0f;
+                int box_index = -1;
+                const DWORD now = GetTickCount();
+                const bool touching = chest_box_push(points, n, push, normal,
+                                                     &depth, &box_index);
+                const int soft = touching && box_index >= 0
+                    ? g_chest_box.box[box_index].soft : -1;
+                if (touching)
+                {
+                    for (int k = 0; k < 3; ++k)
+                        world->m[3][k] += push[k];
+                    if (soft >= 0)
+                    {
+                        for (int k = 0; k < 3; ++k)
+                            g_soft[soft].press[hand][k] = -normal[k] * depth;
+                        g_soft[soft].press_time[hand] = now;
+                    }
+                    // Arriving: the hand's speed into the body kicks the
+                    // spring (at most 2.5 m/s worth).
+                    const DWORD gap = now - g_chest_box.last_point_time[hand];
+                    if (soft >= 0 && !g_chest_box.touching[hand] && gap > 0 &&
+                        gap < 100)
+                    {
+                        float into = 0.0f;
+                        for (int k = 0; k < 3; ++k)
+                            into -= (points[0][k] -
+                                     g_chest_box.last_point[hand][k]) *
+                                    normal[k];
+                        into /= gap / 1000.0f;
+                        const float metre = config().world_scale;
+                        into = fminf(into, 2.5f * metre);
+                        if (into > 0.2f * metre)
+                        {
+                            for (int k = 0; k < 3; ++k)
+                                g_soft[soft].kick[k] += -normal[k] * into * 0.6f;
+                            g_soft[soft].kick_pending = true;
+                        }
+                    }
+                    static bool reported = false;
+                    if (!reported)
+                    {
+                        reported = true;
+                        log("hands: a hand pressed on Lara's body -- kept "
+                            "near its surface, the pressed part squashes");
+                    }
+                }
+                g_chest_box.touching[hand] = touching;
+                for (int k = 0; k < 3; ++k)
+                    g_chest_box.last_point[hand][k] = points[0][k];
+                g_chest_box.last_point_time[hand] = now;
+                return;
+            }
+            const float metre = config().world_scale;
+            const float* eye = camera_to_world.m[3];
+            float fx = camera_to_world.m[2][0], fy = camera_to_world.m[2][1];
+            const float flat = sqrtf(fx * fx + fy * fy);
+            if (flat < 1e-4f)
+                return;
+            fx /= flat;
+            fy /= flat;
+            const float cx = eye[0] - fx * 0.08f * metre;
+            const float cy = eye[1] - fy * 0.08f * metre;
+            float* point = world->m[3];
+            if (point[2] > eye[2] - 0.12f * metre ||
+                point[2] < eye[2] - 0.85f * metre)
+                return;
+            float dx = point[0] - cx, dy = point[1] - cy;
+            float d = sqrtf(dx * dx + dy * dy);
+            const float radius = 0.13f * metre;
+            if (d >= radius)
+                return;
+            if (d < 1e-3f)
+            {
+                dx = fx;
+                dy = fy;
+                d = 1.0f;
+            }
+            point[0] = cx + dx / d * radius;
+            point[1] = cy + dy / d * radius;
+            static bool reported = false;
+            if (!reported)
+            {
+                reported = true;
+                log("hands: a hand was kept out of Lara's body");
+            }
+        }
+
+        void hand_world_collision(bool left, const Mat4& camera_to_world,
+                                  Mat4* world)
+        {
+            if (!g_first_person_active || ui_menu_active())
+                return;
+            if (config().hand_body_collision)
+                hand_body_collision(left, camera_to_world, world);
+            if (!config().hand_collision)
+                return;
+            HandClip& clip = g_hand_clip[left ? 0 : 1];
+            if (clip.frame != g_present_count)
+            {
+                clip.frame = g_present_count;
+                clip.shift[0] = clip.shift[1] = clip.shift[2] = 0.0f;
+                const float* eye = camera_to_world.m[3];
+                const float d[3] = { world->m[3][0] - eye[0],
+                                     world->m[3][1] - eye[1],
+                                     world->m[3][2] - eye[2] };
+                const float length = sqrtf(d[0] * d[0] + d[1] * d[1] +
+                                           d[2] * d[2]);
+                const float margin = 0.04f * config().world_scale;
+                float hit[3];
+                if (length > 1.0f && std::isfinite(length))
+                {
+                    const float dir[3] = { d[0] / length, d[1] / length,
+                                           d[2] / length };
+                    if (body_probe(eye, dir, length + margin, hit))
+                    {
+                        const float h[3] = { hit[0] - eye[0], hit[1] - eye[1],
+                                             hit[2] - eye[2] };
+                        const float reach = fmaxf(0.0f, sqrtf(
+                            h[0] * h[0] + h[1] * h[1] + h[2] * h[2]) - margin);
+                        if (reach < length)
+                        {
+                            for (int k = 0; k < 3; ++k)
+                                clip.shift[k] = dir[k] * (reach - length);
+                            if (!clip.reported)
+                            {
+                                clip.reported = true;
+                                log("hands: %s hand stopped at the world "
+                                    "(%.2f m short of the controller)",
+                                    left ? "left" : "right",
+                                    (length - reach) / config().world_scale);
+                            }
+                        }
+                    }
+                }
+            }
+            for (int k = 0; k < 3; ++k)
+                world->m[3][k] += clip.shift[k];
         }
 
         void two_hand_pin_off_hand(bool left, Mat4* world)
@@ -4762,6 +5231,31 @@ namespace trlvr
                 return false;
             }
 
+            // The light and the grapple keep their moved pose for the rest
+            // of the frame (user 2026-10-11: the light's glow did not follow
+            // the moved light): effects drawn after them read it. If the game
+            // has not rebuilt them by the next draw (paused), the kept pose
+            // is undone first so it never builds on itself.
+            struct GearKeep
+            {
+                float* matrices = nullptr;
+                int count = 0;
+                Mat4 saved[16];
+                Mat4 written[16];
+            };
+            static GearKeep kept[5];
+            const bool keep_pose = gear == 2 || gear == 4;
+            if (keep_pose)
+            {
+                GearKeep& k = kept[gear];
+                if (k.matrices == child_matrices && k.count == child_count &&
+                    memcmp(child_matrices, k.written,
+                           sizeof(float) * 16 * child_count) == 0)
+                    memcpy(child_matrices, k.saved,
+                           sizeof(float) * 16 * child_count);
+                k.matrices = nullptr;
+            }
+
             const float stick_turn = vr_input_first_person_turn() -
                                      g_first_person_stick_start;
             const float player_yaw = wrap_pi(
@@ -4794,7 +5288,20 @@ namespace trlvr
             float target[3]{};
             bool placed = false;
             const int follow = tune_gear_tuning_hand(gear);
-            if (follow >= 0)
+            float follow_palm[3];
+            if (follow >= 0 && vr_hand_palm_head_position(follow == 0,
+                                                          follow_palm))
+            {
+                // On Lara's palm, where it is placed (user 2026-10-10,
+                // Quest: the raw controller point was well off the hand).
+                const Mat4 world = translation(follow_palm[0],
+                                               follow_palm[1],
+                                               follow_palm[2]) * eye;
+                for (int axis = 0; axis < 3; ++axis)
+                    target[axis] = world.m[3][axis];
+                placed = true;
+            }
+            else if (follow >= 0)
             {
                 Mat4 controller_to_head;
                 if (vr_controller_head_pose(follow == 0,
@@ -4910,9 +5417,28 @@ namespace trlvr
             }
             g_draw_instance(instance, a2, a3, a4, a5, model, a7,
                             colour, transform);
-            for (int segment = 0; segment < child_count; ++segment)
-                memcpy(child_matrices + segment * 16,
-                       &saved[segment].m[0][0], sizeof(saved[segment].m));
+            if (keep_pose)
+            {
+                GearKeep& k = kept[gear];
+                k.matrices = child_matrices;
+                k.count = child_count;
+                for (int segment = 0; segment < child_count; ++segment)
+                {
+                    k.saved[segment] = saved[segment];
+                    memcpy(&k.written[segment].m[0][0],
+                           child_matrices + segment * 16,
+                           sizeof(k.written[segment].m));
+                }
+                if (gear == 4)
+                {
+                    g_fp_light_delta = draw_delta;
+                    g_fp_light_delta_tick = GetTickCount();
+                }
+            }
+            else
+                for (int segment = 0; segment < child_count; ++segment)
+                    memcpy(child_matrices + segment * 16,
+                           &saved[segment].m[0][0], sizeof(saved[segment].m));
 
             static bool reported[5]{};
             if (!reported[gear])
@@ -5115,6 +5641,78 @@ namespace trlvr
                     ? "left" : "right", drawn
                     ? "moved onto its controller (flash follows)"
                     : "sunk out of sight (holstered in single mode)");
+        }
+
+        // GetHMarkerTransform (0x00425AD0) for first-person Lara: a marker
+        // on either animated hand (within 10 cm of its wrist; not the hip,
+        // belt or chest gear markers) moves with that VR hand, and the
+        // light's chest marker 17 with the moved light. FXDRAW_Grapple
+        // (0x0044B7A0) starts the rope at her markers 5 and 7 this way.
+        // Only for the game's effects code (FX / FXDRAW, 0x00436000 to
+        // 0x0044D000): objects attached to her hands -- a drawn pistol --
+        // are built from the same markers and then moved onto the hand by
+        // the mod, so moving the marker too put them a second hand-offset
+        // away (user 2026-10-11: guns nowhere near the hands).
+        int __cdecl detour_marker_transform(void* instance, int marker,
+                                            Mat4* out, bool flag)
+        {
+            const uintptr_t caller =
+                reinterpret_cast<uintptr_t>(_ReturnAddress());
+            const int result = g_marker_original(instance, marker, out, flag);
+            if (!result || !out || !g_first_person_active ||
+                !instance || instance != g_first_person_instance ||
+                caller < 0x00436000 || caller >= 0x0044D000)
+                return result;
+            const DWORD now = GetTickCount();
+            __try
+            {
+                if (marker == 17)
+                {
+                    if (now - g_fp_light_delta_tick < 250)
+                        *out = *out * g_fp_light_delta;
+                    return result;
+                }
+                if (marker == 4 || marker == 6 || marker == 9 || marker == 16)
+                    return result;
+                const float* matrices = *reinterpret_cast<float* const*>(
+                    static_cast<unsigned char*>(instance) +
+                    kOffInstanceMatrices);
+                const float scale = tune_world_scale();
+                if (!matrices || !(scale > 0.0f))
+                    return result;
+                int best = -1;
+                float best_sq = 0.10f * scale * 0.10f * scale;
+                for (int hand = 0; hand < 2; ++hand)
+                {
+                    const int w = g_first_person_wrist_segment[hand];
+                    if (w < 0 || now - g_fp_hand_delta_tick[hand] >= 250)
+                        continue;
+                    float d = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const float e = out->m[3][k] - matrices[w * 16 + 12 + k];
+                        d += e * e;
+                    }
+                    if (std::isfinite(d) && d < best_sq)
+                    {
+                        best_sq = d;
+                        best = hand;
+                    }
+                }
+                if (best < 0)
+                    return result;
+                *out = *out * g_fp_hand_delta[best];
+                static int reported[32] = {};
+                if (marker >= 0 && marker < 32 && !reported[marker]++)
+                    log("first-person: Lara's marker %d follows the %s VR "
+                        "hand for the effect at 0x%08X (grapple rope and "
+                        "other hand effects)", marker,
+                        best == 0 ? "left" : "right", (unsigned)caller);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+            return result;
         }
 
         void __cdecl detour_build_transforms(void* instance)
@@ -5489,8 +6087,7 @@ namespace trlvr
                 bool found = false;
                 __try
                 {
-                    found = reinterpret_cast<PFN_GetHMarkerTransform>(
-                        kGetHMarkerTransform)(
+                    found = raw_marker_transform(
                             g_first_person_instance, link_marker,
                             &marker, false) != 0;
                 }
@@ -5930,6 +6527,633 @@ namespace trlvr
         // by the same weighted change as its two bones -- the likely cause
         // of the torn arms in the 2026-09-24 IK attempts. All matrices and
         // the strip pointer are restored after the draw.
+        // Torso spring (user 2026-10-10: "spring bones ... less stiff and
+        // rigid", subtle, limited). The chest subtree (the shoulders'
+        // common ancestor and all above it) turns about the neck joint so
+        // the seam under the view never opens; a mass at the chest's middle
+        // follows its animated place on a damped spring (2.2 Hz, damping
+        // 0.35). The spring lives relative to her root, so steady walking
+        // or running leaves no lean -- turns, starts, stops and the step
+        // bob set it moving. A hand pressing within 0.18 m of the chest
+        // moves its rest point away (at most 5 cm, half of the press). The
+        // turn is limited to body_spring_angle; rotation only, no stretch.
+        // Applied before the arms are solved, so they still reach the hands.
+        struct TorsoSpring
+        {
+            bool valid = false;
+            float p[3]{};       // root-relative mass position
+            float v[3]{};
+            LARGE_INTEGER last{};
+            bool reported = false;
+        };
+        TorsoSpring g_torso_spring;
+
+        int find_chest(const ModelSegment* segments, int count)
+        {
+            const int ls = g_first_person_shoulder_segment[0];
+            const int rs = g_first_person_shoulder_segment[1];
+            if (ls < 0 || rs < 0 || ls >= count || rs >= count)
+                return -1;
+            for (int seg = segments[ls].parent, guard = 0;
+                 seg >= 0 && seg < count && guard < 64;
+                 seg = segments[seg].parent, ++guard)
+                if (segment_is_in_head_subtree(segments, count, rs, seg))
+                    return seg;
+            return -1;
+        }
+
+        // Once per model: which segments make her torso, their boxes, and
+        // the whole skeleton written to trlvr_lara_skeleton.txt (user
+        // 2026-10-10: "list or document what the mesh structure is").
+        void chest_box_measure(const ModelSegment* segments, int count,
+                               int virtual_count, int chest)
+        {
+            g_chest_box.model = segments;
+            g_chest_box.chest = chest;
+            g_chest_box.boxes = 0;
+            if (count <= 0 || count > 512 || virtual_count < 0 ||
+                count + virtual_count > 512 || chest < 0 || chest >= count)
+                return;
+            const float metre = config().world_scale;
+            const ModelVirtualSegment* virtuals =
+                reinterpret_cast<const ModelVirtualSegment*>(
+                    segments + count);
+            int root = chest;
+            for (int guard = 0; guard < 64 && segments[root].parent >= 0 &&
+                 segments[root].parent < count; ++guard)
+                root = segments[root].parent;
+            const int neck = g_first_person_head_segment;
+            const int ls = g_first_person_shoulder_segment[0];
+            const int rs = g_first_person_shoulder_segment[1];
+            const int lw = g_first_person_wrist_segment[0];
+            const int rw = g_first_person_wrist_segment[1];
+            const auto under = [&](int s, int top)
+            {
+                return top >= 0 && top < count &&
+                       segment_is_in_head_subtree(segments, count, s, top);
+            };
+            static bool torso[512];
+            static bool spine[512];
+            for (int s = 0; s < count; ++s)
+                torso[s] = spine[s] = false;
+            for (int s = chest, guard = 0; s >= 0 && s < count &&
+                 s != root && guard < 64; s = segments[s].parent, ++guard)
+                torso[s] = spine[s] = true;
+            for (int s = 0; s < count; ++s)
+                if (s != chest && under(s, chest) && !under(s, ls) &&
+                    !under(s, rs) && !under(s, neck))
+                    torso[s] = true;
+            const auto role = [&](int s) -> const char*
+            {
+                if (s == root) return "root (pelvis)";
+                if (s == chest) return "chest";
+                if (spine[s]) return segments[s].parent == root
+                                  ? "waist" : "spine";
+                if (torso[s]) return "torso (chest child)";
+                if (under(s, neck)) return "neck / head";
+                if (under(s, lw)) return "left hand";
+                if (under(s, rw)) return "right hand";
+                if (under(s, ls)) return "left arm";
+                if (under(s, rs)) return "right arm";
+                return "other (legs, hips, hair, gear)";
+            };
+            float root_at[3] = { 0.0f, 0.0f, 0.0f };
+            bind_joint_position(segments, count, root, root_at);
+            const auto box_ok = [&](const float* mn, const float* mx)
+            {
+                float biggest = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float size = mx[k] - mn[k];
+                    if (!std::isfinite(size) || size < 0.005f * metre ||
+                        size > 0.8f * metre)
+                        return false;
+                    biggest = fmaxf(biggest, size);
+                }
+                return biggest >= 0.04f * metre;
+            };
+            const auto add = [&](int seg, const float* mn, const float* mx,
+                                 bool blended, int a, int b, float weight)
+            {
+                if (g_chest_box.boxes >= 16 || !box_ok(mn, mx))
+                    return false;
+                BodyBox& box = g_chest_box.box[g_chest_box.boxes++];
+                box = BodyBox{};
+                box.seg = seg;
+                box.blended = blended;
+                box.a = a;
+                box.b = b;
+                box.weight = weight;
+                for (int k = 0; k < 3; ++k)
+                {
+                    box.lo[k] = mn[k];
+                    box.hi[k] = mx[k];
+                }
+                return true;
+            };
+            // Soft parts: the chest's direct children with a mesh that
+            // carry neither an arm nor the neck (her breast bones; the
+            // collarbones carry the shoulders, bone 4 the neck).
+            g_soft_count = 0;
+            for (int s = 0; s < count && g_soft_count < 4; ++s)
+            {
+                if (segments[s].parent != chest || !torso[s] ||
+                    under(ls, s) || under(rs, s) || under(neck, s) ||
+                    !box_ok(segments[s].minimum, segments[s].maximum))
+                    continue;
+                SoftSpring& soft = g_soft[g_soft_count++];
+                soft = SoftSpring{};
+                soft.seg = s;
+                for (int c = 0; c < count; ++c)
+                    if (segments[c].parent == s)
+                    {
+                        soft.tip = c;
+                        break;
+                    }
+                log("hands: soft part %d -- bone %d (tip %d), gives and "
+                    "bounces", g_soft_count - 1, s, soft.tip);
+            }
+            // Box 0: the chest (the spring's mass).
+            const bool chest_ok = add(chest, segments[chest].minimum,
+                                      segments[chest].maximum, false, -1,
+                                      -1, 0.0f);
+            for (int s = 0; s < count; ++s)
+                if (s != chest && torso[s] && chest_ok)
+                    add(s, segments[s].minimum, segments[s].maximum, false,
+                        -1, -1, 0.0f);
+            for (int v = 0; v < virtual_count && chest_ok; ++v)
+            {
+                const int a = virtuals[v].index, b = virtuals[v].weight_index;
+                if (a < 0 || b < 0 || a >= count || b >= count)
+                    continue;
+                const bool ta = torso[a] || a == root;
+                const bool tb = torso[b] || b == root;
+                if (ta && tb && (torso[a] || torso[b]))
+                    add(count + v, virtuals[v].minimum, virtuals[v].maximum,
+                        true, a, b, virtuals[v].weight);
+            }
+            // The skeleton, for the user and for the record.
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%strlvr_lara_skeleton.txt", exe_dir());
+            FILE* f = nullptr;
+            _wfopen_s(&f, path, L"wb");
+            if (f)
+            {
+                fprintf(f, "Lara's first-person model: %d bones + %d blended "
+                        "joints.\r\nPositions in metres from the root joint, "
+                        "model axes (z up). Box = the mesh box stored with "
+                        "each bone, in its own frame from its joint.\r\n"
+                        "\"used\" = one of the body-collision boxes.\r\n"
+                        "\r\nBONES\r\nidx parent  role                     "
+                        "joint (x, y, z)         box size (x, y, z)     "
+                        "box middle (x, y, z)   verts\r\n", count,
+                        virtual_count);
+                for (int s = 0; s < count; ++s)
+                {
+                    float at[3] = { 0.0f, 0.0f, 0.0f };
+                    bind_joint_position(segments, count, s, at);
+                    const float* mn = segments[s].minimum;
+                    const float* mx = segments[s].maximum;
+                    bool used = false;
+                    for (int b = 0; b < g_chest_box.boxes; ++b)
+                        used = used || g_chest_box.box[b].seg == s;
+                    fprintf(f, "%3d %4d    %-28s (%+.2f %+.2f %+.2f)  "
+                            "(%.2f %.2f %.2f)  (%+.2f %+.2f %+.2f)  %4d%s\r\n",
+                            s, segments[s].parent, role(s),
+                            (at[0] - root_at[0]) / metre,
+                            (at[1] - root_at[1]) / metre,
+                            (at[2] - root_at[2]) / metre,
+                            (mx[0] - mn[0]) / metre, (mx[1] - mn[1]) / metre,
+                            (mx[2] - mn[2]) / metre,
+                            0.5f * (mx[0] + mn[0]) / metre,
+                            0.5f * (mx[1] + mn[1]) / metre,
+                            0.5f * (mx[2] + mn[2]) / metre,
+                            segments[s].last_vertex >= segments[s].first_vertex
+                                ? segments[s].last_vertex -
+                                  segments[s].first_vertex + 1 : 0,
+                            used ? "  used" : "");
+                }
+                fprintf(f, "\r\nBLENDED JOINTS (skin between two bones)\r\n"
+                        "idx   bones (weight)   roles                          "
+                        "            box size (x, y, z)   verts\r\n");
+                for (int v = 0; v < virtual_count; ++v)
+                {
+                    const int a = virtuals[v].index, b = virtuals[v].weight_index;
+                    const float* mn = virtuals[v].minimum;
+                    const float* mx = virtuals[v].maximum;
+                    bool used = false;
+                    for (int i = 0; i < g_chest_box.boxes; ++i)
+                        used = used || g_chest_box.box[i].seg == count + v;
+                    fprintf(f, "%3d   %3d + %3d (%.2f)  %-24s + %-24s  "
+                            "(%.2f %.2f %.2f)  %4d%s\r\n", count + v, a, b,
+                            virtuals[v].weight,
+                            a >= 0 && a < count ? role(a) : "?",
+                            b >= 0 && b < count ? role(b) : "?",
+                            (mx[0] - mn[0]) / metre, (mx[1] - mn[1]) / metre,
+                            (mx[2] - mn[2]) / metre,
+                            virtuals[v].last_vertex >= virtuals[v].first_vertex
+                                ? virtuals[v].last_vertex -
+                                  virtuals[v].first_vertex + 1 : 0,
+                            used ? "  used" : "");
+                }
+                fclose(f);
+            }
+            for (int i = 0; i < g_chest_box.boxes; ++i)
+            {
+                BodyBox& box = g_chest_box.box[i];
+                for (int s = 0; s < g_soft_count; ++s)
+                    if ((!box.blended && box.seg == g_soft[s].seg) ||
+                        (box.blended && (box.a == g_soft[s].seg ||
+                                         box.b == g_soft[s].seg)))
+                        box.soft = s;
+            }
+            log("hands: %d body boxes for her torso (chest %s); the skeleton "
+                "is in trlvr_lara_skeleton.txt", g_chest_box.boxes,
+                chest_ok ? "ok" : "box unusable -- old cylinder stays");
+            if (!chest_ok)
+                g_chest_box.boxes = 0;
+        }
+
+        // After the spring: where each box is posed this frame (blended
+        // ones from their two bones, as the full-body draw blends them),
+        // then the squashes eased and applied to their bones.
+        void chest_box_store(int count, const float (*saved)[16], Mat4* xform)
+        {
+            const int mode = g_virtual_blend_mode < 0 ? 0
+                                                      : g_virtual_blend_mode;
+            for (int i = 0; i < g_chest_box.boxes; ++i)
+            {
+                BodyBox& box = g_chest_box.box[i];
+                Mat4 m;
+                if (!box.blended)
+                    m = matrix_from_floats(saved[box.seg]) * xform[box.seg];
+                else
+                {
+                    const float wa = mode ? box.weight : 1.0f - box.weight;
+                    const float wb = 1.0f - wa;
+                    Mat4 blend;
+                    for (int r = 0; r < 4; ++r)
+                        for (int c = 0; c < 4; ++c)
+                            blend.m[r][c] = wa * xform[box.a].m[r][c] +
+                                            wb * xform[box.b].m[r][c];
+                    m = matrix_from_floats(saved[box.seg]) * blend;
+                }
+                Mat4 inverse;
+                if (!invert(m, &inverse))
+                    return;
+                box.world = m;
+                box.inverse = inverse;
+            }
+            if (!g_chest_box.boxes)
+                return;
+            const DWORD now = GetTickCount();
+            const float dt = g_chest_box.squash_time
+                ? fminf(0.1f, (now - g_chest_box.squash_time) / 1000.0f)
+                : 0.0f;
+            g_chest_box.squash_time = now;
+            g_chest_box.time = now;
+            for (int i = 0; i < g_chest_box.boxes; ++i)
+            {
+                BodyBox& box = g_chest_box.box[i];
+                if (box.blended || box.soft < 0 || box.seg < 0 ||
+                    box.seg >= count)
+                    continue;
+                const float want = now - box.target_time < 100 ? box.target
+                                                               : 0.0f;
+                const float tau = want > box.amount ? 0.05f : 0.15f;
+                box.amount += (want - box.amount) *
+                              (1.0f - expf(-dt / tau));
+                if (box.amount < 0.001f * config().world_scale)
+                    continue;
+                // Squash along the pressed direction about the far side of
+                // the ellipsoid.
+                const Mat4& m = box.world;
+                float d[3], far_local[3], anchor[3];
+                float support = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float r = 0.55f * (box.hi[k] - box.lo[k]);
+                    support += (r * box.dir[k]) * (r * box.dir[k]);
+                }
+                support = sqrtf(support);
+                for (int k = 0; k < 3; ++k)
+                    d[k] = box.dir[0] * m.m[0][k] + box.dir[1] * m.m[1][k] +
+                           box.dir[2] * m.m[2][k];
+                const float unit = normalise3(d);
+                const float size = 2.0f * support * unit;
+                if (!(unit > 1e-6f) || !(size > 1e-3f))
+                    continue;
+                for (int k = 0; k < 3; ++k)
+                    far_local[k] = 0.5f * (box.lo[k] + box.hi[k]) -
+                                   box.dir[k] * support;
+                for (int k = 0; k < 3; ++k)
+                    anchor[k] = far_local[0] * m.m[0][k] +
+                                far_local[1] * m.m[1][k] +
+                                far_local[2] * m.m[2][k] + m.m[3][k];
+                const float k_scale = fmaxf(0.6f, 1.0f - box.amount / size);
+                Mat4 squash = Mat4::identity();
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        squash.m[r][c] += (k_scale - 1.0f) * d[r] * d[c];
+                xform[box.seg] = xform[box.seg] *
+                    translation(-anchor[0], -anchor[1], -anchor[2]) * squash *
+                    translation(anchor[0], anchor[1], anchor[2]);
+            }
+        }
+
+        // The soft parts' springs (after the torso spring, so its sway and
+        // her step bob drive them): each mass sits at the bone's tip,
+        // root-relative like the torso spring, 3 Hz across but 2.2 Hz and
+        // looser up and down (user 2026-10-10: "more up and down"), damped
+        // 0.22 so a bounce rings a little. Hands' presses move its rest
+        // point in (at most 4 cm) and a tap kicks it. The bone turns about
+        // its joint toward the mass, at most body_soft_angle -- from a
+        // joint on the chest's front, that is mostly up and down.
+        void soft_springs(const ModelSegment* segments, int count,
+                          const float (*saved)[16], Mat4* xform,
+                          void* instance)
+        {
+            const bool on = config().body_soft &&
+                config().body_soft_angle > 0.0f &&
+                g_first_person_traversal == TraversalGround &&
+                !g_first_person_ledge_hanging && !g_first_person_bar_hanging;
+            float root[3]{};
+            bool have_root = on;
+            if (on)
+            {
+                __try
+                {
+                    memcpy(root, static_cast<const unsigned char*>(instance) +
+                           0x10, sizeof(root));
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    have_root = false;
+                }
+            }
+            const float metre = tune_world_scale();
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            for (int i = 0; i < g_soft_count; ++i)
+            {
+                SoftSpring& soft = g_soft[i];
+                if (!have_root || soft.seg < 0 || soft.seg >= count)
+                {
+                    soft.valid = false;
+                    continue;
+                }
+                const Mat4 m = matrix_from_floats(saved[soft.seg]) *
+                               xform[soft.seg];
+                float joint[3], tip[3];
+                for (int k = 0; k < 3; ++k)
+                    joint[k] = m.m[3][k];
+                bool have_tip = false;
+                if (soft.tip >= 0 && soft.tip < count)
+                {
+                    const Mat4 t = matrix_from_floats(saved[soft.tip]) *
+                                   xform[soft.tip];
+                    float d[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        tip[k] = t.m[3][k];
+                        d[k] = tip[k] - joint[k];
+                    }
+                    have_tip = dot3(d, d) > powf(0.02f * metre, 2.0f);
+                }
+                if (!have_tip)
+                {
+                    float local[3];
+                    for (int k = 0; k < 3; ++k)
+                        local[k] = 0.5f * (segments[soft.seg].minimum[k] +
+                                           segments[soft.seg].maximum[k]);
+                    for (int k = 0; k < 3; ++k)
+                        tip[k] = local[0] * m.m[0][k] + local[1] * m.m[1][k] +
+                                 local[2] * m.m[2][k] + m.m[3][k];
+                }
+                float target[3];
+                for (int k = 0; k < 3; ++k)
+                    target[k] = tip[k] - root[k];
+                {
+                    float press[3] = { 0.0f, 0.0f, 0.0f };
+                    for (int hand = 0; hand < 2; ++hand)
+                        if (GetTickCount() - soft.press_time[hand] < 100)
+                            for (int k = 0; k < 3; ++k)
+                                press[k] += soft.press[hand][k];
+                    const float len = sqrtf(dot3(press, press));
+                    const float cap = 0.04f * metre;
+                    const float s = len > cap ? cap / len : 1.0f;
+                    for (int k = 0; k < 3; ++k)
+                        target[k] += press[k] * s;
+                }
+                float dt = soft.valid && frequency.QuadPart
+                    ? (float)((double)(now.QuadPart - soft.last.QuadPart) /
+                              (double)frequency.QuadPart) : 0.0f;
+                soft.last = now;
+                float gap[3];
+                for (int k = 0; k < 3; ++k)
+                    gap[k] = soft.p[k] - target[k];
+                if (!soft.valid || !(dt > 0.0f) || dt > 0.25f ||
+                    dot3(gap, gap) > powf(0.3f * metre, 2.0f))
+                {
+                    memcpy(soft.p, target, sizeof(target));
+                    soft.v[0] = soft.v[1] = soft.v[2] = 0.0f;
+                    soft.valid = true;
+                    soft.kick_pending = false;
+                    continue;
+                }
+                if (soft.kick_pending)
+                {
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        soft.v[k] += soft.kick[k];
+                        soft.kick[k] = 0.0f;
+                    }
+                    soft.kick_pending = false;
+                }
+                const float omega[3] = { 6.2831853f * 3.0f,
+                                         6.2831853f * 3.0f,
+                                         6.2831853f * 2.2f };   // z is up
+                const float zeta = 0.22f;
+                const int steps = (int)ceilf(dt / (1.0f / 240.0f));
+                const float h = dt / (float)(steps > 0 ? steps : 1);
+                for (int s = 0; s < steps && s < 64; ++s)
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const float a = omega[k] * omega[k] *
+                            (target[k] - soft.p[k]) -
+                            2.0f * zeta * omega[k] * soft.v[k];
+                        soft.v[k] += a * h;
+                        soft.p[k] += soft.v[k] * h;
+                    }
+                float from[3], to[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    from[k] = tip[k] - joint[k];
+                    to[k] = soft.p[k] + root[k] - joint[k];
+                }
+                const float lf = sqrtf(dot3(from, from));
+                const float lt = sqrtf(dot3(to, to));
+                if (!(lf > 1e-3f) || !(lt > 1e-3f))
+                    continue;
+                const float angle = acosf(fmaxf(-1.0f, fminf(1.0f,
+                    dot3(from, to) / (lf * lt))));
+                if (!(angle > 1e-4f))
+                    continue;
+                const float limit = config().body_soft_angle * 0.017453293f;
+                Mat4 rotation = rotation_between(from, to);
+                if (angle > limit)
+                    rotation = rotation_fraction(rotation, limit / angle);
+                const Mat4 about = translation(-joint[0], -joint[1],
+                                               -joint[2]) * rotation *
+                                   translation(joint[0], joint[1], joint[2]);
+                for (int s = 0; s < count; ++s)
+                    if (segment_is_in_head_subtree(segments, count, s,
+                                                   soft.seg))
+                        xform[s] = xform[s] * about;
+            }
+        }
+
+        void torso_spring(const ModelSegment* segments, int count,
+                          const float (*saved)[16], Mat4* xform,
+                          void* instance, const Mat4 hand_delta[2])
+        {
+            if (!config().body_spring || config().body_spring_angle <= 0.0f ||
+                g_first_person_traversal != TraversalGround ||
+                g_first_person_ledge_hanging || g_first_person_bar_hanging)
+            {
+                g_torso_spring.valid = false;
+                return;
+            }
+            const int neck = g_first_person_head_segment;
+            if (neck < 0 || neck >= count)
+                return;
+            const int chest = find_chest(segments, count);
+            if (chest < 0 || chest == neck ||
+                !segment_is_in_head_subtree(segments, count, neck, chest))
+                return;
+            float root[3]{};
+            __try
+            {
+                memcpy(root, static_cast<const unsigned char*>(instance) +
+                       0x10, sizeof(root));
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return;
+            }
+            const auto moved = [&](int seg, float out[3])
+            {
+                const Mat4 m = matrix_from_floats(saved[seg]) * xform[seg];
+                for (int k = 0; k < 3; ++k)
+                    out[k] = m.m[3][k];
+            };
+            float c[3], n[3];
+            moved(chest, c);
+            moved(neck, n);
+            const float metre = tune_world_scale();
+            (void)hand_delta;
+            // The mass: the chest box's middle (its bulk, in front of the
+            // spine), else between the chest and neck joints.
+            float middle[3];
+            for (int k = 0; k < 3; ++k)
+                middle[k] = 0.5f * (c[k] + n[k]);
+            if (g_chest_box.boxes > 0 && g_chest_box.box[0].seg == chest)
+            {
+                const Mat4 cm = matrix_from_floats(saved[chest]) *
+                                xform[chest];
+                float local[3];
+                for (int k = 0; k < 3; ++k)
+                    local[k] = 0.5f * (g_chest_box.box[0].lo[k] +
+                                       g_chest_box.box[0].hi[k]);
+                for (int k = 0; k < 3; ++k)
+                    middle[k] = local[0] * cm.m[0][k] + local[1] * cm.m[1][k] +
+                                local[2] * cm.m[2][k] + cm.m[3][k];
+            }
+            float target[3];
+            for (int k = 0; k < 3; ++k)
+                target[k] = middle[k] - root[k];
+            // (Hands no longer move it: the chest is firm, its soft parts
+            // give -- user 2026-10-10.)
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            float dt = g_torso_spring.valid && frequency.QuadPart
+                ? (float)((double)(now.QuadPart -
+                                   g_torso_spring.last.QuadPart) /
+                          (double)frequency.QuadPart) : 0.0f;
+            g_torso_spring.last = now;
+            float gap[3];
+            for (int k = 0; k < 3; ++k)
+                gap[k] = g_torso_spring.p[k] - target[k];
+            if (!g_torso_spring.valid || !(dt > 0.0f) || dt > 0.25f ||
+                dot3(gap, gap) > powf(0.5f * metre, 2.0f))
+            {
+                memcpy(g_torso_spring.p, target, sizeof(target));
+                g_torso_spring.v[0] = g_torso_spring.v[1] =
+                    g_torso_spring.v[2] = 0.0f;
+                g_torso_spring.valid = true;
+                return;
+            }
+            const float omega = 6.2831853f * 2.2f;
+            const float zeta = 0.35f;
+            const int steps = (int)ceilf(dt / (1.0f / 240.0f));
+            const float h = dt / (float)(steps > 0 ? steps : 1);
+            for (int i = 0; i < steps && i < 64; ++i)
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float a = omega * omega *
+                        (target[k] - g_torso_spring.p[k]) -
+                        2.0f * zeta * omega * g_torso_spring.v[k];
+                    g_torso_spring.v[k] += a * h;
+                    g_torso_spring.p[k] += g_torso_spring.v[k] * h;
+                }
+            // The turn about the neck that takes the chest's middle from
+            // its animated place to the mass, limited.
+            float from[3], to[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                from[k] = middle[k] - n[k];
+                to[k] = g_torso_spring.p[k] + root[k] - n[k];
+            }
+            const float lf = sqrtf(dot3(from, from));
+            const float lt = sqrtf(dot3(to, to));
+            if (!(lf > 1e-3f) || !(lt > 1e-3f))
+                return;
+            const float cosine = fmaxf(-1.0f, fminf(1.0f,
+                dot3(from, to) / (lf * lt)));
+            const float angle = acosf(cosine);
+            const float limit = config().body_spring_angle * 0.017453293f;
+            if (!(angle > 1e-4f))
+                return;
+            Mat4 rotation = rotation_between(from, to);
+            if (angle > limit)
+                rotation = rotation_fraction(rotation, limit / angle);
+            const Mat4 about = translation(-n[0], -n[1], -n[2]) * rotation *
+                               translation(n[0], n[1], n[2]);
+            for (int seg = 0; seg < count; ++seg)
+                if (segment_is_in_head_subtree(segments, count, seg, chest))
+                    xform[seg] = xform[seg] * about;
+            if (!g_torso_spring.reported)
+            {
+                g_torso_spring.reported = true;
+                log("first-person: torso spring on (chest segment %d swings "
+                    "about the neck %d, at most %.1f degrees)", chest, neck,
+                    config().body_spring_angle);
+            }
+        }
+
+        // Finger tracking on one drawn hand (defined with pose_fingers).
+        // blocked: why the game's own grip pose stays (nullptr = free).
+        // view: 0 third person, 1 first-person hands, 2 full body.
+        bool apply_finger_tracking(int hand, int wrist,
+                                   const ModelSegment* segments, int count,
+                                   int virtual_count, float* matrices,
+                                   const char* blocked, int view);
+        // First person: why each hand keeps its grip pose this frame (set
+        // by the hand loop, used by the full-body draw).
+        const char* g_fp_finger_block[2] = { nullptr, nullptr };
+
         void first_person_draw_full_body(
             void* instance, int a2, float a3, int a4, int a5, void* model,
             float a7, void* colour, void* transform, void* draw_model,
@@ -6167,6 +7391,21 @@ namespace trlvr
                 }
             }
 
+            // Her chest box (measured once per model), the torso spring,
+            // and where the chest is drawn for the hands' collision -- all
+            // before the arms are solved on it.
+            if (g_chest_box.model != segments)
+            {
+                const int chest = find_chest(segments, count);
+                if (chest >= 0)
+                    chest_box_measure(segments, count, virtual_count, chest);
+                else
+                    g_chest_box.model = segments;
+            }
+            torso_spring(segments, count, saved, xform, instance, hand_delta);
+            soft_springs(segments, count, saved, xform, instance);
+            chest_box_store(count, saved, xform);
+
             // Arms, solved on the turned torso.
             bool arm_ok[2] = { false, false };
             Mat4 upper[2], forearm[2];
@@ -6345,6 +7584,13 @@ namespace trlvr
                 memcpy(matrices, saved, sizeof(float) * 16 * total);
                 return;
             }
+            // Finger tracking on the moved hands (the body's own blend has
+            // just been written; the fingers' virtual segments are redone).
+            for (int hand = 0; hand < 2; ++hand)
+                apply_finger_tracking(hand,
+                                      g_first_person_wrist_segment[hand],
+                                      segments, count, virtual_count,
+                                      matrices, g_fp_finger_block[hand], 2);
 
             unsigned char* model_bytes = static_cast<unsigned char*>(
                 draw_model);
@@ -6426,17 +7672,86 @@ namespace trlvr
             DWORD time = 0;
         };
         PalmSeen g_palm_seen[2];
+        // The last joint of each drawn hand's index finger, world units, from
+        // the last hand draw (user 2026-10-09): the board pinch test and
+        // where Lara hangs are taken from Lara's own finger, not the
+        // controller, so they match the hand you see whatever controller
+        // is held and however it sits in the hand.
+        PalmSeen g_index_seen[2];
 
         // Finger flick (board mode, left hand, hold Y long; 2026-10-03):
         // holding loads it (index curled behind the thumb, the rest in a
         // fist), releasing snaps the index out. amount: 1 loaded, 0 rest,
         // negative overextended. tip: the index tip as last drawn (true
         // world scale), and the one before it, for the swept hit test.
+        // Recorded finger poses (user 2026-10-10, finger pose recorder,
+        // trlvr_finger_poses.csv, left hand). Each is what pose_fingers
+        // takes: curls (thumb .. pinky), each finger's angle from the
+        // middle (radians: index, middle = 0, ring, pinky; pinky-ward
+        // positive), and the thumb tip in the hand's frame (forward,
+        // toward the pinky, palm-ward; knuckle spans) with the pinch. None
+        // of it is left- or right-handed, so the right hand gets the
+        // mirror image of the same pose.
+        struct FingerPose
+        {
+            float curl[5];
+            float spread[4];
+            float thumb[4];
+        };
+        constexpr float kDeg = 0.017453293f;
+        // Holding board-mode Lara: take 1's first pose (its first 0.5 s
+        // averaged), the thumb tip on the index tip.
+        const FingerPose kPosePinch = {
+            { 0.519f, 0.545f, 0.142f, 0.069f, 0.000f },
+            { -1.5f * kDeg, 0.0f, 4.9f * kDeg, 11.7f * kDeg },
+            { 0.069f, 0.029f, 1.209f, 1.0f } };
+        // The flick, take 4: loaded (index held by the thumb, 0.5 s
+        // averaged), mid-snap (the frame 62 ms after letting go) and flung
+        // open (0.3 s averaged).
+        const FingerPose kPoseFlickLoaded = {
+            { 0.625f, 0.517f, 0.228f, 0.133f, 0.000f },
+            { -0.8f * kDeg, 0.0f, 8.8f * kDeg, 20.7f * kDeg },
+            { -0.064f, 0.091f, 1.211f, 1.0f } };
+        const FingerPose kPoseFlickSnap = {
+            { 0.545f, 0.136f, 0.004f, 0.023f, 0.000f },
+            { -10.5f * kDeg, 0.0f, 9.4f * kDeg, 22.5f * kDeg },
+            { 0.034f, -0.235f, 1.146f, 0.0f } };
+        const FingerPose kPoseFlickOpen = {
+            { 0.144f, 0.000f, 0.000f, 0.000f, 0.000f },
+            { -14.7f * kDeg, 0.0f, 15.4f * kDeg, 30.2f * kDeg },
+            { -0.154f, -0.708f, 1.335f, 0.0f } };
+        // A relaxed hand (the resting right hand across all four takes):
+        // where the flick starts loading from and settles back to.
+        const FingerPose kPoseRelaxed = {
+            { 0.422f, 0.157f, 0.126f, 0.089f, 0.074f },
+            { -1.8f * kDeg, 0.0f, 3.0f * kDeg, 8.2f * kDeg },
+            { 0.297f, -0.685f, 0.488f, 0.0f } };
+
+        FingerPose finger_pose_lerp(const FingerPose& a, const FingerPose& b,
+                                    float t)
+        {
+            t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+            FingerPose out;
+            for (int i = 0; i < 5; ++i)
+                out.curl[i] = a.curl[i] + (b.curl[i] - a.curl[i]) * t;
+            for (int i = 0; i < 4; ++i)
+            {
+                out.spread[i] = a.spread[i] + (b.spread[i] - a.spread[i]) * t;
+                out.thumb[i] = a.thumb[i] + (b.thumb[i] - a.thumb[i]) * t;
+            }
+            return out;
+        }
+
         struct BoardFlick
         {
             int phase = 0;              // 0 idle, 1 loading, 2 snapping
             float amount = 0.0f;
             float fist = 0.0f;
+            // The hand's recorded-pose blend this frame (pose_recorded),
+            // the pose it set off from, and how far loading has come.
+            FingerPose pose = kPoseRelaxed;
+            FingerPose from = kPoseRelaxed;
+            float load = 0.0f;
             LARGE_INTEGER started{};
             LARGE_INTEGER last{};
             float tip[3]{};
@@ -6603,7 +7918,8 @@ namespace trlvr
         // thumb, then middle/ring/pinky by distance from it -- confirmed by
         // the user's finger-debug pass (2026-10-02: chains index, middle,
         // ring, pinky, thumb; segments 62..75 left, 83..96 right). Writes
-        // the pinch point (between the two tips) in the drawn hand's space.
+        // the index finger's last joint (where she is held) in the drawn
+        // hand's space.
         bool pose_pinch(PoseWork& w, int wrist, const float palm_local[3],
                         int hand, float pinch_out[3])
         {
@@ -6734,9 +8050,62 @@ namespace trlvr
             pose_chain_tip(w, chains[index], depth[index], index_tip);
             pose_ccd(w, chains[thumb], depth[thumb], index_tip);
             pose_chain_tip(w, chains[thumb], depth[thumb], thumb_tip);
-            pose_chain_tip(w, chains[index], depth[index], index_tip);
+            (void)thumb_tip;
+            pose_joint(w, chains[index][depth[index] - 1], pinch_out);
+            return true;
+        }
+
+        int find_finger_chains(const PoseWork& w, int wrist, int chains[8][5],
+                               int depth[8]);
+
+        // The open hand's index finger, last joint, in the drawn hand's
+        // space. Finger roles as in pose_pinch.
+        bool pose_index_joint(const PoseWork& w, int wrist,
+                              const float palm_local[3], float out[3])
+        {
+            int chains[8][5];
+            int depth[8];
+            const int n = find_finger_chains(w, wrist, chains, depth);
+            if (n < 5)
+                return false;
+            float wrist_o[3];
+            pose_joint(w, wrist, wrist_o);
+            const float* wm = w.saved[wrist];
+            float f[3];
             for (int k = 0; k < 3; ++k)
-                pinch_out[k] = 0.5f * (thumb_tip[k] + index_tip[k]);
+                f[k] = palm_local[0] * wm[k] + palm_local[1] * wm[4 + k] +
+                       palm_local[2] * wm[8 + k];
+            if (normalise3(f) < 1e-4f)
+                return false;
+            float base[8][3], along[8];
+            for (int i = 0; i < n; ++i)
+            {
+                pose_joint(w, chains[i][0], base[i]);
+                along[i] = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    along[i] += (base[i][k] - wrist_o[k]) * f[k];
+            }
+            int thumb = 0;
+            for (int i = 1; i < n; ++i)
+                if (along[i] < along[thumb])
+                    thumb = i;
+            int index = -1;
+            float best = 0.0f;
+            for (int i = 0; i < n; ++i)
+            {
+                if (i == thumb)
+                    continue;
+                float d = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    d += (base[i][k] - base[thumb][k]) *
+                         (base[i][k] - base[thumb][k]);
+                if (index < 0 || d < best)
+                {
+                    index = i;
+                    best = d;
+                }
+            }
+            pose_joint(w, chains[index][depth[index] - 1], out);
             return true;
         }
 
@@ -6822,6 +8191,529 @@ namespace trlvr
             for (int k = 0; k < 3; ++k)
                 tip_out[k] = index_tip[k];
             return true;
+        }
+
+        // Finger tracking (2026-10-10): each finger of the drawn hand bends
+        // by its SteamVR curl beyond the game hand's own rest curl
+        // ([controls] finger_rest_curl; a straighter real finger opens it a
+        // little), index / ring / pinky fan by the splay, and the thumb
+        // reaches across the curled index and middle as it curls. Finger
+        // roles as in pose_pinch; curl about wrist y, fan about wrist z,
+        // both mirrored for the right hand. curl: thumb, index, middle,
+        // ring, pinky; splay: thumb-index, index-middle, middle-ring,
+        // ring-pinky.
+        // The fingers' base pose (user 2026-10-10: the game's hand
+        // animations off while tracking): every segment below the wrist is
+        // put back in the model's bind pose relative to the wrist -- no
+        // rotation against it, offset by the summed pivots (the pivots are
+        // parent-relative, as bind_joint_position) -- a straight, flat hand
+        // (finger debug: fingers along wrist x). Checked once per model
+        // against the animated bone lengths; off if they disagree.
+        const ModelSegment* g_finger_base_model = nullptr;
+        bool g_finger_base_ok = false;
+
+        bool pose_fingers_base(PoseWork& w, int wrist)
+        {
+            const float* wm = w.saved[wrist];
+            const Mat4 W = matrix_from_floats(wm) * w.xform[wrist];
+            if (g_finger_base_model != w.segments)
+            {
+                g_finger_base_model = w.segments;
+                double error = 0.0, total = 0.0;
+                int bones = 0;
+                const float scale = sqrtf(W.m[0][0] * W.m[0][0] +
+                                          W.m[0][1] * W.m[0][1] +
+                                          W.m[0][2] * W.m[0][2]);
+                for (int s = 0; s < w.count; ++s)
+                {
+                    const int p = w.segments[s].parent;
+                    if (s == wrist || p < 0 || p >= w.count ||
+                        !segment_is_in_head_subtree(w.segments, w.count, s,
+                                                    wrist))
+                        continue;
+                    float a[3], b[3];
+                    pose_joint(w, s, a);
+                    pose_joint(w, p, b);
+                    const float* q = w.segments[s].pivot;
+                    const double animated = sqrt(
+                        (double)point_distance_sq(a, b));
+                    const double bind = scale *
+                        sqrt((double)(q[0] * q[0] + q[1] * q[1] +
+                                      q[2] * q[2]));
+                    error += fabs(animated - bind);
+                    total += animated;
+                    ++bones;
+                }
+                g_finger_base_ok = bones >= 10 && total > 0.0 &&
+                                   error / total < 0.15;
+                log("fingers: base pose %s -- %d finger bones, bind lengths "
+                    "differ from the animated ones by %.1f%%",
+                    g_finger_base_ok ? "from the model's rest pose"
+                                     : "unavailable, the animated hand is "
+                                       "kept",
+                    bones, total > 0.0 ? 100.0 * error / total : 0.0);
+            }
+            if (!g_finger_base_ok)
+                return false;
+            for (int s = 0; s < w.count; ++s)
+            {
+                if (s == wrist ||
+                    !segment_is_in_head_subtree(w.segments, w.count, s,
+                                                wrist))
+                    continue;
+                float offset[3] = { 0.0f, 0.0f, 0.0f };
+                int at = s;
+                for (int guard = 0; guard < 16 && at != wrist; ++guard)
+                {
+                    if (at < 0 || at >= w.count)
+                        return false;
+                    for (int k = 0; k < 3; ++k)
+                        offset[k] += w.segments[at].pivot[k];
+                    at = w.segments[at].parent;
+                }
+                if (at != wrist)
+                    continue;
+                Mat4 target = W;
+                for (int k = 0; k < 3; ++k)
+                    target.m[3][k] = W.m[3][k] + offset[0] * W.m[0][k] +
+                                     offset[1] * W.m[1][k] +
+                                     offset[2] * W.m[2][k];
+                Mat4 inverse;
+                if (!invert(matrix_from_floats(w.saved[s]), &inverse))
+                    return false;
+                w.xform[s] = inverse * target;
+                w.changed[s] = true;
+            }
+            return true;
+        }
+
+        // A chain's fingertip that turns with its last segment: the last
+        // bone's own pivot direction (parent -> it, in the model's axes,
+        // which every segment matrix maps) carried on 0.9 of its length
+        // through that segment's matrix. pose_chain_tip extrapolates from
+        // the last two joints instead, which the last segment's own
+        // rotation never moves -- CCD then turned it again every pass
+        // (user 2026-10-10: the thumb's top joint "rotates back too much").
+        void pose_true_tip(const PoseWork& w, const int* chain, int depth,
+                           float tip[3])
+        {
+            const int s = chain[depth - 1];
+            const Mat4 m = matrix_from_floats(w.saved[s]) * w.xform[s];
+            const float* p = w.segments[s].pivot;
+            for (int k = 0; k < 3; ++k)
+                tip[k] = 0.9f * (p[0] * m.m[0][k] + p[1] * m.m[1][k] +
+                                 p[2] * m.m[2][k]) + m.m[3][k];
+        }
+
+        // CCD on the thumb with that tip, the base joints doing most of the
+        // work (a thumb moves mostly at its base and middle joints).
+        void pose_ccd_thumb(PoseWork& w, const int* chain, int depth,
+                            const float target[3])
+        {
+            static const float weight[5] = { 0.6f, 0.45f, 0.2f, 0.2f, 0.2f };
+            for (int iteration = 0; iteration < 10; ++iteration)
+                for (int j = depth - 1; j >= 0; --j)
+                {
+                    float pivot[3], tip[3], from[3], to[3];
+                    pose_joint(w, chain[j], pivot);
+                    pose_true_tip(w, chain, depth, tip);
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        from[k] = tip[k] - pivot[k];
+                        to[k] = target[k] - pivot[k];
+                    }
+                    if (dot3(from, from) < 1e-8f || dot3(to, to) < 1e-8f)
+                        continue;
+                    pose_rotate_subtree(w, chain[j], pivot, rotation_fraction(
+                        rotation_between(from, to), weight[j < 5 ? j : 4]));
+                }
+        }
+
+        bool pose_fingers(PoseWork& w, int wrist, const float palm_local[3],
+                          int hand, const float curl[5],
+                          const float splay[4], const float* spread,
+                          const float* thumb_target,
+                          float* index_joint_out = nullptr,
+                          float* index_tip_out = nullptr)
+        {
+            int chains[8][5];
+            int depth[8];
+            const int n = find_finger_chains(w, wrist, chains, depth);
+            if (n < 5)
+                return false;
+            // Straight hand first (bind pose); the curls are from there.
+            const bool from_base = pose_fingers_base(w, wrist);
+            float wrist_o[3];
+            pose_joint(w, wrist, wrist_o);
+            const float* wm = w.saved[wrist];
+            float f[3];
+            for (int k = 0; k < 3; ++k)
+                f[k] = palm_local[0] * wm[k] + palm_local[1] * wm[4 + k] +
+                       palm_local[2] * wm[8 + k];
+            if (normalise3(f) < 1e-4f)
+                return false;
+            float base[8][3], along[8];
+            for (int i = 0; i < n; ++i)
+            {
+                pose_joint(w, chains[i][0], base[i]);
+                along[i] = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    along[i] += (base[i][k] - wrist_o[k]) * f[k];
+            }
+            int thumb = 0;
+            for (int i = 1; i < n; ++i)
+                if (along[i] < along[thumb])
+                    thumb = i;
+            auto dist = [&](int a, int b) {
+                float d = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    d += (base[a][k] - base[b][k]) * (base[a][k] - base[b][k]);
+                return d;
+            };
+            int index = -1;
+            for (int i = 0; i < n; ++i)
+                if (i != thumb && (index < 0 ||
+                                   dist(i, thumb) < dist(index, thumb)))
+                    index = i;
+            int rest[8];
+            int rest_n = 0;
+            for (int i = 0; i < n; ++i)
+                if (i != thumb && i != index)
+                    rest[rest_n++] = i;
+            for (int a = 0; a < rest_n; ++a)
+                for (int b = a + 1; b < rest_n; ++b)
+                    if (dist(rest[b], index) < dist(rest[a], index))
+                    {
+                        const int t = rest[a];
+                        rest[a] = rest[b];
+                        rest[b] = t;
+                    }
+            if (rest_n < 3)
+                return false;
+            const float mirror = hand == 0 ? 1.0f : -1.0f;
+            float curl_axis[3], palm_axis[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                curl_axis[k] = wm[4 + k] * mirror;
+                palm_axis[k] = wm[8 + k] * mirror;
+            }
+            // index, middle, ring, pinky
+            const int finger[4] = { index, rest[0], rest[1], rest[2] };
+            // Fan: the middle stays. With SteamVR's bones (spread: each
+            // finger's measured sideways angle from the middle) her
+            // fingers turn to the same angles from her middle finger
+            // (user 2026-10-10: the summary splay barely spread them);
+            // without, the summary splay nudges them as before.
+            float fan[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            bool fanned = false;
+            if (spread)
+            {
+                // Her sideways axis: index base -> pinky base, square to
+                // the wrist -> middle base direction.
+                float fwd[3], lat[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    fwd[k] = base[finger[1]][k] - wrist_o[k];
+                    lat[k] = base[finger[3]][k] - base[finger[0]][k];
+                }
+                if (normalise3(fwd) > 1e-4f)
+                {
+                    const float forward_part = dot3(lat, fwd);
+                    for (int k = 0; k < 3; ++k)
+                        lat[k] -= forward_part * fwd[k];
+                }
+                if (normalise3(lat) > 1e-4f)
+                {
+                    float her[4];
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        const int c = finger[i];
+                        float a[3], b[3], dir[3];
+                        pose_joint(w, chains[c][0], a);
+                        pose_joint(w, chains[c][depth[c] > 1 ? 1 : 0], b);
+                        for (int k = 0; k < 3; ++k)
+                            dir[k] = b[k] - a[k];
+                        if (normalise3(dir) < 1e-4f)
+                            for (int k = 0; k < 3; ++k)
+                                dir[k] = fwd[k];
+                        float s = dot3(dir, lat);
+                        s = s < -1.0f ? -1.0f : s > 1.0f ? 1.0f : s;
+                        her[i] = asinf(s);
+                    }
+                    // Which way a turn about the palm axis moves a finger
+                    // sideways, measured on the rotation itself.
+                    const Mat4 probe = axis_rotation(palm_axis, 0.1f);
+                    float turned[3];
+                    for (int k = 0; k < 3; ++k)
+                        turned[k] = fwd[0] * probe.m[0][k] +
+                                    fwd[1] * probe.m[1][k] +
+                                    fwd[2] * probe.m[2][k];
+                    const float sign =
+                        dot3(turned, lat) >= dot3(fwd, lat) ? 1.0f : -1.0f;
+                    for (int i = 0; i < 4; ++i)
+                    {
+                        if (i == 1)
+                            continue;
+                        float t = (spread[i] - spread[1]) - (her[i] - her[1]);
+                        t = t < -0.6f ? -0.6f : t > 0.6f ? 0.6f : t;
+                        fan[i] = sign * t;
+                    }
+                    fanned = true;
+                }
+            }
+            if (!fanned)
+            {
+                const float rest_splay = 0.4f;
+                const float gap[3] = { splay[1] - rest_splay,
+                                       splay[2] - rest_splay,
+                                       splay[3] - rest_splay };
+                fan[0] = -0.30f * gap[0];
+                fan[2] = 0.25f * gap[1];
+                fan[3] = 0.25f * gap[1] + 0.25f * gap[2];
+            }
+            for (int i = 0; i < 4; ++i)
+            {
+                if (fabsf(fan[i]) < 1e-3f)
+                    continue;
+                float pivot[3];
+                pose_joint(w, chains[finger[i]][0], pivot);
+                pose_rotate_subtree(w, chains[finger[i]][0], pivot,
+                                    axis_rotation(palm_axis, fan[i]));
+            }
+            // Curl: per joint, the flick's full-curl shape.
+            // From the animated hand (no bind pose) the old 0.15 rest curl
+            // still applies.
+            const float rest_curl = from_base ? config().finger_rest_curl
+                                              : 0.15f;
+            // A real fist reads about 0.9, so 0.9 is a full curl, and the
+            // joints reach a real fist's angles there: 92, 103, 69 degrees
+            // (user 2026-10-10, twice: "could bend more, inward"; the flick
+            // shape 1.0 / 1.3 / 1.1 stopped well short).
+            const float fist_curl = 0.9f;
+            const float bend[5] = { 1.6f, 1.8f, 1.2f, 0.8f, 0.8f };
+            for (int i = 0; i < 4; ++i)
+            {
+                float amount = (curl[i + 1] - rest_curl) /
+                               (fist_curl - rest_curl > 0.1f
+                                    ? fist_curl - rest_curl : 0.1f);
+                if (amount > 1.0f)
+                    amount = 1.0f;
+                const float floor_amount = from_base ? -rest_curl : -0.35f;
+                if (amount < floor_amount)
+                    amount = floor_amount;
+                const int c = finger[i];
+                for (int j = 0; j < depth[c]; ++j)
+                {
+                    float pivot[3];
+                    pose_joint(w, chains[c][j], pivot);
+                    pose_rotate_subtree(w, chains[c][j], pivot,
+                                        axis_rotation(curl_axis,
+                                                      bend[j] * amount));
+                }
+            }
+            // Thumb, with SteamVR's bones: its tip goes where the real one
+            // is in the hand's frame (index knuckle, forward to the middle
+            // knuckle, sideways to the pinky knuckle, palm-ward), scaled by
+            // the knuckle span; closing on the index tip it meets hers.
+            // Every thumb joint, the base included, turns to reach it.
+            bool thumb_done = false;
+            if (thumb_target)
+            {
+                float o[3], fwd[3], lat[3], palm[3];
+                pose_joint(w, chains[index][0], o);
+                for (int k = 0; k < 3; ++k)
+                {
+                    fwd[k] = base[finger[1]][k] - wrist_o[k];
+                    lat[k] = base[finger[3]][k] - base[finger[0]][k];
+                }
+                const float span = sqrtf(dot3(lat, lat));
+                bool ok = span > 1e-3f && normalise3(fwd) > 1e-4f;
+                // Her palm side: where her fingers go as they curl (the
+                // curl itself is right; the wrist-z sign of the palm
+                // platform put the thumb on the wrong side -- user
+                // 2026-10-10: "the bottom joint needs an axis flipped").
+                if (ok)
+                {
+                    const Mat4 probe = axis_rotation(curl_axis, 0.3f);
+                    for (int k = 0; k < 3; ++k)
+                        palm[k] = fwd[0] * probe.m[0][k] +
+                                  fwd[1] * probe.m[1][k] +
+                                  fwd[2] * probe.m[2][k] - fwd[k];
+                }
+                if (ok)
+                {
+                    const float a = dot3(lat, fwd);
+                    for (int k = 0; k < 3; ++k)
+                        lat[k] -= a * fwd[k];
+                    ok = normalise3(lat) > 1e-4f;
+                }
+                if (ok)
+                {
+                    const float a = dot3(palm, fwd), b = dot3(palm, lat);
+                    for (int k = 0; k < 3; ++k)
+                        palm[k] -= a * fwd[k] + b * lat[k];
+                    ok = normalise3(palm) > 1e-4f;
+                }
+                if (ok)
+                {
+                    float target[3];
+                    for (int k = 0; k < 3; ++k)
+                        target[k] = o[k] + span *
+                            (thumb_target[0] * fwd[k] +
+                             thumb_target[1] * lat[k] +
+                             thumb_target[2] * palm[k]);
+                    const float pinch = thumb_target[3];
+                    if (pinch > 0.0f)
+                    {
+                        // The fingertip as drawn (turned with its last
+                        // joint; the extrapolated one overshot a curled
+                        // tip).
+                        float index_tip[3];
+                        pose_true_tip(w, chains[index], depth[index],
+                                      index_tip);
+                        for (int k = 0; k < 3; ++k)
+                            target[k] += (index_tip[k] - target[k]) * pinch;
+                    }
+                    pose_ccd_thumb(w, chains[thumb], depth[thumb], target);
+                    // No thumb joint past the base bends backwards (away
+                    // from the palm's centre): such a bend is straightened.
+                    float centre[3];
+                    for (int k = 0; k < 3; ++k)
+                        centre[k] = 0.5f * (base[finger[0]][k] +
+                                            base[finger[3]][k]) +
+                                    span * (0.4f * palm[k] - 0.3f * fwd[k]);
+                    const int* tc = chains[thumb];
+                    for (int j = 1; j < depth[thumb]; ++j)
+                    {
+                        float before[3], at[3], next[3];
+                        pose_joint(w, tc[j - 1], before);
+                        pose_joint(w, tc[j], at);
+                        if (j + 1 < depth[thumb])
+                            pose_joint(w, tc[j + 1], next);
+                        else
+                            pose_true_tip(w, tc, depth[thumb], next);
+                        float prev[3], out[3], toward[3];
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            prev[k] = at[k] - before[k];
+                            out[k] = next[k] - at[k];
+                            toward[k] = centre[k] - at[k];
+                        }
+                        if (normalise3(prev) < 1e-4f ||
+                            dot3(out, out) < 1e-8f)
+                            continue;
+                        const float pa = dot3(out, prev);
+                        const float pt = dot3(toward, prev);
+                        float side[3];
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            side[k] = out[k] - pa * prev[k];
+                            toward[k] -= pt * prev[k];
+                        }
+                        const float sine = sqrtf(dot3(side, side) /
+                                                 dot3(out, out));
+                        if (dot3(side, toward) < 0.0f && sine > 0.17f)
+                            pose_rotate_subtree(w, tc[j], at,
+                                                rotation_between(out, prev));
+                    }
+                    thumb_done = true;
+                }
+            }
+            // Without bones: from where it is toward the curled index and
+            // middle (over their middle joints, as in a fist).
+            const float thumb_amount = rest_curl < 0.99f
+                ? (curl[0] - rest_curl) / (1.0f - rest_curl) : 0.0f;
+            if (!thumb_done && thumb_amount > 0.05f)
+            {
+                float tip[3], a[3], b[3], target[3];
+                pose_chain_tip(w, chains[thumb], depth[thumb], tip);
+                const int ji = depth[index] > 1 ? 1 : 0;
+                const int jm = depth[rest[0]] > 1 ? 1 : 0;
+                pose_joint(w, chains[index][ji], a);
+                pose_joint(w, chains[rest[0]][jm], b);
+                const float t = thumb_amount > 1.0f ? 1.0f : thumb_amount;
+                for (int k = 0; k < 3; ++k)
+                    target[k] = tip[k] + (0.5f * (a[k] + b[k]) - tip[k]) * t;
+                pose_ccd(w, chains[thumb], depth[thumb], target);
+            }
+            if (index_joint_out)
+                pose_joint(w, chains[index][depth[index] - 1],
+                           index_joint_out);
+            if (index_tip_out)
+                pose_true_tip(w, chains[index], depth[index], index_tip_out);
+            return true;
+        }
+
+        // A recorded pose (board pinch / flick) on one hand. Writes the
+        // index finger's last joint (where she is held) and its tip (the
+        // flick's hit point), in the drawn hand's space.
+        bool pose_recorded(PoseWork& w, int wrist, const float palm_local[3],
+                           int hand, const FingerPose& pose,
+                           float* index_joint_out, float* index_tip_out)
+        {
+            const float splay[4] = { 0.4f, 0.4f, 0.4f, 0.4f };
+            const bool ok = pose_fingers(w, wrist, palm_local, hand,
+                                         pose.curl, splay, pose.spread,
+                                         pose.thumb, index_joint_out,
+                                         index_tip_out);
+            static bool reported[2] = { false, false };
+            if (!reported[ok ? 1 : 0])
+            {
+                reported[ok ? 1 : 0] = true;
+                log("board: %s hand %s", hand == 0 ? "left" : "right", ok
+                    ? "posed from a recorded finger pose (pinch: take 1, "
+                      "flick: take 4)"
+                    : "could not take a recorded finger pose; the older "
+                      "procedural pose is used");
+            }
+            return ok;
+        }
+
+        // Why a hand is (not) following the fingers, logged on change.
+        void finger_status(int hand, int view, const char* why)
+        {
+            static const char* last[2][3] = { { "", "", "" },
+                                              { "", "", "" } };
+            const char* now = why ? why : "posed from the finger data";
+            if (hand < 0 || hand > 1 || view < 0 || view > 2 ||
+                last[hand][view] == now)
+                return;
+            last[hand][view] = now;
+            static const char* views[3] = { "third person",
+                                             "first-person hands",
+                                             "first-person full body" };
+            log("fingers: %s hand, %s -- %s", hand == 0 ? "left" : "right",
+                views[view], now);
+        }
+
+        bool apply_finger_tracking(int hand, int wrist,
+                                   const ModelSegment* segments, int count,
+                                   int virtual_count, float* matrices,
+                                   const char* blocked, int view)
+        {
+            float curl[5], splay[4], palm_local[3], spread[4], thumb[4];
+            const char* why = blocked;
+            if (!why && !vr_input_finger_pose(hand == 0, curl, splay))
+                why = "no finger data from SteamVR";
+            const bool have_spread = !why &&
+                vr_input_finger_spread(hand == 0, spread);
+            const bool have_thumb = !why &&
+                vr_input_thumb_target(hand == 0, thumb);
+            if (!why && !first_person_palm_local(hand, palm_local))
+                why = "her palm is not measured yet";
+            if (!why && (wrist < 0 || wrist >= count ||
+                         !pose_begin(g_pose_work, segments, count,
+                                     virtual_count, matrices)))
+                why = "no wrist / too many segments";
+            if (!why && !pose_fingers(g_pose_work, wrist, palm_local, hand,
+                                      curl, splay,
+                                      have_spread ? spread : nullptr,
+                                      have_thumb ? thumb : nullptr))
+                why = "her finger chains were not found";
+            if (!why)
+                pose_commit(g_pose_work, matrices);
+            finger_status(hand, view, why);
+            return !why;
         }
 
         // Lara's hips: walk up from her two lowest leaf bones (the feet) to
@@ -7363,7 +9255,8 @@ namespace trlvr
 
         bool third_person_gear_hud_hidden()
         {
-            return config().immersive_controls && !g_first_person_active &&
+            return config().immersive_controls &&
+                   !config().gear_menu_radial && !g_first_person_active &&
                    !g_first_person_instance;
         }
 
@@ -7838,6 +9731,24 @@ namespace trlvr
                     }
                     // Finger debug overrides; else the holding hand pinches.
                     float palm_local[3];
+                    {
+                        float joint[3];
+                        if (g_pluck.hand != hand &&
+                            first_person_palm_local(hand, palm_local) &&
+                            pose_begin(g_pose_work, segments, count,
+                                       virtual_count, matrices) &&
+                            pose_index_joint(g_pose_work, wrist[hand],
+                                             palm_local, joint))
+                        {
+                            const float grow = camera_world_scale_factor();
+                            for (int k = 0; k < 3; ++k)
+                                g_index_seen[hand].point[k] =
+                                    camera_to_world.m[3][k] +
+                                    (joint[k] - camera_to_world.m[3][k]) *
+                                    grow;
+                            g_index_seen[hand].time = GetTickCount();
+                        }
+                    }
                     if (g_finger_debug_curl)
                     {
                         if (pose_begin(g_pose_work, segments, count,
@@ -7847,13 +9758,21 @@ namespace trlvr
                     }
                     else
                     {
+                        // The pinch and the flick take the recorded poses
+                        // (user 2026-10-10); the procedural ones remain if
+                        // a recorded pose cannot be placed.
                         float pinch[3];
                         if (g_pluck.hand == hand &&
                             first_person_palm_local(hand, palm_local) &&
                             pose_begin(g_pose_work, segments, count,
                                        virtual_count, matrices) &&
-                            pose_pinch(g_pose_work, wrist[hand], palm_local,
-                                       hand, pinch))
+                            (pose_recorded(g_pose_work, wrist[hand],
+                                           palm_local, hand, kPosePinch,
+                                           pinch, nullptr) ||
+                             (pose_begin(g_pose_work, segments, count,
+                                         virtual_count, matrices) &&
+                              pose_pinch(g_pose_work, wrist[hand],
+                                         palm_local, hand, pinch))))
                         {
                             pose_commit(g_pose_work, matrices);
                             // Drawn at 1/F about the head; the projection
@@ -7864,15 +9783,25 @@ namespace trlvr
                                     (pinch[k] - camera_to_world.m[3][k]) *
                                     grow;
                             g_pluck.pinch_time = GetTickCount();
+                            for (int k = 0; k < 3; ++k)
+                                g_index_seen[hand].point[k] = g_pluck.pinch[k];
+                            g_index_seen[hand].time = g_pluck.pinch_time;
                         }
                         else if (hand == 0 && g_pluck.hand != hand &&
                                  g_flick.phase != 0 &&
                                  first_person_palm_local(hand, palm_local) &&
                                  pose_begin(g_pose_work, segments, count,
                                             virtual_count, matrices) &&
-                                 pose_flick(g_pose_work, wrist[hand],
-                                            palm_local, hand, g_flick.amount,
-                                            g_flick.fist, pinch))
+                                 (pose_recorded(g_pose_work, wrist[hand],
+                                                palm_local, hand,
+                                                g_flick.pose, nullptr,
+                                                pinch) ||
+                                  (pose_begin(g_pose_work, segments, count,
+                                              virtual_count, matrices) &&
+                                   pose_flick(g_pose_work, wrist[hand],
+                                              palm_local, hand,
+                                              g_flick.amount, g_flick.fist,
+                                              pinch))))
                         {
                             pose_commit(g_pose_work, matrices);
                             const float grow = camera_world_scale_factor();
@@ -7892,6 +9821,13 @@ namespace trlvr
                             g_flick.tip_time = GetTickCount();
                             g_flick.tip_valid = true;
                         }
+                        else
+                            // Finger tracking; not while that hand holds
+                            // a weapon (the game's grip pose is right).
+                            apply_finger_tracking(hand, wrist[hand],
+                                segments, count, virtual_count, matrices,
+                                weapon_drawn_in_hand(hand)
+                                    ? "a weapon in that hand" : nullptr, 0);
                     }
                     // Palm centre and normal for the palm platform. The
                     // palm faces along wrist z (sign by hand from the
@@ -7956,47 +9892,16 @@ namespace trlvr
         }
 
 
-        // Where Lara hangs: the pinch point from the last hand draw (else the
-        // controller), plus the tunable board_hang offset (real metres,
-        // along the hand's own axes; numpad with board_pose_debug).
-        float g_hang_offset[3]{};
-        bool g_hang_loaded = false;
-
-        void hang_load()
-        {
-            if (g_hang_loaded)
-                return;
-            g_hang_loaded = true;
-            wchar_t path[MAX_PATH]{}, value[32]{};
-            swprintf_s(path, L"%strlvr.ini", exe_dir());
-            const wchar_t* keys[3] = { L"board_hang_x", L"board_hang_y",
-                                       L"board_hang_z" };
-            // Defaults: the user's tuning of 2026-10-02.
-            const wchar_t* defaults[3] = { L"-0.020", L"-0.005", L"0.005" };
-            for (int k = 0; k < 3; ++k)
-            {
-                GetPrivateProfileStringW(L"vr", keys[k], defaults[k], value,
-                                         32, path);
-                const float v = (float)_wtof(value);
-                g_hang_offset[k] = std::isfinite(v) && fabsf(v) < 0.5f
-                    ? v : 0.0f;
-            }
-        }
-
+        // Where Lara hangs: the last joint of the pinching index finger from
+        // the last hand draw (else the hand point the pickup used). The
+        // board_hang_x/y/z offset (tuned against the controller,
+        // 2026-10-02) is gone: the finger is the point (user 2026-10-09).
         void hang_point(float out[3])
         {
-            hang_load();
             const bool pinch = g_pluck.pinch_time &&
                 GetTickCount() - g_pluck.pinch_time < 250;
-            const float table =
-                config().world_scale * camera_world_scale_factor();
             for (int k = 0; k < 3; ++k)
-            {
                 out[k] = pinch ? g_pluck.pinch[k] : g_pluck.hand_pos[k];
-                for (int a = 0; a < 3; ++a)
-                    out[k] += g_hang_offset[a] * table *
-                              g_pluck.hand_axes[a][k];
-            }
         }
 
         // While Lara is held, she and everything linked to her (parent at
@@ -8261,6 +10166,1132 @@ namespace trlvr
         }
 
         void __cdecl detour_draw_instance_body(void* instance, int a2, float a3, int a4, int a5, void* model, float a7, void* colour, void* transform);
+        // Wall touch (user 2026-10-10, as in the newer Tomb Raider games).
+        // Third person, walking beside a wall with nothing drawn: her near
+        // hand goes out flat on the wall a little ahead of her shoulder and
+        // slides along it as she walks. Done on her drawn matrices only
+        // (like carry_apply): the arm is solved with the full-body two-bone
+        // solver, the hand turned palm to the wall, fingers forward and up,
+        // everything put back after the draw.
+        //
+        // Once per frame: her speed (instance position), the wall (three
+        // body probes from her chest, both sides, plus one lower), the
+        // weight easing in over ~0.3 s and out over ~0.25 s. The pose keeps
+        // its last body-relative target while fading out.
+        struct WallTouch
+        {
+            unsigned frame = 0xFFFFFFFFu;
+            LARGE_INTEGER last{};
+            float last_pos[3]{};
+            bool have_pos = false;
+            float velocity[3]{};        // smoothed, game units / s
+            int hand = -1;              // hand easing in or out
+            float weight = 0.0f;
+            bool want = false;
+            // Target, relative to the shoulder, in world axes (game units),
+            // and the wrist's world rotation.
+            float palm_offset[3]{};
+            Mat4 rotation;
+            // Her last walking direction (for the elbow once she stops).
+            float fwd[3] = { 1.0f, 0.0f, 0.0f };
+            // Stopping with a hand on the wall keeps it there 1.5 s (user
+            // 2026-10-10) before it eases back.
+            DWORD stopped_at = 0;
+            const char* blocked = "";
+            DWORD last_report = 0;
+            void* palm_model = nullptr;
+            float palm_local[2][3]{};
+            bool palm_valid[2] = { false, false };
+        };
+        WallTouch g_wall_touch;
+
+        struct WallTouchSave
+        {
+            float* matrices = nullptr;
+            int total = 0;
+            float full[512][16];
+        };
+
+        // The palm point in wrist space, as first_person_palm_local, for any
+        // model: halfway to the mean of the wrist's child (knuckle) joints.
+        bool wall_palm_local(void* model, const ModelSegment* segments,
+                             int count, const float* matrices, int hand,
+                             int wrist, float out[3])
+        {
+            WallTouch& t = g_wall_touch;
+            if (t.palm_model != model)
+            {
+                t.palm_model = model;
+                t.palm_valid[0] = t.palm_valid[1] = false;
+            }
+            if (!t.palm_valid[hand])
+            {
+                const Mat4 w = matrix_from_floats(matrices + wrist * 16);
+                float sum[3]{};
+                int children = 0;
+                for (int s = 0; s < count; ++s)
+                {
+                    if (s == wrist || segments[s].parent != wrist)
+                        continue;
+                    float d[3];
+                    for (int k = 0; k < 3; ++k)
+                        d[k] = matrices[s * 16 + 12 + k] - w.m[3][k];
+                    for (int j = 0; j < 3; ++j)
+                        sum[j] += d[0] * w.m[j][0] + d[1] * w.m[j][1] +
+                                  d[2] * w.m[j][2];
+                    ++children;
+                }
+                if (!children)
+                    return false;
+                for (int j = 0; j < 3; ++j)
+                    t.palm_local[hand][j] = 0.5f * sum[j] / children;
+                t.palm_valid[hand] = true;
+            }
+            for (int k = 0; k < 3; ++k)
+                out[k] = t.palm_local[hand][k];
+            return true;
+        }
+
+        bool lara_is_drawn_lara(void* instance, void* model, void** out_model)
+        {
+            unsigned char* inst = static_cast<unsigned char*>(instance);
+            if (instance != *reinterpret_cast<void**>(kPlayerInstance))
+                return false;
+            unsigned char* obj = *reinterpret_cast<unsigned char**>(
+                inst + kOffInstanceObject);
+            if (!obj)
+                return false;
+            const char* name = *reinterpret_cast<const char**>(
+                obj + kOffObjectName);
+            if (!name || (strcmp(name, "lara") != 0 &&
+                          strncmp(name, "lara_", 5) != 0))
+                return false;
+            const int num_models = *reinterpret_cast<short*>(
+                obj + kOffObjectNumModels);
+            void** models = *reinterpret_cast<void***>(
+                obj + kOffObjectModelList);
+            int index = *reinterpret_cast<signed char*>(
+                inst + kOffCurrentRenderModel);
+            if (index < 0 || index >= num_models)
+                index = *reinterpret_cast<signed char*>(
+                    inst + kOffCurrentBaseModel);
+            if (!models || num_models <= 0 || num_models > 32 ||
+                index < 0 || index >= num_models || !models[index])
+                return false;
+            if (model && model != models[index])
+                return false;
+            *out_model = models[index];
+            return true;
+        }
+
+        // Probe sideways from `from` along `dir`; the hit's distance along
+        // dir, or -1.
+        float wall_probe(const float* from, const float* dir, float range,
+                         float* hit)
+        {
+            if (!body_probe(from, dir, range, hit))
+                return -1.0f;
+            float d = 0.0f;
+            for (int k = 0; k < 3; ++k)
+                d += (hit[k] - from[k]) * dir[k];
+            return d;
+        }
+
+        // Once per frame: whether and where the hand should touch.
+        void wall_touch_update(const ModelSegment* segments, int count,
+                               const float* matrices, void* model,
+                               void* instance, const int shoulder[2],
+                               const int elbow[2], const int wrist[2])
+        {
+            WallTouch& t = g_wall_touch;
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            float dt = t.last.QuadPart && frequency.QuadPart
+                ? (float)((double)(now.QuadPart - t.last.QuadPart) /
+                          (double)frequency.QuadPart)
+                : 0.0f;
+            t.last = now;
+            if (!(dt > 0.0f) || dt > 0.25f)
+                dt = 0.0f;
+            const float metre = config().world_scale;
+
+            // Speed from her instance position.
+            const float* pos = reinterpret_cast<const float*>(
+                static_cast<const unsigned char*>(instance) + 0x10);
+            if (t.have_pos && dt > 0.0f)
+            {
+                const float a = fminf(1.0f, dt / 0.2f);
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float v = (pos[k] - t.last_pos[k]) / dt;
+                    if (std::isfinite(v) && fabsf(v) < 30.0f * metre)
+                        t.velocity[k] += (v - t.velocity[k]) * a;
+                }
+            }
+            for (int k = 0; k < 3; ++k)
+                t.last_pos[k] = pos[k];
+            t.have_pos = true;
+            const float speed = sqrtf(t.velocity[0] * t.velocity[0] +
+                                      t.velocity[1] * t.velocity[1]) / metre;
+
+            bool want = true;
+            const char* blocked = "";
+            bool cinematic = false;
+            __try
+            {
+                cinematic =
+                    reinterpret_cast<PFN_CinematicPlaying>(
+                        kCinematicPlaying)() ||
+                    reinterpret_cast<PFN_CinematicPlaying>(
+                        kResidentCinematicPlaying)();
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                cinematic = true;
+            }
+            const TraversalProbe probe = first_person_traversal_probe(instance);
+            if (cinematic)
+                want = false, blocked = "cutscene";
+            else if (ui_menu_active())
+                want = false, blocked = "menu";
+            else if (retail_weapons_out())
+                want = false, blocked = "weapons out";
+            else if (probe.kind != TraversalGround || probe.water ||
+                     probe.attached)
+                want = false, blocked = "not on the ground";
+            else if (speed < 0.3f)
+                want = false, blocked = "standing";
+            else if (speed > config().wall_touch_max_speed)
+                want = false, blocked = "running";
+
+            // Her facing from the walk, her left from the shoulders.
+            float fwd[3] = { t.velocity[0], t.velocity[1], 0.0f };
+            float S[2][3], E[2][3], W[2][3];
+            for (int h = 0; h < 2; ++h)
+                for (int k = 0; k < 3; ++k)
+                {
+                    S[h][k] = matrices[shoulder[h] * 16 + 12 + k];
+                    E[h][k] = matrices[elbow[h] * 16 + 12 + k];
+                    W[h][k] = matrices[wrist[h] * 16 + 12 + k];
+                }
+            const float up[3] = { 0.0f, 0.0f, 1.0f };
+            float left[3] = { -fwd[1], fwd[0], 0.0f };   // up x fwd
+            if (want && (normalise3(fwd) < 1.0e-3f ||
+                         normalise3(left) < 1.0e-3f))
+                want = false, blocked = "no direction";
+            if (want)
+                for (int k = 0; k < 3; ++k)
+                    t.fwd[k] = fwd[k];
+
+            int best_hand = -1;
+            float best_distance = 1.0e9f;
+            float best_offset[3]{};
+            Mat4 best_rotation = Mat4::identity();
+            for (int side = 0; want && side < 2; ++side)
+            {
+                // side 0 = her left (+left), 1 = right.
+                float dir[3];
+                for (int k = 0; k < 3; ++k)
+                    dir[k] = side == 0 ? left[k] : -left[k];
+                // Which hand is on that side.
+                float across[3];
+                for (int k = 0; k < 3; ++k)
+                    across[k] = S[0][k] - S[1][k];
+                const int hand =
+                    (across[0] * dir[0] + across[1] * dir[1] > 0.0f) ? 0 : 1;
+                const float* sh = S[hand];
+                float mid[3];
+                for (int k = 0; k < 3; ++k)
+                    mid[k] = 0.5f * (S[0][k] + S[1][k]);
+                mid[2] = sh[2] - 0.05f * metre;
+                const float range = 0.9f * metre;
+                float a_from[3], b_from[3], c_from[3], ha[3], hb[3], hc[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    a_from[k] = mid[k] + fwd[k] * 0.32f * metre;
+                    b_from[k] = mid[k] + fwd[k] * 0.06f * metre;
+                    c_from[k] = mid[k] + fwd[k] * 0.20f * metre -
+                                up[k] * 0.35f * metre;
+                }
+                const float da = wall_probe(a_from, dir, range, ha);
+                const float db = wall_probe(b_from, dir, range, hb);
+                if (da < 0.0f || db < 0.0f)
+                    continue;
+                // The wall runs along her walk (within 35 degrees).
+                float tangent[3] = { ha[0] - hb[0], ha[1] - hb[1], 0.0f };
+                if (normalise3(tangent) < 1.0e-3f ||
+                    fabsf(dot3(tangent, fwd)) < 0.82f)
+                    continue;
+                // Normal toward her.
+                float n[3] = { tangent[1], -tangent[0], 0.0f };
+                if (dot3(n, dir) > 0.0f)
+                    for (float& v : n)
+                        v = -v;
+                // A wall, not a rail: it goes on below the hand.
+                const float dc = wall_probe(c_from, dir, range, hc);
+                if (dc < 0.0f || dc > fmaxf(da, db) + 0.15f * metre)
+                    continue;
+                // The palm: ahead of the shoulder, a little below it, on
+                // the wall plane, 2 cm off it.
+                float q[3];
+                for (int k = 0; k < 3; ++k)
+                    q[k] = sh[k] + fwd[k] * 0.22f * metre -
+                           up[k] * 0.06f * metre;
+                float off = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    off += (q[k] - ha[k]) * n[k];
+                float palm[3];
+                for (int k = 0; k < 3; ++k)
+                    palm[k] = q[k] - n[k] * off + n[k] * 0.02f * metre;
+                // Reach: the wall at least 8 cm out from the shoulder and
+                // within 90% of her arm.
+                float upper_v[3], lower_v[3], reach_v[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    upper_v[k] = E[hand][k] - sh[k];
+                    lower_v[k] = W[hand][k] - E[hand][k];
+                    reach_v[k] = palm[k] - sh[k];
+                }
+                const float arm = sqrtf(dot3(upper_v, upper_v)) +
+                                  sqrtf(dot3(lower_v, lower_v));
+                float out_of_shoulder = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    out_of_shoulder += (palm[k] - sh[k]) * dir[k];
+                if (out_of_shoulder < 0.08f * metre ||
+                    sqrtf(dot3(reach_v, reach_v)) > 0.9f * arm)
+                    continue;
+                // The hand: palm into the wall, fingers forward and up.
+                float palm_local[3];
+                if (!wall_palm_local(model, segments, count, matrices, hand,
+                                     wrist[hand], palm_local))
+                    continue;
+                float a[3] = { palm_local[0], palm_local[1], palm_local[2] };
+                if (normalise3(a) < 1.0e-4f)
+                    continue;
+                // Palm side: wrist -z for both hands here (user test
+                // 2026-10-10: +z put the back of the left hand to the wall;
+                // the right was right).
+                float b[3] = { 0.0f, 0.0f, -1.0f };
+                const float ab = dot3(a, b);
+                for (int k = 0; k < 3; ++k)
+                    b[k] -= ab * a[k];
+                if (normalise3(b) < 1.0e-4f)
+                    continue;
+                const float c[3] = { a[1] * b[2] - a[2] * b[1],
+                                     a[2] * b[0] - a[0] * b[2],
+                                     a[0] * b[1] - a[1] * b[0] };
+                float A[3], B[3] = { -n[0], -n[1], -n[2] };
+                // Fingers ~35 degrees up from her walk.
+                for (int k = 0; k < 3; ++k)
+                    A[k] = fwd[k] * 0.82f + up[k] * 0.57f;
+                const float ab2 = dot3(A, B);
+                for (int k = 0; k < 3; ++k)
+                    A[k] -= ab2 * B[k];
+                if (normalise3(A) < 1.0e-4f)
+                    continue;
+                const float C[3] = { A[1] * B[2] - A[2] * B[1],
+                                     A[2] * B[0] - A[0] * B[2],
+                                     A[0] * B[1] - A[1] * B[0] };
+                Mat4 rot = Mat4::identity();
+                for (int r = 0; r < 3; ++r)
+                    for (int k = 0; k < 3; ++k)
+                        rot.m[r][k] = a[r] * A[k] + b[r] * B[k] + c[r] * C[k];
+                // The wrist so that the palm lands on `palm`.
+                float wrist_at[3];
+                for (int k = 0; k < 3; ++k)
+                    wrist_at[k] = palm[k] - (palm_local[0] * rot.m[0][k] +
+                                             palm_local[1] * rot.m[1][k] +
+                                             palm_local[2] * rot.m[2][k]);
+                if (da < best_distance)
+                {
+                    best_distance = da;
+                    best_hand = hand;
+                    for (int k = 0; k < 3; ++k)
+                        best_offset[k] = wrist_at[k] - sh[k];
+                    best_rotation = rot;
+                }
+            }
+            if (want && best_hand < 0)
+                want = false, blocked = "no wall in reach";
+
+            // Stopped with the hand on the wall: it stays 1.5 s. A wall
+            // lost for a moment (bumps in the rock; log 2026-10-10: gaps
+            // of ~70 ms) keeps it 0.3 s.
+            const DWORD tick = GetTickCount();
+            const bool stopped = strcmp(blocked, "standing") == 0;
+            const bool gap = strcmp(blocked, "no wall in reach") == 0;
+            const bool resting = !want && t.hand >= 0 && t.weight > 0.0f &&
+                (stopped || gap) && (t.want || t.stopped_at);
+            if (!resting)
+                t.stopped_at = 0;
+            else if (!t.stopped_at)
+                t.stopped_at = tick;
+            const bool hold = resting &&
+                tick - t.stopped_at < (stopped ? 1500u : 300u);
+
+            // Ease in and out; a new side only once the old hand is down.
+            const float in_rate = 3.5f, out_rate = 4.0f;
+            if (want && (t.hand < 0 || t.hand == best_hand ||
+                         t.weight <= 0.0f))
+            {
+                if (t.hand != best_hand || t.weight <= 0.0f)
+                {
+                    for (int k = 0; k < 3; ++k)
+                        t.palm_offset[k] = best_offset[k];
+                    t.rotation = best_rotation;
+                }
+                t.hand = best_hand;
+                // Follow the wall smoothly (~80 ms).
+                const float a = dt > 0.0f ? fminf(1.0f, dt / 0.08f) : 1.0f;
+                for (int k = 0; k < 3; ++k)
+                    t.palm_offset[k] += (best_offset[k] - t.palm_offset[k]) * a;
+                t.rotation = best_rotation;
+                t.weight = fminf(1.0f, t.weight + in_rate * dt);
+            }
+            else if (!hold)
+            {
+                t.weight = fmaxf(0.0f, t.weight - out_rate * dt);
+                if (t.weight <= 0.0f)
+                    t.hand = -1;
+            }
+            const bool touching = (want && t.hand == best_hand) || hold;
+            if (touching != t.want || (strcmp(blocked, t.blocked) != 0 &&
+                                       GetTickCount() - t.last_report > 4000))
+            {
+                t.last_report = GetTickCount();
+                if (touching)
+                    log("wall touch: %s hand on the wall (%.2f m away, "
+                        "walking %.2f m/s)", best_hand == 0 ? "left"
+                                                            : "right",
+                        best_distance / metre, speed);
+                else if (t.want)
+                    log("wall touch: off (%s, %.2f m/s)", blocked, speed);
+            }
+            t.want = touching;
+            t.blocked = blocked;
+        }
+
+        // Lara's drawn arm onto the wall; false when nothing was changed.
+        bool wall_touch_apply(void* instance, void* model,
+                              WallTouchSave* save)
+        {
+            save->matrices = nullptr;
+            if (!config().wall_touch || g_first_person_active ||
+                g_first_person_instance || !instance ||
+                g_pluck.hand >= 0 || g_pluck.palm >= 0)
+                return false;
+            void* draw_model = nullptr;
+            ModelSegment* segments = nullptr;
+            float* matrices = nullptr;
+            int count = 0, virtual_count = 0;
+            int shoulder[2], elbow[2], wrist[2];
+            __try
+            {
+                if (!lara_is_drawn_lara(instance, model, &draw_model))
+                    return false;
+                unsigned char* m = static_cast<unsigned char*>(draw_model);
+                count = *reinterpret_cast<int*>(m + kOffModelNumSegments);
+                virtual_count = *reinterpret_cast<int*>(
+                    m + kOffModelNumVirtSegments);
+                segments = *reinterpret_cast<ModelSegment**>(
+                    m + kOffModelSegments);
+                matrices = *reinterpret_cast<float**>(
+                    static_cast<unsigned char*>(instance) +
+                    kOffInstanceMatrices);
+                const unsigned char* prop =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerProp);
+                if (!prop)
+                    return false;
+                const unsigned offs[2][3] = {
+                    { kOffPlayerPropLeftShoulder, kOffPlayerPropLeftElbow,
+                      kOffPlayerPropLeftWrist },
+                    { kOffPlayerPropRightShoulder, kOffPlayerPropRightElbow,
+                      kOffPlayerPropRightWrist } };
+                for (int h = 0; h < 2; ++h)
+                {
+                    shoulder[h] = *reinterpret_cast<const int*>(
+                        prop + offs[h][0]);
+                    elbow[h] = *reinterpret_cast<const int*>(prop + offs[h][1]);
+                    wrist[h] = *reinterpret_cast<const int*>(prop + offs[h][2]);
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+            if (!segments || !matrices || count <= 0 || virtual_count < 0 ||
+                count + virtual_count > 512)
+                return false;
+            for (int h = 0; h < 2; ++h)
+                if (shoulder[h] < 0 || shoulder[h] >= count || elbow[h] < 0 ||
+                    elbow[h] >= count || wrist[h] < 0 || wrist[h] >= count)
+                    return false;
+
+            WallTouch& t = g_wall_touch;
+            __try
+            {
+                if (t.frame != g_present_count)
+                {
+                    t.frame = g_present_count;
+                    wall_touch_update(segments, count, matrices, draw_model,
+                                      instance, shoulder, elbow, wrist);
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+            const int hand = t.hand;
+            const float weight = t.weight;
+            if (hand < 0 || weight <= 0.01f)
+                return false;
+
+            const int total = count + virtual_count;
+            __try
+            {
+                memcpy(save->full, matrices, sizeof(float) * 16 * total);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+            save->matrices = matrices;
+            save->total = total;
+            const float (*saved)[16] = save->full;
+
+            const int s = shoulder[hand], e = elbow[hand], w = wrist[hand];
+            float S[3], E[3], W[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                S[k] = saved[s][12 + k];
+                E[k] = saved[e][12 + k];
+                W[k] = saved[w][12 + k];
+            }
+            // The wrist target, blended from where the animation has it.
+            const Mat4 current = matrix_from_floats(saved[w]);
+            Mat4 cur_rot = current;
+            cur_rot.m[3][0] = cur_rot.m[3][1] = cur_rot.m[3][2] = 0.0f;
+            // Rows normalised (the matrices are rigid; guard any scale).
+            for (int r = 0; r < 3; ++r)
+                normalise3(cur_rot.m[r]);
+            Mat4 full_delta = rigid_inverse(cur_rot) * t.rotation;
+            full_delta.m[3][0] = full_delta.m[3][1] = full_delta.m[3][2] = 0.0f;
+            const Mat4 delta_rot = rotation_fraction(full_delta, weight);
+            float target[3];
+            for (int k = 0; k < 3; ++k)
+                target[k] = W[k] + (S[k] + t.palm_offset[k] - W[k]) * weight;
+
+            // Elbow down and back, blended from the animated elbow.
+            float upper_v[3], lower_v[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                upper_v[k] = E[k] - S[k];
+                lower_v[k] = W[k] - E[k];
+            }
+            const float l1 = sqrtf(dot3(upper_v, upper_v));
+            const float l2 = sqrtf(dot3(lower_v, lower_v));
+            const float* fwd = t.fwd;
+            float hint[3] = { -0.5f * fwd[0], -0.5f * fwd[1], -1.0f };
+            normalise3(hint);
+            float now_dir[3] = { upper_v[0], upper_v[1], upper_v[2] };
+            normalise3(now_dir);
+            float bend[3];
+            for (int k = 0; k < 3; ++k)
+                bend[k] = now_dir[k] + (hint[k] - now_dir[k]) * weight;
+            if (normalise3(bend) < 1.0e-4f)
+                memcpy(bend, now_dir, sizeof(bend));
+            float fake_e[3], fake_w[3], solved_e[3], solved_w[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                fake_e[k] = S[k] + bend[k] * l1;
+                fake_w[k] = fake_e[k] + bend[k] * l2;
+            }
+            if (!solve_two_bone_arm(S, fake_e, fake_w, target, solved_e,
+                                    solved_w))
+            {
+                save->matrices = nullptr;
+                return false;
+            }
+            float from1[3], to1[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                from1[k] = E[k] - S[k];
+                to1[k] = solved_e[k] - S[k];
+            }
+            const Mat4 upper = translation(-S[0], -S[1], -S[2]) *
+                               rotation_between(from1, to1) *
+                               translation(S[0], S[1], S[2]);
+            float w1[3];
+            for (int k = 0; k < 3; ++k)
+                w1[k] = W[0] * upper.m[0][k] + W[1] * upper.m[1][k] +
+                        W[2] * upper.m[2][k] + upper.m[3][k];
+            float from2[3], to2[3];
+            for (int k = 0; k < 3; ++k)
+            {
+                from2[k] = w1[k] - solved_e[k];
+                to2[k] = solved_w[k] - solved_e[k];
+            }
+            const Mat4 forearm = upper *
+                translation(-solved_e[0], -solved_e[1], -solved_e[2]) *
+                rotation_between(from2, to2) *
+                translation(solved_e[0], solved_e[1], solved_e[2]);
+            // Half the hand's turn about the forearm goes into the forearm
+            // (user 2026-10-10: the turned hand needs "her wrist and forearm
+            // ... rotated"), so the wrist does not look wrung.
+            Mat4 forearm_twisted = forearm;
+            {
+                float f[3];
+                for (int k = 0; k < 3; ++k)
+                    f[k] = solved_w[k] - solved_e[k];
+                Mat4 follow = forearm;
+                follow.m[3][0] = follow.m[3][1] = follow.m[3][2] = 0.0f;
+                const Mat4 x = rigid_inverse(follow) * delta_rot;
+                float v[3] = { -f[1], f[0], 0.0f };
+                if (normalise3(f) > 1.0e-4f)
+                {
+                    if (normalise3(v) < 1.0e-4f)
+                    {
+                        v[0] = 1.0f;
+                        v[1] = v[2] = 0.0f;
+                    }
+                    float vp[3];
+                    for (int k = 0; k < 3; ++k)
+                        vp[k] = v[0] * x.m[0][k] + v[1] * x.m[1][k] +
+                                v[2] * x.m[2][k];
+                    const float along = dot3(vp, f);
+                    for (int k = 0; k < 3; ++k)
+                        vp[k] -= along * f[k];
+                    const float cr[3] = { v[1] * vp[2] - v[2] * vp[1],
+                                          v[2] * vp[0] - v[0] * vp[2],
+                                          v[0] * vp[1] - v[1] * vp[0] };
+                    const float angle = atan2f(dot3(cr, f), dot3(v, vp));
+                    if (std::isfinite(angle))
+                        forearm_twisted = forearm *
+                            translation(-solved_e[0], -solved_e[1],
+                                        -solved_e[2]) *
+                            axis_rotation(f, 0.5f * angle) *
+                            translation(solved_e[0], solved_e[1],
+                                        solved_e[2]);
+                }
+            }
+            // The hand: turned about the wrist, then moved to the solved
+            // wrist.
+            const Mat4 hand_delta = translation(-W[0], -W[1], -W[2]) *
+                delta_rot * translation(solved_w[0], solved_w[1], solved_w[2]);
+
+            static Mat4 xform[512];
+            for (int seg = 0; seg < count; ++seg)
+            {
+                xform[seg] = Mat4::identity();
+                if (!segment_is_in_head_subtree(segments, count, seg, s))
+                    continue;
+                if (segment_is_in_head_subtree(segments, count, seg, w))
+                    xform[seg] = hand_delta;
+                else if (segment_is_in_head_subtree(segments, count, seg, e))
+                    xform[seg] = forearm_twisted;
+                else
+                    xform[seg] = upper;
+            }
+            __try
+            {
+                for (int seg = 0; seg < count; ++seg)
+                {
+                    if (!segment_is_in_head_subtree(segments, count, seg, s))
+                        continue;
+                    const Mat4 moved =
+                        matrix_from_floats(saved[seg]) * xform[seg];
+                    memcpy(matrices + seg * 16, &moved.m[0][0],
+                           sizeof(moved.m));
+                }
+                const ModelVirtualSegment* virtuals =
+                    reinterpret_cast<const ModelVirtualSegment*>(
+                        segments + count);
+                if (g_virtual_blend_mode < 0)
+                {
+                    double error[2] = { 0.0, 0.0 };
+                    for (int v = 0; v < virtual_count; ++v)
+                    {
+                        const int a = virtuals[v].index;
+                        const int b = virtuals[v].weight_index;
+                        const float wt = virtuals[v].weight;
+                        if (a < 0 || a >= count || b < 0 || b >= count)
+                            continue;
+                        for (int i = 0; i < 16; ++i)
+                        {
+                            const float value = saved[count + v][i];
+                            error[0] += fabs(value -
+                                ((1.0f - wt) * saved[a][i] + wt * saved[b][i]));
+                            error[1] += fabs(value -
+                                (wt * saved[a][i] + (1.0f - wt) * saved[b][i]));
+                        }
+                    }
+                    g_virtual_blend_mode = error[1] < error[0] ? 1 : 0;
+                }
+                for (int v = 0; v < virtual_count; ++v)
+                {
+                    const int a = virtuals[v].index;
+                    const int b = virtuals[v].weight_index;
+                    if (a < 0 || a >= count || b < 0 || b >= count)
+                        continue;
+                    const bool arm_a =
+                        segment_is_in_head_subtree(segments, count, a, s);
+                    const bool arm_b =
+                        segment_is_in_head_subtree(segments, count, b, s);
+                    if (!arm_a && !arm_b)
+                        continue;
+                    const float wt = virtuals[v].weight;
+                    const float wa = g_virtual_blend_mode ? wt : 1.0f - wt;
+                    const float wb = 1.0f - wa;
+                    Mat4 blend;
+                    for (int r = 0; r < 4; ++r)
+                        for (int c = 0; c < 4; ++c)
+                            blend.m[r][c] = wa * xform[a].m[r][c] +
+                                            wb * xform[b].m[r][c];
+                    const Mat4 moved =
+                        matrix_from_floats(saved[count + v]) * blend;
+                    memcpy(matrices + (count + v) * 16, &moved.m[0][0],
+                           sizeof(moved.m));
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                memcpy(matrices, save->full, sizeof(float) * 16 * total);
+                save->matrices = nullptr;
+                return false;
+            }
+            return true;
+        }
+
+        void wall_touch_restore(WallTouchSave* save)
+        {
+            if (!save->matrices)
+                return;
+            memcpy(save->matrices, save->full,
+                   sizeof(float) * 16 * save->total);
+            save->matrices = nullptr;
+        }
+
+        // The posed arm stays in her matrices for the rest of the frame
+        // (user 2026-10-10: her wet-skin layer is drawn from them after her
+        // own draw, and kept the old arm). Posed once per frame at her first
+        // draw. If the game has not animated her by the next frame (paused),
+        // her matrices still hold the pose and are put back first, so it
+        // never builds on itself. The controller hands (third person) are
+        // drawn on her own matrices, swapped in around them.
+        struct WallTouchKeep
+        {
+            float* matrices = nullptr;
+            int total = 0;
+            unsigned frame = 0xFFFFFFFFu;
+            bool active = false;
+            float written[512][16];
+        };
+        WallTouchSave g_wall_base;
+        WallTouchKeep g_wall_keep;
+
+        void wall_touch_frame(void* instance, void* model)
+        {
+            void* draw_model = nullptr;
+            float* matrices = nullptr;
+            __try
+            {
+                if (!instance ||
+                    !lara_is_drawn_lara(instance, model, &draw_model))
+                    return;
+                matrices = *reinterpret_cast<float**>(
+                    static_cast<unsigned char*>(instance) +
+                    kOffInstanceMatrices);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return;
+            }
+            WallTouchKeep& k = g_wall_keep;
+            if (k.frame == g_present_count)
+                return;
+            k.frame = g_present_count;
+            if (k.active)
+            {
+                k.active = false;
+                __try
+                {
+                    if (k.matrices == matrices &&
+                        memcmp(matrices, k.written,
+                               sizeof(float) * 16 * k.total) == 0)
+                        memcpy(matrices, g_wall_base.full,
+                               sizeof(float) * 16 * k.total);
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+            }
+            if (!wall_touch_apply(instance, model, &g_wall_base))
+                return;
+            __try
+            {
+                memcpy(k.written, g_wall_base.matrices,
+                       sizeof(float) * 16 * g_wall_base.total);
+                k.matrices = g_wall_base.matrices;
+                k.total = g_wall_base.total;
+                k.active = true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                wall_touch_restore(&g_wall_base);
+            }
+        }
+
+        // Her own arm back (true) or the pose again (false), around the
+        // third-person controller hands.
+        void wall_touch_swap(bool own)
+        {
+            WallTouchKeep& k = g_wall_keep;
+            if (!k.active || k.frame != g_present_count || !k.matrices)
+                return;
+            __try
+            {
+                memcpy(k.matrices, own ? g_wall_base.full : k.written,
+                       sizeof(float) * 16 * k.total);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                k.active = false;
+            }
+        }
+
+        // Pouch items as the game's own models (user 2026-10-11, second
+        // try). Lara already carries both as instances: Player::InvItems
+        // (PlayerData::work +0x3E8, 8 bytes each, pInst first) slot 6
+        // (+0x418) is the medipack -- g_healthpack in the log, 2026-10-11 --
+        // and slot 3 (+0x400) the grenades -- the
+        // instances the game shows in her hand when she uses one, with the
+        // count at pInst+0x23C -> +0x54 (0x005A2140). Nothing is born, so
+        // nothing can be picked up (2026-10-04: a born g_healthpack was
+        // collected at once, infinite medipacks) and no model is mixed with
+        // another object's data (the crash that followed). While Lara's
+        // first-person model is drawn, each item is drawn once more at its
+        // pouch or the hand holding it: its segment matrices, position and
+        // hide flags are set for that one DRAW_DrawInstance call and put
+        // back straight after. The outline (vr_submit) stays when there is
+        // no instance, the count is 0, or a draw ever faults.
+        struct PouchModel
+        {
+            void* instance = nullptr;   // last one logged
+            bool logged = false;
+            DWORD drawn_at = 0;         // our draw, for the outline
+            DWORD game_drawn_at = 0;    // the game drew it (in use)
+            bool disabled = false;
+            bool drawn_reported = false;
+        };
+        PouchModel g_pouch_models[2];   // 0 grenade, 1 medipack
+        const unsigned kPouchInvOffset[2] = { 0x400, 0x418 };
+        const char* const kPouchItemName[2] = { "grenade", "medipack" };
+
+        void* pouch_inventory_instance(int item, int* count)
+        {
+            *count = 0;
+            __try
+            {
+                const unsigned char* player =
+                    *reinterpret_cast<unsigned char* const*>(0x0111713C);
+                if (!player)
+                    return nullptr;
+                unsigned char* inst = *reinterpret_cast<unsigned char* const*>(
+                    player + kPouchInvOffset[item]);
+                if (!inst)
+                    return nullptr;
+                const unsigned char* data =
+                    *reinterpret_cast<unsigned char* const*>(inst + 0x23C);
+                *count = data ? *reinterpret_cast<const short*>(data + 0x54)
+                              : 0;
+                return inst;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return nullptr;
+            }
+        }
+
+        // The world pose of a pouch item: in its pouch a level (yaw-only)
+        // frame at the tuned point, in a hand the grip's rotation at
+        // Lara's palm.
+        bool pouch_item_world_pose(int item, Mat4* pose)
+        {
+            float body[3]{};
+            int held = -1;
+            if (!vr_input_pouch_item(item, body, &held))
+                return false;
+            Mat4 eye;
+            memcpy(&eye.m[0][0], static_cast<const unsigned char*>(
+                       kMainCamera) + kOffCwTransform, sizeof(eye.m));
+            Mat4 local = Mat4::identity();
+            if (held >= 0)
+            {
+                if (!vr_controller_grip_head_pose(held == 0, &local) &&
+                    !vr_controller_head_pose(held == 0, &local))
+                    return false;
+                float palm[3];
+                if (vr_hand_palm_head_position(held == 0, palm))
+                    for (int k = 0; k < 3; ++k)
+                        local.m[3][k] = palm[k];
+                *pose = local * eye;
+            }
+            else
+            {
+                float head[3]{};
+                if (!vr_body_point_head_position(body[0], body[1], body[2],
+                                                 head))
+                    return false;
+                const Mat4 at = translation(head[0], head[1], head[2]) * eye;
+                // A square level frame: the view's right made horizontal,
+                // world vertical, and forward their cross product, with the
+                // view's handedness and row lengths (2026-10-11: levelling
+                // each view axis on its own sheared the model when looking
+                // down).
+                Mat4 level = eye;
+                const float len[3] = {
+                    sqrtf(eye.m[0][0] * eye.m[0][0] + eye.m[0][1] * eye.m[0][1] +
+                          eye.m[0][2] * eye.m[0][2]),
+                    sqrtf(eye.m[1][0] * eye.m[1][0] + eye.m[1][1] * eye.m[1][1] +
+                          eye.m[1][2] * eye.m[1][2]),
+                    sqrtf(eye.m[2][0] * eye.m[2][0] + eye.m[2][1] * eye.m[2][1] +
+                          eye.m[2][2] * eye.m[2][2]) };
+                float r[3] = { eye.m[0][0], eye.m[0][1], 0.0f };
+                if (normalise3(r) > 1e-3f)
+                {
+                    const float v[3] = { 0.0f, 0.0f,
+                                         eye.m[1][2] < 0.0f ? -1.0f : 1.0f };
+                    float f[3] = { r[1] * v[2] - r[2] * v[1],
+                                   r[2] * v[0] - r[0] * v[2],
+                                   r[0] * v[1] - r[1] * v[0] };
+                    // Same handedness as the view (else the model mirrors).
+                    const float* a = eye.m[0];
+                    const float* b = eye.m[1];
+                    const float* c = eye.m[2];
+                    const float det_eye =
+                        a[0] * (b[1] * c[2] - b[2] * c[1]) -
+                        a[1] * (b[0] * c[2] - b[2] * c[0]) +
+                        a[2] * (b[0] * c[1] - b[1] * c[0]);
+                    const float det_level =
+                        r[0] * (v[1] * f[2] - v[2] * f[1]) -
+                        r[1] * (v[0] * f[2] - v[2] * f[0]) +
+                        r[2] * (v[0] * f[1] - v[1] * f[0]);
+                    if ((det_eye < 0.0f) != (det_level < 0.0f))
+                        for (int k = 0; k < 3; ++k)
+                            f[k] = -f[k];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        level.m[0][k] = r[k] * len[0];
+                        level.m[1][k] = v[k] * len[1];
+                        level.m[2][k] = f[k] * len[2];
+                    }
+                }
+                *pose = level;
+                for (int k = 0; k < 3; ++k)
+                    pose->m[3][k] = at.m[3][k];
+            }
+            for (int k = 0; k < 3; ++k)
+                if (!std::isfinite(pose->m[3][k]))
+                    return false;
+            return true;
+        }
+
+        // The game drew one of the pouch instances itself (Lara is using
+        // it): leave it to the game for a moment.
+        void pouch_note_game_draw(void* instance)
+        {
+            if (!instance)
+                return;
+            for (int item = 0; item < 2; ++item)
+                if (g_pouch_models[item].instance == instance)
+                    g_pouch_models[item].game_drawn_at = GetTickCount();
+        }
+
+        // One SEH frame per item draw. False: it faulted.
+        bool pouch_draw_one(int item, unsigned char* inst, const Mat4& pose,
+                            int a2, float a3, int a4, int a5)
+        {
+            __declspec(align(16)) static float buffer[16][16];
+            float** matrices_slot = reinterpret_cast<float**>(
+                inst + kOffInstanceMatrices);
+            float* game_matrices = nullptr;
+            __try
+            {
+                game_matrices = *matrices_slot;
+                unsigned char* object = *reinterpret_cast<unsigned char**>(
+                    inst + kOffInstanceObject);
+                if (!object)
+                    return true;
+                void** models = *reinterpret_cast<void***>(
+                    object + kOffObjectModelList);
+                const int nmodels = *reinterpret_cast<short*>(
+                    object + kOffObjectNumModels);
+                signed char* lod = reinterpret_cast<signed char*>(
+                    inst + kOffCurrentRenderModel);
+                int index = *lod;
+                if (index < 0 || index >= nmodels)
+                    index = *reinterpret_cast<signed char*>(
+                        inst + kOffCurrentBaseModel);
+                if (index < 0 || index >= nmodels)
+                    index = 0;
+                if (!models || nmodels <= 0 || nmodels > 32 || !models[index])
+                    return true;
+                unsigned char* m = static_cast<unsigned char*>(models[index]);
+                const int total =
+                    *reinterpret_cast<const int*>(m + kOffModelNumSegments) +
+                    *reinterpret_cast<const int*>(m + kOffModelNumVirtSegments);
+                if (total <= 0 || total > 16)
+                    return true;
+                // Keep the model's own segment offsets when the game has
+                // built them (segment 0 moved to the pose), else all at it.
+                Mat4 rebase = Mat4::identity();
+                bool relative = false;
+                if (game_matrices)
+                {
+                    const Mat4 first = matrix_from_floats(game_matrices);
+                    Mat4 inverse;
+                    relative = std::isfinite(first.m[3][0]) &&
+                               invert(first, &inverse);
+                    if (relative)
+                        rebase = inverse * pose;
+                }
+                for (int s = 0; s < total; ++s)
+                {
+                    const Mat4 moved = relative
+                        ? matrix_from_floats(game_matrices + s * 16) * rebase
+                        : pose;
+                    memcpy(buffer[s], &moved.m[0][0], sizeof(moved.m));
+                }
+                float* position = reinterpret_cast<float*>(inst + 0x10);
+                float saved_position[3];
+                memcpy(saved_position, position, sizeof(saved_position));
+                unsigned* a4_flags = reinterpret_cast<unsigned*>(inst + 0xA4);
+                unsigned* a8_flags = reinterpret_cast<unsigned*>(inst + 0xA8);
+                unsigned* no_draw = reinterpret_cast<unsigned*>(
+                    inst + kOffNoDrawGroups);
+                unsigned* fx_no_draw = reinterpret_cast<unsigned*>(
+                    inst + kOffFxNoDrawGroups);
+                const unsigned saved_a4 = *a4_flags, saved_a8 = *a8_flags;
+                const unsigned saved_dc = *no_draw, saved_e0 = *fx_no_draw;
+                const signed char saved_lod = *lod;
+
+                *matrices_slot = &buffer[0][0];
+                for (int k = 0; k < 3; ++k)
+                    position[k] = pose.m[3][k];
+                *a4_flags = saved_a4 & ~0x800u;
+                *a8_flags = saved_a8 & ~0x20000000u;
+                if (saved_dc == 0xFFFFFFFFu)
+                    *no_draw = 0;
+                if (saved_e0 == 0xFFFFFFFFu)
+                    *fx_no_draw = 0;
+                *lod = static_cast<signed char>(index);
+                g_draw_instance(inst, a2, a3, a4, a5, nullptr, 0.0f,
+                                nullptr, nullptr);
+                *lod = saved_lod;
+                *fx_no_draw = saved_e0;
+                *no_draw = saved_dc;
+                *a8_flags = saved_a8;
+                *a4_flags = saved_a4;
+                memcpy(position, saved_position, sizeof(saved_position));
+                *matrices_slot = game_matrices;
+
+                PouchModel& p = g_pouch_models[item];
+                p.drawn_at = GetTickCount();
+                if (!p.drawn_reported)
+                {
+                    p.drawn_reported = true;
+                    log("pouch models: %s drawn as the game's model (%d "
+                        "segments, %s)", kPouchItemName[item], total,
+                        relative ? "its own offsets" : "one pose");
+                }
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                // Never leave our buffer in the instance.
+                __try
+                {
+                    if (*matrices_slot == &buffer[0][0])
+                        *matrices_slot = game_matrices;
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+                return false;
+            }
+        }
+
+        void pouch_log_instance(int item, unsigned char* inst, int count)
+        {
+            __try
+            {
+                log("pouch models: %s instance %p (%s) count %d a4=%08X "
+                    "a8=%08X dc=%08X e0=%08X lod=%d/%d matrices=%p",
+                    kPouchItemName[item], inst, instance_name(inst),
+                    count,
+                    *reinterpret_cast<const unsigned*>(inst + 0xA4),
+                    *reinterpret_cast<const unsigned*>(inst + 0xA8),
+                    *reinterpret_cast<const unsigned*>(inst + kOffNoDrawGroups),
+                    *reinterpret_cast<const unsigned*>(
+                        inst + kOffFxNoDrawGroups),
+                    *reinterpret_cast<const signed char*>(
+                        inst + kOffCurrentRenderModel),
+                    *reinterpret_cast<const signed char*>(
+                        inst + kOffCurrentBaseModel),
+                    *reinterpret_cast<void* const*>(
+                        inst + kOffInstanceMatrices));
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+        }
+
+        // Called while Lara's first-person model is drawn.
+        void pouch_items_draw(int a2, float a3, int a4, int a5)
+        {
+            if (!config().immersive_controls || !g_draw_instance)
+                return;
+            for (int item = 0; item < 2; ++item)
+            {
+                PouchModel& p = g_pouch_models[item];
+                if (p.disabled)
+                    continue;
+                int count = 0;
+                unsigned char* inst = static_cast<unsigned char*>(
+                    pouch_inventory_instance(item, &count));
+                if (inst != p.instance || !p.logged)
+                {
+                    p.instance = inst;
+                    p.logged = true;
+                    if (inst)
+                        pouch_log_instance(item, inst, count);
+                    else
+                        log("pouch models: no %s instance (none carried); "
+                            "the outline shows", kPouchItemName[item]);
+                }
+                if (!inst || count <= 0 ||
+                    GetTickCount() - p.game_drawn_at < 300)
+                    continue;
+                Mat4 pose;
+                if (!pouch_item_world_pose(item, &pose))
+                    continue;
+                // The pouch medipack at 40% (user 2026-10-11: "60%
+                // smaller"); only this draw, level pickups are untouched.
+                if (item == 1)
+                    for (int row = 0; row < 3; ++row)
+                        for (int k = 0; k < 3; ++k)
+                            pose.m[row][k] *= 0.4f;
+                if (!pouch_draw_one(item, inst, pose, a2, a3, a4, a5))
+                {
+                    p.disabled = true;
+                    log("pouch models: drawing the %s faulted; the outline "
+                        "is used for the rest of the session",
+                        kPouchItemName[item]);
+                }
+            }
+        }
+
         void __cdecl detour_draw_instance(void* instance, int a2, float a3, int a4, int a5, void* model, float a7, void* colour, void* transform)
         {
             // Lara (first-person hand/body passes) apart from the rest.
@@ -8290,22 +11321,32 @@ namespace trlvr
                         a5, model, a7, colour, transform))
                     return;
                 if (g_first_person_active)
+                {
                     grip_prompt_follow_hand(instance, model);
+                    pouch_note_game_draw(instance);
+                }
                 static CarrySave carry;
                 const bool carried = carry_apply(instance, model, &carry);
+                if (!carried)
+                    wall_touch_frame(instance, model);
                 g_draw_instance(instance, a2, a3, a4, a5, model, a7,
                                 colour, transform);
                 if (carried)
                     carry_restore(&carry);
                 if (!g_first_person_active)
+                {
+                    wall_touch_swap(true);
                     third_person_draw_hands(instance, a2, a3, a4, a5, model,
                                             a7, colour, transform);
+                    wall_touch_swap(false);
+                }
                 return;
             }
             // Other Lara model variants can share the same instance. They
             // must not bring a second animated head into the headset view.
             if (model && model != g_first_person_model)
                 return;
+            pouch_items_draw(a2, a3, a4, a5);
 
             Mat4 controllers[2];
             if (!first_person_controller_world_pose(true, &controllers[0]) ||
@@ -8805,6 +11846,15 @@ namespace trlvr
                     hand, original_wrist,
                     grip.held ? grip.world_pose : controllers[hand]);
                 body_hand_delta[hand] = delta;
+                g_fp_hand_delta[hand] = delta;
+                g_fp_hand_delta_tick[hand] = GetTickCount();
+                // Finger tracking: not while the hand holds a ledge or a
+                // weapon (the game's own grip pose is right there).
+                g_fp_finger_block[hand] =
+                    grip.held ? "holding a ledge or bar"
+                    : weapon_drawn_in_hand(hand) ? "a weapon in that hand"
+                    : laras_long_gun_held() ? "a long gun is held"
+                    : nullptr;
                 if (full_body)
                     continue; // drawn with the body below
 
@@ -8831,6 +11881,9 @@ namespace trlvr
                            sizeof(moved.m));
                 }
 
+                apply_finger_tracking(hand, wrist, segments, count,
+                                      virtual_count, matrices,
+                                      g_fp_finger_block[hand], 1);
                 const uint64_t gpu_before = g_first_person_gpu_draw_count;
                 const int previous_cpu_hand = g_current_hand_cpu_draw;
                 g_current_hand_cpu_draw = hand;
@@ -9920,8 +12973,288 @@ namespace trlvr
 
         float g_view_prescale[2] = { 1.0f, 1.0f };
 
+        // Hardcore first person (a user's request, 2026-10-10): the view
+        // turns with Lara's body -- back flips, side flips, spins -- not
+        // kept level. Her pelvis (segment 0, the skeleton's root) against
+        // its upright reference, both in her own heading frame: the
+        // reference is learned slowly (2 s) while she is on the ground and
+        // within 25 degrees of it, so a standing pose's built-in tilt is
+        // not applied. At the current heading the body's turn in the world
+        // is B = Rz^T (Ref^T Local) Rz; the view is turned by it about the
+        // eye, before the head pose (apply_head_pose).
+        bool g_hardcore_valid = false;
+        Mat4 g_hardcore_inverse = Mat4::identity();
+        // The view's tilt as a quaternion (w, x, y, z), eased toward the
+        // body's (2026-10-10: walking wobbled the head; the yaw part
+        // turned the stick's directions).
+        float g_hardcore_q[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+        DWORD g_hardcore_q_time = 0;
+        Mat4 g_hardcore_ref = Mat4::identity();
+        bool g_hardcore_ref_valid = false;
+        DWORD g_hardcore_last = 0;
+
+        void orthonormal_rows(Mat4* m)
+        {
+            float* x = m->m[0];
+            float* y = m->m[1];
+            float* z = m->m[2];
+            normalise3(x);
+            const float d = dot3(y, x);
+            for (int k = 0; k < 3; ++k)
+                y[k] -= d * x[k];
+            normalise3(y);
+            z[0] = x[1] * y[2] - x[2] * y[1];
+            z[1] = x[2] * y[0] - x[0] * y[2];
+            z[2] = x[0] * y[1] - x[1] * y[0];
+            for (int k = 0; k < 3; ++k)
+                m->m[3][k] = 0.0f;
+            m->m[0][3] = m->m[1][3] = m->m[2][3] = 0.0f;
+            m->m[3][3] = 1.0f;
+        }
+
+        bool lara_airborne(void* lara);
+        void* lara_instance();
+
+        void hardcore_update()
+        {
+            g_hardcore_valid = false;
+            void* lara = lara_instance();
+            if (!lara)
+                return;
+            Mat4 world;
+            float heading = 0.0f;
+            __try
+            {
+                const float* matrices = *reinterpret_cast<float* const*>(
+                    static_cast<const unsigned char*>(lara) +
+                    kOffInstanceMatrices);
+                if (!matrices)
+                    return;
+                const int waist = g_first_person_waist_segment;
+                if (waist < 0 || waist > 511)
+                    return;
+                world = matrix_from_floats(matrices + waist * 16);
+                heading = *reinterpret_cast<const float*>(
+                    static_cast<const unsigned char*>(lara) +
+                    kOffInstanceHeading);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return;
+            }
+            if (!std::isfinite(heading))
+                return;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    if (!std::isfinite(world.m[r][c]))
+                        return;
+            orthonormal_rows(&world);
+            Mat4 rz = Mat4::identity();
+            const float c = cosf(heading), s = sinf(heading);
+            rz.m[0][0] = c;
+            rz.m[0][1] = s;
+            rz.m[1][0] = -s;
+            rz.m[1][1] = c;
+            Mat4 rz_t = rz;
+            rz_t.m[0][1] = -s;
+            rz_t.m[1][0] = s;
+            // Her pelvis in her own heading frame.
+            const Mat4 local = world * rz_t;
+            const DWORD now = GetTickCount();
+            const float dt = g_hardcore_last
+                ? fminf(0.1f, (now - g_hardcore_last) / 1000.0f) : 0.0f;
+            g_hardcore_last = now;
+            const bool grounded = g_first_person_traversal == TraversalGround &&
+                                  !lara_airborne(lara);
+            if (!g_hardcore_ref_valid)
+            {
+                if (!grounded)
+                    return;
+                g_hardcore_ref = local;
+                g_hardcore_ref_valid = true;
+                log("first-person: hardcore view on -- upright reference "
+                    "taken from her waist (segment %d)",
+                    g_first_person_waist_segment);
+                g_hardcore_q[0] = 1.0f;
+                g_hardcore_q[1] = g_hardcore_q[2] = g_hardcore_q[3] = 0.0f;
+            }
+            // Ref^T Local, the pelvis' turn from upright in her frame.
+            Mat4 ref_t = g_hardcore_ref;
+            for (int r = 0; r < 3; ++r)
+                for (int k = r + 1; k < 3; ++k)
+                {
+                    const float t = ref_t.m[r][k];
+                    ref_t.m[r][k] = ref_t.m[k][r];
+                    ref_t.m[k][r] = t;
+                }
+            const Mat4 turn = ref_t * local;
+            const float trace = turn.m[0][0] + turn.m[1][1] + turn.m[2][2];
+            const float angle = acosf(fmaxf(-1.0f, fminf(1.0f,
+                                                         0.5f * (trace - 1.0f))));
+            if (grounded && angle < 0.436f && dt > 0.0f)
+            {
+                const float k = fminf(1.0f, dt / 2.0f);
+                for (int r = 0; r < 3; ++r)
+                    for (int col = 0; col < 3; ++col)
+                        g_hardcore_ref.m[r][col] += (local.m[r][col] -
+                            g_hardcore_ref.m[r][col]) * k;
+                orthonormal_rows(&g_hardcore_ref);
+            }
+            // In the world at her heading (row vectors: p * body).
+            const Mat4 body = rz_t * turn * rz;
+            // As a quaternion of the column-vector rotation (body^T).
+            float R[3][3];
+            for (int r = 0; r < 3; ++r)
+                for (int k = 0; k < 3; ++k)
+                    R[r][k] = body.m[k][r];
+            float q[4];
+            {
+                const float tr = R[0][0] + R[1][1] + R[2][2];
+                if (tr > 0.0f)
+                {
+                    const float qs = sqrtf(tr + 1.0f) * 2.0f;
+                    q[0] = 0.25f * qs;
+                    q[1] = (R[2][1] - R[1][2]) / qs;
+                    q[2] = (R[0][2] - R[2][0]) / qs;
+                    q[3] = (R[1][0] - R[0][1]) / qs;
+                }
+                else if (R[0][0] > R[1][1] && R[0][0] > R[2][2])
+                {
+                    const float qs = sqrtf(1.0f + R[0][0] - R[1][1] -
+                                          R[2][2]) * 2.0f;
+                    q[0] = (R[2][1] - R[1][2]) / qs;
+                    q[1] = 0.25f * qs;
+                    q[2] = (R[0][1] + R[1][0]) / qs;
+                    q[3] = (R[0][2] + R[2][0]) / qs;
+                }
+                else if (R[1][1] > R[2][2])
+                {
+                    const float qs = sqrtf(1.0f + R[1][1] - R[0][0] -
+                                          R[2][2]) * 2.0f;
+                    q[0] = (R[0][2] - R[2][0]) / qs;
+                    q[1] = (R[0][1] + R[1][0]) / qs;
+                    q[2] = 0.25f * qs;
+                    q[3] = (R[1][2] + R[2][1]) / qs;
+                }
+                else
+                {
+                    const float qs = sqrtf(1.0f + R[2][2] - R[0][0] -
+                                          R[1][1]) * 2.0f;
+                    q[0] = (R[1][0] - R[0][1]) / qs;
+                    q[1] = (R[0][2] + R[2][0]) / qs;
+                    q[2] = (R[1][2] + R[2][1]) / qs;
+                    q[3] = 0.25f * qs;
+                }
+            }
+            // Swing-twist about world up (z): the twist (turning about the
+            // vertical) is dropped -- it turned the stick'qs directions --
+            // the swing (pitch / roll: flips, side flips) is kept.
+            float tw[4] = { q[0], 0.0f, 0.0f, q[3] };
+            float tl = sqrtf(tw[0] * tw[0] + tw[3] * tw[3]);
+            if (tl < 1e-6f)
+            {
+                tw[0] = 1.0f;
+                tw[3] = 0.0f;
+            }
+            else
+            {
+                tw[0] /= tl;
+                tw[3] /= tl;
+            }
+            // swing = q * conj(twist)
+            const float cw = tw[0], cz = -tw[3];
+            float sw[4] = {
+                q[0] * cw - q[3] * cz,
+                q[1] * cw + q[2] * cz,
+                q[2] * cw - q[1] * cz,
+                q[3] * cw + q[0] * cz };
+            if (sw[0] < 0.0f)
+                for (float& v : sw)
+                    v = -v;
+            // Dead zone: under the threshold level, easing in to a full
+            // follow at three times it.
+            const float swing = 2.0f * acosf(fminf(1.0f, sw[0]));
+            const float th = config().first_person_hardcore_threshold *
+                             0.017453293f;
+            float wanted = swing;
+            if (swing <= th)
+                wanted = 0.0f;
+            else if (swing < 3.0f * th)
+                wanted = (swing - th) * 1.5f;
+            float target[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
+            const float sh = sinf(0.5f * swing);
+            if (wanted > 1e-4f && sh > 1e-6f)
+            {
+                target[0] = cosf(0.5f * wanted);
+                const float qs = sinf(0.5f * wanted) / sh;
+                target[1] = sw[1] * qs;
+                target[2] = sw[2] * qs;
+                target[3] = sw[3] * qs;
+            }
+            // Ease toward it (80 ms), along the short way.
+            {
+                const DWORD nowq = GetTickCount();
+                const float dtq = g_hardcore_q_time
+                    ? fminf(0.2f, (nowq - g_hardcore_q_time) / 1000.0f) : 1.0f;
+                g_hardcore_q_time = nowq;
+                const float f = 1.0f - expf(-dtq / 0.08f);
+                float d = 0.0f;
+                for (int i = 0; i < 4; ++i)
+                    d += g_hardcore_q[i] * target[i];
+                const float sign = d < 0.0f ? -1.0f : 1.0f;
+                float len = 0.0f;
+                for (int i = 0; i < 4; ++i)
+                {
+                    g_hardcore_q[i] += (sign * target[i] - g_hardcore_q[i]) * f;
+                    len += g_hardcore_q[i] * g_hardcore_q[i];
+                }
+                len = sqrtf(len);
+                for (int i = 0; i < 4; ++i)
+                    g_hardcore_q[i] = len > 1e-6f ? g_hardcore_q[i] / len
+                                                  : (i == 0 ? 1.0f : 0.0f);
+            }
+            // Back to a matrix: column rotation C, row-vector body' = C^T,
+            // the view takes its inverse, C itself.
+            {
+                const float w = g_hardcore_q[0], x = g_hardcore_q[1],
+                            y = g_hardcore_q[2], z = g_hardcore_q[3];
+                const float C[3][3] = {
+                    { 1 - 2 * (y * y + z * z), 2 * (x * y - w * z),
+                      2 * (x * z + w * y) },
+                    { 2 * (x * y + w * z), 1 - 2 * (x * x + z * z),
+                      2 * (y * z - w * x) },
+                    { 2 * (x * z - w * y), 2 * (y * z + w * x),
+                      1 - 2 * (x * x + y * y) } };
+                g_hardcore_inverse = Mat4::identity();
+                for (int r = 0; r < 3; ++r)
+                    for (int k = 0; k < 3; ++k)
+                        g_hardcore_inverse.m[r][k] = C[r][k];
+            }
+            g_hardcore_valid = true;
+            static float reported = 0.0f;
+            if (angle > reported + 0.5f || (angle < 0.1f && reported > 0.0f))
+            {
+                reported = angle > 0.1f ? angle : 0.0f;
+                if (angle > 0.5f)
+                    log("first-person: hardcore view turned %.0f degrees "
+                        "with her body", angle * 57.29578f);
+            }
+        }
+
         void apply_head_pose(void* cam, const float* camera_position)
         {
+            // Hardcore first person: her body's turn, about the eye.
+            const bool hardcore = camera_position && cam == kMainCamera &&
+                                  g_hardcore_valid;
+            Mat4 body_turn = Mat4::identity();
+            if (hardcore)
+                body_turn = translation(-camera_position[0],
+                                        -camera_position[1],
+                                        -camera_position[2]) *
+                            g_hardcore_inverse *
+                            translation(camera_position[0],
+                                        camera_position[1],
+                                        camera_position[2]);
             Mat4 head_view = vr_head_camera_view();
             const bool unscale = tune_view_prescale_fix();
 
@@ -9956,6 +13289,8 @@ namespace trlvr
                 }
                 if (camera_position)
                     set_view_position(&m, camera_position);
+                if (hardcore)
+                    m = body_turn * m;
                 m = m * head_view;
                 store_matrix(cam, targets[t], m);
             }
@@ -9989,7 +13324,44 @@ namespace trlvr
             LARGE_INTEGER last{};
         };
         ThirdPersonCamera g_tp_camera;
+        // True while a third-person preset draws the view (the world factor
+        // then comes from g_tp_scale; it was board-only before the sliders).
         bool g_tp_board_scale = false;
+        // Third-person scale and zoom per preset (user 2026-10-10: palm
+        // sliders): scale = the world factor (1 life size; board's default
+        // from board_lara_height_cm), zoom = the preset's camera distance
+        // multiplier. [vr] third_person_scale_<preset> / _zoom_<preset>.
+        float g_tp_scale[3] = { 1.0f, 1.0f, 1.0f };
+        float g_tp_zoom[3] = { 1.0f, 1.0f, 1.0f };
+        bool g_tp_view_loaded = false;
+        const wchar_t* kTpPresetNames[3] = { L"classic", L"shoulder",
+                                             L"board" };
+
+        void tp_view_load()
+        {
+            if (g_tp_view_loaded)
+                return;
+            g_tp_view_loaded = true;
+            const float board = 175.0f / config().board_lara_height_cm;
+            const float defaults[3] = { 1.0f, 1.0f,
+                std::isfinite(board) && board > 0.5f ? board : 1.0f };
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%strlvr.ini", exe_dir());
+            for (int m = 0; m < 3; ++m)
+            {
+                wchar_t key[64]{}, text[32]{};
+                swprintf_s(key, L"third_person_scale_%s", kTpPresetNames[m]);
+                GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
+                float v = text[0] ? (float)_wtof(text) : defaults[m];
+                g_tp_scale[m] = std::isfinite(v) && v >= 1.0f && v <= 25.0f
+                    ? v : defaults[m];
+                swprintf_s(key, L"third_person_zoom_%s", kTpPresetNames[m]);
+                GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
+                v = text[0] ? (float)_wtof(text) : 1.0f;
+                g_tp_zoom[m] = std::isfinite(v) && v >= 0.3f && v <= 3.5f
+                    ? v : 1.0f;
+            }
+        }
         // How far the third-person camera stands from the retail one.
         float g_tp_retail_distance = 0.0f;
         // Main camera to its focus (Lara), world units, after the head pose:
@@ -10068,20 +13440,27 @@ namespace trlvr
                     !std::isfinite(retail_position[k]))
                     return false;
             const float metre = config().world_scale;
+            tp_view_load();
+            const float zoom = mode >= 0 && mode < 3 ? g_tp_zoom[mode] : 1.0f;
             float target[3] = { retail_position[0], retail_position[1],
                                 retail_position[2] };
+            if (mode == 0 && fabsf(zoom - 1.0f) > 1e-3f)
+                for (int k = 0; k < 3; ++k)
+                    target[k] = focus[k] +
+                                (retail_position[k] - focus[k]) * zoom;
             if (mode == 1)
             {
                 const float dx = retail_position[0] - focus[0];
                 const float dy = retail_position[1] - focus[1];
                 const float dz = retail_position[2] - focus[2];
                 const float retail_back = sqrtf(dx * dx + dy * dy + dz * dz);
-                float back = config().shoulder_distance * metre;
+                float back = config().shoulder_distance * metre * zoom;
                 // The game's camera is pulled in by walls; never stand
-                // further back than it does.
-                if (retail_back > 0.3f * metre && back > retail_back)
+                // further back than it does (zoomed out: the probe below).
+                if (zoom <= 1.0f && retail_back > 0.3f * metre &&
+                    back > retail_back)
                     back = retail_back;
-                const float side = config().shoulder_side * metre;
+                const float side = config().shoulder_side * metre * zoom;
                 // Along the game camera's own direction from Lara, so the
                 // look stick's up/down orbit raises and lowers the shoulder
                 // view too (it stayed at a fixed height, user 2026-10-03).
@@ -10095,7 +13474,7 @@ namespace trlvr
                 target[0] = focus[0] + away[0] * back + right[0] * side;
                 target[1] = focus[1] + away[1] * back + right[1] * side;
                 target[2] = focus[2] + away[2] * back +
-                            config().shoulder_height * metre;
+                            config().shoulder_height * metre * zoom;
             }
             else if (mode == 2)
             {
@@ -10119,16 +13498,27 @@ namespace trlvr
                     g_tp_camera.anchor[1] += ay * pull;
                 }
                 g_tp_camera.anchor[2] = focus[2];
+                // The diorama's handle moves the board in the room (metres:
+                // right, up, forward): the seat moves the opposite way.
+                float moved[3];
+                vr_board_offset(moved);
+                const float back = config().board_distance * zoom + moved[2];
                 target[0] = g_tp_camera.anchor[0] -
-                    forward[0] * config().board_distance * table;
+                    forward[0] * back * table - right[0] * moved[0] * table;
                 target[1] = g_tp_camera.anchor[1] -
-                    forward[1] * config().board_distance * table;
+                    forward[1] * back * table - right[1] * moved[0] * table;
                 target[2] = g_tp_camera.anchor[2] +
-                    config().board_height * table;
+                    (config().board_height * zoom - moved[1]) * table;
                 // Collision (user, 2026-10-03): turning the view must not
                 // swing the board camera into rock. Probe from just above
                 // Lara to the seat; on a hit, sit 0.3 m (her scale) short
                 // of it, on her side.
+            }
+            // Zoomed out past the game's own camera (classic, shoulder) or
+            // the board seat: the seat is probed like the board's.
+            if (mode == 2 || zoom > 1.0f)
+            {
+                const float table = metre * camera_world_scale_factor();
                 const float from[3] = { focus[0], focus[1],
                                         focus[2] + 0.3f * metre };
                 float ray[3] = { target[0] - from[0], target[1] - from[1],
@@ -10205,6 +13595,453 @@ namespace trlvr
                 g_tp_retail_distance = sqrtf(dx * dx + dy * dy + dz * dz);
             }
             return true;
+        }
+
+        // Roomscale (user 2026-10-09). First person on the ground: walking
+        // in the room moves Lara. Once per presented frame the eye's
+        // horizontal offset from her head anchor is measured; within
+        // roomscale_deadzone it is a lean and only the view moves. Beyond
+        // it she is moved after the head -- STREAM_SetInstancePosition
+        // (0x005D3BB0), which moves the instance, its linked gear and her
+        // CharacterProxy (the physics owner; writing Instance+0x10 alone is
+        // overwritten) -- and next frame, once her anchor has moved, the
+        // head origin follows by the same amount so the eye stays put.
+        // Collision: the game's line probe (it meets walls and characters)
+        // at knee and chest height along the move stops her 0.28 m short of
+        // a wall; the floor under the new spot must be within a step (0.35
+        // m) or she stays (no walking off ledges). Whatever she cannot
+        // follow is taken off the view at once (pushback), so the eye stops
+        // at the wall too; a probe from her head to the eye keeps a lean
+        // out of walls. Climbing, hanging, swimming and jumps keep the old
+        // free view.
+        unsigned g_room_frame = ~0u;
+        // The move is made at Present, not here (test 2026-10-09: calling
+        // STREAM_SetInstancePosition inside the camera build made the game
+        // rebuild its camera from inside ours -- two different views every
+        // frame, "all wobbled out").
+        float g_room_request[3]{};
+        float g_room_request_from[3]{};
+        bool g_room_request_valid = false;
+        // Where her root was when the last move was made, to check next
+        // frame how far it really went (test 2026-10-09: 4.7 m in 2 s while
+        // the stick also walked her -- the book-keeping must follow what
+        // happened, not what was asked).
+        unsigned g_room_recentre_seen = 0;
+        // The room anchor (see roomscale_step) and her root as last seen
+        // or last put by the mod, world x/y.
+        float g_room_virtual[2]{};
+        float g_room_last[2]{};
+        bool g_room_virtual_valid = false;
+        int g_camera_depth = 0;
+        float g_room_moved = 0.0f, g_room_blocked = 0.0f;
+        DWORD g_room_report_at = 0;
+        bool g_room_checked = false, g_room_usable = false;
+        // Roomscale walk (user 2026-10-10): a real step of more than 0.4 m
+        // is walked by the game itself -- the walk key and the direction
+        // keys toward the player, camera-relative like the stick -- so she
+        // turns and walks with her own animations, stopping within the
+        // deadzone. Smaller offsets keep the quiet nudge. While she walks
+        // for the room her motion is the room's, not the game's: the anchor
+        // does not follow it. She gives up when 0.6 s brings her no closer
+        // (a wall) or there is no floor ahead, and waits 1.5 s.
+        bool g_room_walking = false;
+        bool g_room_walk_keys[4] = { false, false, false, false };
+        DWORD g_room_walk_progress_at = 0;
+        DWORD g_room_walk_resume_at = 0;
+        DWORD g_room_walk_frame_at = 0;
+        float g_room_walk_best = 0.0f;
+        unsigned g_room_walks = 0;
+
+        bool lara_airborne(void* lara);
+
+        // The base camera's axes in the world (rows: right, down, forward).
+        Mat4 room_camera_axes(const Mat4& base)
+        {
+            Mat4 view = base;
+            if (tune_view_prescale_fix())
+                remove_view_prescale(&view, nullptr, nullptr);
+            return rigid_inverse(view);
+        }
+
+        void room_world_to_camera(const Mat4& axes, const float w[3],
+                                  float c[3])
+        {
+            for (int i = 0; i < 3; ++i)
+                c[i] = w[0] * axes.m[i][0] + w[1] * axes.m[i][1] +
+                       w[2] * axes.m[i][2];
+        }
+
+        void room_camera_to_world(const Mat4& axes, const float c[3],
+                                  float w[3])
+        {
+            for (int k = 0; k < 3; ++k)
+                w[k] = c[0] * axes.m[0][k] + c[1] * axes.m[1][k] +
+                       c[2] * axes.m[2][k];
+        }
+
+        bool room_set_lara_position(void* lara, const float at[3])
+        {
+            if (!g_room_checked)
+            {
+                g_room_checked = true;
+                const unsigned char expected[9] =
+                    { 0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0, 0x83, 0xEC, 0x24 };
+                g_room_usable = memcmp(reinterpret_cast<const void*>(
+                    0x005D3BB0), expected, sizeof(expected)) == 0;
+                log("roomscale: %s", g_room_usable
+                    ? "walking in the room moves Lara (first person)"
+                    : "unavailable -- STREAM_SetInstancePosition not found");
+            }
+            if (!g_room_usable)
+                return false;
+            alignas(16) float place[4] = { at[0], at[1], at[2], 1.0f };
+            using PFN_SetInstancePosition = void(__cdecl*)(void*,
+                                                           const float*);
+            __try
+            {
+                reinterpret_cast<PFN_SetInstancePosition>(0x005D3BB0)(
+                    lara, place);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+            return true;
+        }
+
+        void roomscale_frame(const Mat4& base, void* lara, const float root[3],
+                             const float anchor[3])
+        {
+            const Mat4 axes = room_camera_axes(base);
+            const float metre = config().world_scale;
+            // Walk animation survey (2026-10-09), kept for the walk keys.
+            if (g_first_person_traversal == TraversalGround)
+            {
+                static void* keylist_was = nullptr;
+                static unsigned reports = 0;
+                void* keylist = lara_current_keylist(lara);
+                if (keylist != keylist_was && reports < 40)
+                {
+                    keylist_was = keylist;
+                    ++reports;
+                    log("anim: first-person ground animation %d%s",
+                        lara_anim_index_of(lara, keylist),
+                        vr_input_stick_moving() ? " -- stick walking" : "");
+                }
+            }
+            // A fresh start (first frame, a recentre, a game teleport of
+            // more than 2 m): the room anchor is her root again.
+            const bool recentred =
+                vr_recenter_generation() != g_room_recentre_seen;
+            g_room_recentre_seen = vr_recenter_generation();
+            if (!g_room_virtual_valid || recentred ||
+                fabsf(root[0] - g_room_last[0]) > 2.0f * metre ||
+                fabsf(root[1] - g_room_last[1]) > 2.0f * metre)
+            {
+                g_room_virtual[0] = g_room_last[0] = root[0];
+                g_room_virtual[1] = g_room_last[1] = root[1];
+                g_room_virtual_valid = true;
+                g_room_request_valid = false;
+            }
+            // Her motion since last frame that the mod did not make (and
+            // not a walk to the player's real position).
+            if (!g_room_walking)
+            {
+                g_room_virtual[0] += root[0] - g_room_last[0];
+                g_room_virtual[1] += root[1] - g_room_last[1];
+            }
+            g_room_last[0] = root[0];
+            g_room_last[1] = root[1];
+
+            const bool eligible = config().roomscale && !ui_menu_active() &&
+                g_first_person_traversal == TraversalGround &&
+                !g_first_person_ledge_hanging && !g_first_person_bar_hanging &&
+                !g_first_person_vine_climbing && !lara_airborne(lara);
+            if (!eligible)
+            {
+                // Climbing, hanging, swimming, jumping: the view settles back
+                // onto her (at most 2 cm a frame), the old free view.
+                g_room_request_valid = false;
+                g_room_walking = false;
+                for (int k = 0; k < 2; ++k)
+                {
+                    const float d = root[k] - g_room_virtual[k];
+                    const float step = 0.02f * metre;
+                    g_room_virtual[k] += d > step ? step : d < -step ? -step
+                                                                     : d;
+                }
+                return;
+            }
+            float p[3];
+            if (!vr_head_position_offset(p))
+                return;
+            float pw[3];
+            room_camera_to_world(axes, p, pw);  // eye - room anchor, world
+            // The eye from her (horizontal): room offset plus the head's.
+            float e[2] = { g_room_virtual[0] - root[0] + pw[0],
+                           g_room_virtual[1] - root[1] + pw[1] };
+            const float dist = sqrtf(e[0] * e[0] + e[1] * e[1]);
+            const float dead = config().roomscale_deadzone * metre;
+            // Far more than a step from her: a tracking jump, not a walk --
+            // the eye is put back on her rather than her thrown after it.
+            if (dist > 1.5f * metre && std::isfinite(dist))
+            {
+                float c[3];
+                room_world_to_camera(axes, pw, c);
+                vr_shift_head_position_origin(c);
+                g_room_virtual[0] = root[0];
+                g_room_virtual[1] = root[1];
+                log("roomscale: head %.2f m from Lara at once -- view put "
+                    "back on her instead of moving her", dist / metre);
+                return;
+            }
+            // Roomscale walk: start beyond 0.4 m (or the deadzone + 0.2),
+            // stop inside the deadzone, give up on no progress / no floor.
+            {
+                const DWORD now = GetTickCount();
+                const float start = fmaxf(0.4f * metre, dead + 0.2f * metre);
+                const auto floor_ahead = [&](const float dir[2])
+                {
+                    const float from[3] = { root[0] + dir[0] * 0.5f * metre,
+                                            root[1] + dir[1] * 0.5f * metre,
+                                            root[2] + 0.6f * metre };
+                    const float down[3] = { 0.0f, 0.0f, -1.0f };
+                    float floor[3];
+                    return body_probe(from, down, 1.6f * metre, floor) &&
+                           fabsf(floor[2] - root[2]) <= 0.35f * metre;
+                };
+                const bool can = config().roomscale_walk &&
+                    !vr_input_stick_moving() && std::isfinite(dist) &&
+                    dist > 1e-3f;
+                const float dir2[2] = { can ? e[0] / dist : 0.0f,
+                                        can ? e[1] / dist : 0.0f };
+                if (!can)
+                    g_room_walking = false;
+                else if (!g_room_walking && dist > start &&
+                         now >= g_room_walk_resume_at && floor_ahead(dir2))
+                {
+                    g_room_walking = true;
+                    g_room_walk_best = dist;
+                    g_room_walk_progress_at = now;
+                    g_room_request_valid = false;
+                    if (g_room_walks++ < 20)
+                        log("roomscale: you stepped %.2f m away -- Lara walks "
+                            "to you", dist / metre);
+                }
+                else if (g_room_walking)
+                {
+                    const char* why = nullptr;
+                    if (dist < dead)
+                        why = nullptr;
+                    else if (!floor_ahead(dir2))
+                        why = "no floor ahead";
+                    else if (dist < g_room_walk_best - 0.05f * metre)
+                    {
+                        g_room_walk_best = dist;
+                        g_room_walk_progress_at = now;
+                    }
+                    else if (now - g_room_walk_progress_at > 600)
+                        why = "she got no closer (a wall?)";
+                    if (dist < dead || why)
+                    {
+                        g_room_walking = false;
+                        if (why)
+                        {
+                            g_room_walk_resume_at = now + 1500;
+                            static DWORD last = 0;
+                            if (now - last > 3000)
+                            {
+                                last = now;
+                                log("roomscale: Lara stops walking -- %s",
+                                    why);
+                            }
+                        }
+                    }
+                }
+                if (g_room_walking)
+                {
+                    // Camera-relative keys like the stick: 8 directions.
+                    const float w[3] = { e[0], e[1], 0.0f };
+                    float c[3];
+                    room_world_to_camera(axes, w, c);
+                    const float len = sqrtf(c[0] * c[0] + c[2] * c[2]);
+                    const float t = 0.38f * len;   // cos 67.5 degrees
+                    g_room_walk_keys[0] = c[2] > t;     // W
+                    g_room_walk_keys[1] = c[0] < -t;    // A
+                    g_room_walk_keys[2] = c[2] < -t;    // S
+                    g_room_walk_keys[3] = c[0] > t;     // D
+                    g_room_walk_frame_at = now;
+                }
+            }
+            // The stick is walking her: the game moves her and the room
+            // anchor goes with it; the room offset waits. While she walks to
+            // the player the game moves her too.
+            if (dist > dead && std::isfinite(dist) &&
+                !vr_input_stick_moving() && !g_room_walking)
+            {
+                // At most a brisk walk per frame (4.5 m/s at 90 fps).
+                const float want = fminf(dist - dead, 0.05f * metre);
+                const float dir[3] = { e[0] / dist, e[1] / dist, 0.0f };
+                const float radius = 0.28f * metre;
+                float allowed = want;
+                const float heights[2] = { 0.55f * metre, 1.2f * metre };
+                for (float h : heights)
+                {
+                    const float from[3] = { root[0], root[1], root[2] + h };
+                    float hit[3];
+                    if (!body_probe(from, dir, want + radius, hit))
+                        continue;
+                    const float hx = hit[0] - root[0], hy = hit[1] - root[1];
+                    allowed = fminf(allowed, fmaxf(0.0f,
+                        sqrtf(hx * hx + hy * hy) - radius));
+                }
+                float target[3] = { root[0] + dir[0] * allowed,
+                                    root[1] + dir[1] * allowed, root[2] };
+                if (allowed > 0.5f)
+                {
+                    const float from[3] = { target[0], target[1],
+                                            root[2] + 0.6f * metre };
+                    const float down[3] = { 0.0f, 0.0f, -1.0f };
+                    float floor[3];
+                    if (!body_probe(from, down, 1.6f * metre, floor) ||
+                        fabsf(floor[2] - root[2]) > 0.35f * metre)
+                    {
+                        static DWORD last = 0;
+                        if (GetTickCount() - last > 3000)
+                        {
+                            last = GetTickCount();
+                            log("roomscale: no floor within a step there -- "
+                                "Lara stays (no walking off ledges)");
+                        }
+                        allowed = 0.0f;
+                    }
+                    else
+                        target[2] = floor[2];
+                }
+                if (allowed > 0.5f)
+                {
+                    memcpy(g_room_request, target, sizeof(target));
+                    memcpy(g_room_request_from, root, sizeof(float) * 3);
+                    g_room_request_valid = true;
+                }
+                else
+                    allowed = 0.0f;
+                // What she could not follow comes off the view now.
+                const float blocked = want - allowed;
+                if (blocked > 0.01f)
+                {
+                    const float w[3] = { dir[0] * blocked, dir[1] * blocked,
+                                         0.0f };
+                    float c[3];
+                    room_world_to_camera(axes, w, c);
+                    vr_shift_head_position_origin(c);
+                    g_room_blocked += blocked;
+                    e[0] -= w[0];
+                    e[1] -= w[1];
+                }
+            }
+            // The lean itself: from her head anchor to the eye at eye
+            // height, stopped 0.10 m short of anything in the way.
+            {
+                const float lean = sqrtf(e[0] * e[0] + e[1] * e[1]);
+                if (lean > 1.0f && std::isfinite(lean))
+                {
+                    const float dir[3] = { e[0] / lean, e[1] / lean, 0.0f };
+                    const float from[3] = { anchor[0], anchor[1],
+                                            anchor[2] + pw[2] };
+                    const float margin = 0.10f * metre;
+                    float hit[3];
+                    if (body_probe(from, dir, lean + margin, hit))
+                    {
+                        const float hx = hit[0] - from[0],
+                                    hy = hit[1] - from[1];
+                        const float room = fmaxf(0.0f,
+                            sqrtf(hx * hx + hy * hy) - margin);
+                        if (room < lean)
+                        {
+                            const float back = lean - room;
+                            const float w[3] = { dir[0] * back,
+                                                 dir[1] * back, 0.0f };
+                            float c[3];
+                            room_world_to_camera(axes, w, c);
+                            vr_shift_head_position_origin(c);
+                            g_room_blocked += back;
+                        }
+                    }
+                }
+            }
+            const DWORD now = GetTickCount();
+            if ((g_room_moved > 0.0f || g_room_blocked > 0.0f) &&
+                now - g_room_report_at > 2000)
+            {
+                g_room_report_at = now;
+                log("roomscale: Lara walked %.2f m with you, %.2f m held back "
+                    "by walls/ledges", g_room_moved / metre,
+                    g_room_blocked / metre);
+                g_room_moved = g_room_blocked = 0.0f;
+            }
+        }
+
+        bool roomscale_walk_keys(bool dir[4])
+        {
+            if (!g_room_walking || GetTickCount() - g_room_walk_frame_at > 200)
+                return false;
+            for (int i = 0; i < 4; ++i)
+                dir[i] = g_room_walk_keys[i];
+            return dir[0] || dir[1] || dir[2] || dir[3];
+        }
+
+        // Roomscale v3 (user 2026-10-10: "a bit of jitter or a stepped
+        // feeling"). The view no longer rides on Lara's body: it hangs off a
+        // room anchor (g_room_virtual, world x/y) that moves only with the
+        // game's own motion of her -- stick walking, slopes, being pushed --
+        // never with the mod's teleports. Every camera build draws the eye
+        // at her anchor plus (room anchor - her root), so moving her under
+        // you cannot step the view; she simply catches up underneath. Her
+        // moves (made at Present) set g_room_last so they are not counted
+        // as game motion. Pushback still takes what a wall stops off the
+        // head origin at once.
+        void roomscale_step(const Mat4& base, float anchor[3])
+        {
+            void* lara = lara_instance();
+            float root[3]{};
+            bool have_root = false;
+            __try
+            {
+                if (lara)
+                {
+                    memcpy(root, static_cast<const unsigned char*>(lara) +
+                           0x10, sizeof(root));
+                    have_root = std::isfinite(root[0]) &&
+                                std::isfinite(root[1]);
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                have_root = false;
+            }
+            if (!have_root)
+            {
+                g_room_virtual_valid = false;
+                return;
+            }
+            const float metre = config().world_scale;
+            if (g_room_frame != g_present_count)
+            {
+                g_room_frame = g_present_count;
+                roomscale_frame(base, lara, root, anchor);
+            }
+            // Every build: the eye's anchor is the room anchor.
+            if (g_room_virtual_valid)
+            {
+                const float ox = g_room_virtual[0] - root[0];
+                const float oy = g_room_virtual[1] - root[1];
+                if (ox * ox + oy * oy < 4.0f * metre * metre)
+                {
+                    anchor[0] += ox;
+                    anchor[1] += oy;
+                }
+            }
         }
 
         // Eye collision for the third-person views (user, 2026-10-03): the
@@ -10399,11 +14236,262 @@ namespace trlvr
                 g_cone_patches.size() == 1 ? "" : "s", factor);
         }
 
+        // Theatre scene scale (user 2026-10-09: the window "still moves",
+        // in some camera cuts and not others). Through a window, anything
+        // nearer than the window slides the wrong way against its frame as
+        // the head moves (a close-up face at life size sits ~0.5 m from the
+        // camera, far in front of a 2.5 m screen) and anything far barely
+        // moves. Like a 3D film, each shot is scaled so its nearest subject
+        // sits at the screen and everything else lies behind it: k = that
+        // depth over the screen distance, applied to head movement and eye
+        // separation. Chosen at each cut only (a jump of the camera), so it
+        // never changes during a shot.
+        //
+        // The depth: a 5 x 3 fan of the game's own line probe (it meets
+        // characters as well as the world) across the middle of the shot,
+        // and Lara's head bone if it is in shot; the nearest wins. Lara's
+        // root position alone was wrong in cutscenes (3.9 m measured for a
+        // close-up whose camera was ~0.5 m from her face, user screenshot
+        // 2026-10-09) -- cutscenes animate her away from it.
+        bool lara_head_position(float out[3])
+        {
+            __try
+            {
+                const unsigned char* inst = *reinterpret_cast<
+                    const unsigned char* const*>(kPlayerInstance);
+                const unsigned char* prop = *reinterpret_cast<
+                    const unsigned char* const*>(kPlayerProp);
+                if (!inst || !prop)
+                    return false;
+                const int segment = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropHeadSegment);
+                const float* matrices = *reinterpret_cast<
+                    const float* const*>(inst + kOffInstanceMatrices);
+                if (!matrices || segment < 0 || segment > 511)
+                    return false;
+                const float* head = matrices + segment * 16 + 12;
+                for (int k = 0; k < 3; ++k)
+                {
+                    if (!std::isfinite(head[k]) || fabsf(head[k]) > 1.0e7f)
+                        return false;
+                    out[k] = head[k];
+                }
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        // The nearest of Lara's bones to a camera along its view, within the
+        // shot, less 0.12 m for her body round the bone. Her head alone
+        // missed a camera close to her back or hips, and the line probe
+        // passes through her (user 2026-10-10: convergence broke as she
+        // came near the camera).
+        bool lara_nearest_depth(const float* position, const float* forward,
+                                float* out)
+        {
+            __try
+            {
+                const unsigned char* inst = *reinterpret_cast<
+                    const unsigned char* const*>(kPlayerInstance);
+                if (!inst)
+                    return false;
+                const unsigned char* obj = *reinterpret_cast<
+                    const unsigned char* const*>(inst + kOffInstanceObject);
+                if (!obj)
+                    return false;
+                const int num_models = *reinterpret_cast<const short*>(
+                    obj + kOffObjectNumModels);
+                void* const* models = *reinterpret_cast<void* const* const*>(
+                    obj + kOffObjectModelList);
+                int index = *reinterpret_cast<const signed char*>(
+                    inst + kOffCurrentRenderModel);
+                if (index < 0 || index >= num_models)
+                    index = *reinterpret_cast<const signed char*>(
+                        inst + kOffCurrentBaseModel);
+                if (!models || num_models <= 0 || num_models > 32 ||
+                    index < 0 || index >= num_models || !models[index])
+                    return false;
+                const int count = *reinterpret_cast<const int*>(
+                    static_cast<const unsigned char*>(models[index]) +
+                    kOffModelNumSegments);
+                const float* matrices = *reinterpret_cast<
+                    const float* const*>(inst + kOffInstanceMatrices);
+                if (!matrices || count <= 0 || count > 512)
+                    return false;
+                float best = 1.0e30f;
+                for (int s = 0; s < count; ++s)
+                {
+                    const float* p = matrices + s * 16 + 12;
+                    const float d[3] = { p[0] - position[0],
+                                         p[1] - position[1],
+                                         p[2] - position[2] };
+                    const float depth = d[0] * forward[0] +
+                                        d[1] * forward[1] +
+                                        d[2] * forward[2];
+                    if (!(depth > 0.0f) || !std::isfinite(depth))
+                        continue;
+                    const float across = sqrtf(fmaxf(0.0f, d[0] * d[0] +
+                        d[1] * d[1] + d[2] * d[2] - depth * depth));
+                    if (across > depth * 0.9f)
+                        continue;
+                    best = fminf(best, depth);
+                }
+                if (best > 1.0e29f)
+                    return false;
+                *out = fmaxf(best - 0.12f * config().world_scale,
+                             0.05f * config().world_scale);
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        float g_theatre_scale = 1.0f;
+        // Gameplay theatre: the camera rarely cuts but its distance to
+        // Lara keeps changing, so the depth is re-measured every 30 builds
+        // and the scale eases toward it (1.5 s), snapping only at a cut.
+        float g_theatre_scale_target = 1.0f;
+        float g_theatre_scale_logged = 0.0f;
+        ULONGLONG g_theatre_scale_at = 0;
+        unsigned g_theatre_builds_since_measure = 0;
+        bool  g_theatre_shot_valid = false;
+        float g_theatre_shot_position[3]{};
+        float g_theatre_shot_forward[3]{};
+
+        void theatre_shot_update(const Mat4& retail_view)
+        {
+            Mat4 view = retail_view;
+            if (tune_view_prescale_fix())
+                remove_view_prescale(&view, nullptr, nullptr);
+            const Mat4 to_world = rigid_inverse(view);
+            const float* position = to_world.m[3];
+            const float* forward = to_world.m[2];
+            bool cut = !g_theatre_shot_valid;
+            if (!cut)
+            {
+                const float dx = position[0] - g_theatre_shot_position[0];
+                const float dy = position[1] - g_theatre_shot_position[1];
+                const float dz = position[2] - g_theatre_shot_position[2];
+                const float dot = forward[0] * g_theatre_shot_forward[0] +
+                                  forward[1] * g_theatre_shot_forward[1] +
+                                  forward[2] * g_theatre_shot_forward[2];
+                cut = dx * dx + dy * dy + dz * dz > 100.0f * 100.0f ||
+                      dot < 0.966f;   // 15 degrees within one build
+            }
+            for (int k = 0; k < 3; ++k)
+            {
+                g_theatre_shot_position[k] = position[k];
+                g_theatre_shot_forward[k] = forward[k];
+            }
+            g_theatre_shot_valid = true;
+            if (config().cutscene_scale > 0.0f)
+            {
+                g_theatre_scale = config().cutscene_scale;
+                return;
+            }
+            const bool gameplay = !camera_cinematic_playing();
+            {
+                const ULONGLONG now = GetTickCount64();
+                const float dt = g_theatre_scale_at
+                    ? fminf((now - g_theatre_scale_at) / 1000.0f, 0.1f) : 0.0f;
+                g_theatre_scale_at = now;
+                // Something coming nearer is followed at once (0.15 s), or
+                // it is in front of the window with too much separation;
+                // moving away eases out over 1.5 s.
+                const float tau = g_theatre_scale_target < g_theatre_scale
+                    ? 0.15f : 1.5f;
+                if (gameplay && !cut)
+                    g_theatre_scale += (g_theatre_scale_target -
+                        g_theatre_scale) * (1.0f - expf(-dt / tau));
+            }
+            bool measure = cut;
+            if (gameplay && ++g_theatre_builds_since_measure >= 6)
+                measure = true;
+            if (!measure)
+                return;
+            g_theatre_builds_since_measure = 0;
+            const float metre = config().world_scale;
+            const float* right = to_world.m[0];
+            const float* down = to_world.m[1];
+            float nearest = 1.0e30f;
+            int probe_hits = 0;
+            const float tx[5] = { -0.45f, -0.22f, 0.0f, 0.22f, 0.45f };
+            const float ty[3] = { -0.25f, 0.0f, 0.25f };
+            for (float y : ty)
+                for (float x : tx)
+                {
+                    float ray[3];
+                    for (int k = 0; k < 3; ++k)
+                        ray[k] = forward[k] + right[k] * x + down[k] * y;
+                    const float length = sqrtf(dot3(ray, ray));
+                    if (!(length > 1.0e-4f))
+                        continue;
+                    for (float& r : ray)
+                        r /= length;
+                    float hit[3];
+                    if (!body_probe(position, ray, 30.0f * metre, hit))
+                        continue;
+                    // Depth along the view axis, as the screen measures it.
+                    const float d[3] = { hit[0] - position[0],
+                                         hit[1] - position[1],
+                                         hit[2] - position[2] };
+                    const float depth = dot3(d, forward);
+                    if (depth > 0.0f && depth < nearest)
+                        nearest = depth;
+                    ++probe_hits;
+                }
+            bool head_used = false;
+            {
+                float lara_depth = 0.0f;
+                if (lara_nearest_depth(position, forward, &lara_depth) &&
+                    lara_depth < nearest)
+                {
+                    nearest = lara_depth;
+                    head_used = true;
+                }
+            }
+            if (nearest < 1.0e29f)
+            {
+                float k = nearest /
+                    (config().cutscene_screen_distance * metre);
+                k = k < 0.1f ? 0.1f : k > 25.0f ? 25.0f : k;
+                g_theatre_scale_target = k;
+                if (cut || !gameplay)
+                    g_theatre_scale = k;
+                if (cut || fabsf(k - g_theatre_scale_logged) >
+                               0.25f * g_theatre_scale_logged)
+                {
+                    g_theatre_scale_logged = k;
+                    log("theatre: %s -- nearest in shot %.2f m (%s; %d of 15 "
+                        "probes hit), scene x%.2f", cut ? "camera cut"
+                        : "gameplay depth", nearest / metre,
+                        head_used ? "Lara" : "probe", probe_hits, k);
+                }
+            }
+            else if (cut)
+                log("theatre: camera cut -- nothing measured in shot, "
+                    "scene x%.2f kept", g_theatre_scale);
+        }
+
         void __cdecl detour_body(void* cam);
         void __cdecl detour(void* cam)
         {
             perf_cpu_begin(PerfCamera);
+            ++g_camera_depth;
+            if (g_camera_depth > 1)
+            {
+                static unsigned reports = 0;
+                if (reports++ < 5)
+                    log("camera: build re-entered from inside a camera build "
+                        "(depth %d)", g_camera_depth);
+            }
             detour_body(cam);
+            --g_camera_depth;
             perf_cpu_end(PerfCamera);
         }
 
@@ -10421,7 +14509,11 @@ namespace trlvr
             // panel like the intro videos.
             const bool flat_screen = cam == kMainCamera &&
                                      ui_mission_prep_active();
-            const bool level = tune_level_horizon() && !flat_screen;
+            // Theatre cutscenes keep the flat game's framing, tilt and all:
+            // the window shows what the monitor would.
+            const bool theatre = cam == kMainCamera && vr_theatre_active();
+            const bool level = tune_level_horizon() && !flat_screen &&
+                               !theatre;
             float* rot = (float*)((unsigned char*)cam + kOffRotation);
             const float saved[3] = { rot[0], rot[1], rot[2] };
 
@@ -10525,6 +14617,14 @@ namespace trlvr
             if (!have_aim_reference)
                 aim_reference = base_camera;
 
+            if (theatre && !first_person)
+                theatre_shot_update(base_camera);
+            else if (main_camera)
+            {
+                g_theatre_shot_valid = false;
+                g_theatre_scale = 1.0f;
+            }
+
             // Third-person presets: gameplay only (no authored cameras,
             // cutscenes or menus other than pause).
             float tp_position[3]{};
@@ -10534,7 +14634,7 @@ namespace trlvr
                 !camera_cinematic_playing() &&
                 !(ui_menu_active() && !ui_pause_menu_active()))
             {
-                g_tp_board_scale = camera_third_person_mode() == 2;
+                g_tp_board_scale = true;
                 tp_override = third_person_camera_position(
                     cam, base_camera, tp_position);
             }
@@ -10546,8 +14646,11 @@ namespace trlvr
             }
             if (main_camera && !tp_override)
                 g_tp_board_scale = false;
+            // Not in the theatre: pulling the eye back from geometry moved
+            // the world behind the window with the head (user 2026-10-10,
+            // crouching); the scene there stays rigid.
             if (tp_override && drive && !flat_screen &&
-                config().camera_collision)
+                config().camera_collision && !theatre)
                 third_person_eye_collision(base_camera, tp_position);
 
             // The whole head pose, on the matrices the engine just built. Nothing
@@ -10555,6 +14658,19 @@ namespace trlvr
             // are outputs, rebuilt from scratch on every call.
             if (drive && !flat_screen)
             {
+                if (first_person && main_camera)
+                    roomscale_step(base_camera, first_person_position);
+                if (main_camera)
+                {
+                    if (first_person && config().first_person_hardcore)
+                        hardcore_update();
+                    else
+                    {
+                        g_hardcore_valid = false;
+                        if (!first_person)
+                            g_hardcore_ref_valid = false;
+                    }
+                }
                 apply_head_pose(cam,
                     first_person ? first_person_position
                     : tp_override ? tp_position : nullptr);
@@ -10713,12 +14829,159 @@ namespace trlvr
                 g_last_report = now;
             }
         }
+        // The game's gamepad rumble. Retail mixes it in a PadShockMixer
+        // (0x01116478): authored curves from padshocklib, started by sound
+        // events, plus the simple PADSHOCK_Shock* pulses. Once a frame
+        // PADSHOCK_Update (0x0054FC10, from the sound update) runs
+        // PadShockMixer::Update (0x0054F7C0), which writes each motor
+        // through the pad device at mixer+0x260 -- vtable +0x24 motor count,
+        // +0x28 motor type, +0x2C set motor (index, 0..1), +0x30 send. With
+        // no pad there were no motors and nothing was ever computed. The
+        // update call is pointed at padshock_update_for_vr, which runs the
+        // mixer against a stand-in pad shaped like the retail XInput one
+        // (vtable 0x00EFE1A0: 2 motors, both type 2; motor 0 the big one)
+        // and hands its levels to the controllers.
+        struct StandInPad
+        {
+            const void* const* vtable;
+            float motor[2];
+        };
+
+        int __fastcall stand_in_pad_nothing(StandInPad*, void*)
+        {
+            return 0;
+        }
+
+        int __fastcall stand_in_pad_motor_count(StandInPad*, void*)
+        {
+            return 2;
+        }
+
+        int __fastcall stand_in_pad_motor_type(StandInPad*, void*, int)
+        {
+            return 2;
+        }
+
+        void __fastcall stand_in_pad_set_motor(StandInPad* pad, void*,
+                                               int motor, float value)
+        {
+            if (motor == 0 || motor == 1)
+                pad->motor[motor] = value;
+        }
+
+        void __fastcall stand_in_pad_send(StandInPad* pad, void*)
+        {
+            vr_input_game_motors(pad->motor[0], pad->motor[1]);
+        }
+
+        const void* const kStandInPadVtable[16] = {
+            (void*)&stand_in_pad_nothing, (void*)&stand_in_pad_nothing,
+            (void*)&stand_in_pad_nothing, (void*)&stand_in_pad_nothing,
+            (void*)&stand_in_pad_nothing, (void*)&stand_in_pad_nothing,
+            (void*)&stand_in_pad_nothing, (void*)&stand_in_pad_nothing,
+            (void*)&stand_in_pad_nothing,
+            (void*)&stand_in_pad_motor_count,   // +0x24
+            (void*)&stand_in_pad_motor_type,    // +0x28
+            (void*)&stand_in_pad_set_motor,     // +0x2C
+            (void*)&stand_in_pad_send,          // +0x30
+            (void*)&stand_in_pad_nothing, (void*)&stand_in_pad_nothing,
+            (void*)&stand_in_pad_nothing };
+        StandInPad g_stand_in_pad = { kStandInPadVtable, { 0.0f, 0.0f } };
+
+        using PFN_PadshockUpdate = void(__cdecl*)(float);
+        using PFN_MixerUpdate = void(__fastcall*)(void*, void*, float);
+
+        void __cdecl padshock_update_for_vr(float dt)
+        {
+            if (!config().shake_rumble)
+            {
+                reinterpret_cast<PFN_PadshockUpdate>(0x0054FC10)(dt);
+                return;
+            }
+            unsigned char* const mixer =
+                reinterpret_cast<unsigned char*>(0x01116478);
+            void** const device = reinterpret_cast<void**>(mixer + 0x260);
+            // PADSHOCK_EnableVibration's flag: off, every motor is sent 0.
+            unsigned char* const enabled =
+                reinterpret_cast<unsigned char*>(0x00F172F4);
+            void* const device_was = *device;
+            const unsigned char enabled_was = *enabled;
+            *device = &g_stand_in_pad;
+            *enabled = 1;
+            reinterpret_cast<PFN_MixerUpdate>(0x0054F7C0)(mixer, nullptr, dt);
+            *device = device_was;
+            *enabled = enabled_was;
+        }
+
+        void route_padshock_to_controllers()
+        {
+            // call PADSHOCK_Update in the sound update.
+            unsigned char* const site =
+                reinterpret_cast<unsigned char*>(0x005C965A);
+            const unsigned char expected[5] =
+                { 0xE8, 0xB1, 0x65, 0xF8, 0xFF };
+            if (memcmp(site, expected, sizeof(expected)) != 0)
+            {
+                log("rumble: the game's rumble is not routed to the "
+                    "controllers (unexpected bytes at 0x005C965A)");
+                return;
+            }
+            const intptr_t rel =
+                reinterpret_cast<intptr_t>(&padshock_update_for_vr) -
+                reinterpret_cast<intptr_t>(site + 5);
+            DWORD old = 0;
+            if (!VirtualProtect(site + 1, 4, PAGE_EXECUTE_READWRITE, &old))
+                return;
+            memcpy(site + 1, &rel, 4);
+            VirtualProtect(site + 1, 4, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), site, 5);
+            log("rumble: the game's own pad rumble (PadShock mixer) now "
+                "plays on the controllers");
+        }
+
+        // CAMERA_SetShake (0x0047E4B0) is NoPadshock then
+        // PADSHOCK_Shock1(min(255, amount / 2), max(0x4000, time * 2)) --
+        // a short jolt read back from the camera's shake fields. A refused
+        // shake leaves those fields alone, so the jolt is worked out here
+        // from the arguments and swapped into that Shock1 call. A shake
+        // that calls NoPadshock directly (the boulder) had no jolt in
+        // retail either; its rumble is a sound's padshock, if any.
+        using PFN_Shock1 = void(__cdecl*)(int, int);
+        PFN_Shock1 g_shock1 = nullptr;
+        const uintptr_t kSetShakeReturn = 0x0047E4C5;
+        bool g_shake_jolt_pending = false;
+        int g_shake_jolt_intensity = 0, g_shake_jolt_duration = 0;
+
+        void __cdecl detour_shock1(int intensity, int duration)
+        {
+            if (g_shake_jolt_pending)
+            {
+                g_shake_jolt_pending = false;
+                intensity = g_shake_jolt_intensity;
+                duration = g_shake_jolt_duration;
+            }
+            g_shock1(intensity, duration);
+        }
+
         void __cdecl detour_setshake(void* cam, int amount, int frames)
         {
             if (tune_camera_shake())
             {
                 g_setshake(cam, amount, frames);
                 return;
+            }
+
+            // Called from CAMERA_SetShake: its pad jolt, as retail works it
+            // out (the second argument is the shake's length, the third its
+            // size; see the note at detour_shock1).
+            if (reinterpret_cast<uintptr_t>(_ReturnAddress()) ==
+                kSetShakeReturn)
+            {
+                const int size = (int)(frames / 4096.0f * 2048.0f);
+                const int length = (short)(amount * 2);
+                g_shake_jolt_intensity = size > 255 ? 255 : size;
+                g_shake_jolt_duration = length < 0x4000 ? 0x4000 : length;
+                g_shake_jolt_pending = true;
             }
 
             // Counted rather than silently dropped, so the log can say
@@ -10917,7 +15180,12 @@ namespace trlvr
 
     float camera_stereo_scale()
     {
-        return 1.0f;
+        return vr_theatre_active() ? g_theatre_scale : 1.0f;
+    }
+
+    float camera_theatre_scale()
+    {
+        return vr_theatre_active() ? g_theatre_scale : 1.0f;
     }
 
     bool camera_accurate_aim_active()
@@ -10986,9 +15254,62 @@ namespace trlvr
     {
         if (!g_tp_board_scale || g_first_person_active)
             return 1.0f;
-        // Lara is about 1.75 m at world_scale; shown board_lara_height_cm.
-        const float factor = 175.0f / config().board_lara_height_cm;
-        return std::isfinite(factor) && factor > 0.5f ? factor : 1.0f;
+        // The preset's scale (board's default: Lara about 1.75 m shown
+        // board_lara_height_cm tall); the palm sliders change it.
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        const float factor = mode >= 0 && mode < 3 ? g_tp_scale[mode] : 1.0f;
+        return std::isfinite(factor) && factor >= 1.0f ? factor : 1.0f;
+    }
+
+    bool camera_tp_view_available()
+    {
+        return g_tp_board_scale && !g_first_person_active;
+    }
+
+    float camera_tp_scale()
+    {
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        return mode >= 0 && mode < 3 ? g_tp_scale[mode] : 1.0f;
+    }
+
+    float camera_tp_zoom()
+    {
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        return mode >= 0 && mode < 3 ? g_tp_zoom[mode] : 1.0f;
+    }
+
+    void camera_set_tp_view(float scale, float zoom, bool save)
+    {
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        if (mode < 0 || mode > 2 || !std::isfinite(scale) ||
+            !std::isfinite(zoom))
+            return;
+        g_tp_scale[mode] = fminf(25.0f, fmaxf(1.0f, scale));
+        g_tp_zoom[mode] = fminf(3.5f, fmaxf(0.3f, zoom));
+        if (!save)
+            return;
+        wchar_t path[MAX_PATH]{};
+        swprintf_s(path, L"%strlvr.ini", exe_dir());
+        wchar_t key[64]{}, text[32]{};
+        swprintf_s(key, L"third_person_scale_%s", kTpPresetNames[mode]);
+        swprintf_s(text, L"%.3f", g_tp_scale[mode]);
+        WritePrivateProfileStringW(L"vr", key, text, path);
+        swprintf_s(key, L"third_person_zoom_%s", kTpPresetNames[mode]);
+        swprintf_s(text, L"%.3f", g_tp_zoom[mode]);
+        WritePrivateProfileStringW(L"vr", key, text, path);
+        WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
+        log("view: %S preset -- scale x%.2f (Lara %.0f cm), zoom x%.2f; "
+            "saved", kTpPresetNames[mode], g_tp_scale[mode],
+            175.0f / g_tp_scale[mode], g_tp_zoom[mode]);
+    }
+
+    float camera_palm_up(int hand)
+    {
+        return palm_up(hand);
     }
 
     namespace
@@ -11237,7 +15558,19 @@ namespace trlvr
                 continue;
             }
             const Mat4 world = to_head * camera_to_world;
-            const float* p = world.m[3];
+            // The drawn index finger's last joint while it is fresh; the
+            // controller origin before the hands have been drawn.
+            const PalmSeen& finger = g_index_seen[h];
+            const bool finger_fresh = finger.time &&
+                GetTickCount() - finger.time < 250;
+            const float* p = finger_fresh ? finger.point : world.m[3];
+            static bool finger_reported[2] = { false, false };
+            if (finger_fresh && !finger_reported[h])
+            {
+                finger_reported[h] = true;
+                log("board: %s hand pinches from Lara's index finger (last "
+                    "joint), not the controller", left ? "left" : "right");
+            }
             const float dx = p[0] - zone[0];
             const float dy = p[1] - zone[1];
             // The palm she stands on cannot also pinch her.
@@ -11462,6 +15795,11 @@ namespace trlvr
     // released = snap). A snap whose index tip sweeps through mini Lara
     // knocks her away along the flick (she lands and falls as from a
     // drop); with board_flick_anim set, that animation plays as well.
+    bool camera_roomscale_walk_keys(bool dir[4])
+    {
+        return dir && roomscale_walk_keys(dir);
+    }
+
     void camera_board_flick_update(bool active, bool held)
     {
         if (g_flick_anim == -2)
@@ -11523,17 +15861,23 @@ namespace trlvr
         {
             g_flick.phase = 1;
             g_flick.tip_valid = false;
+            g_flick.from = kPoseRelaxed;
+            g_flick.load = 0.0f;
         }
         if (g_flick.phase == 1)
         {
             const float follow = 1.0f - expf(-dt / 0.08f);
             g_flick.amount += (1.0f - g_flick.amount) * follow;
             g_flick.fist += (1.0f - g_flick.fist) * follow;
+            g_flick.load += (1.0f - g_flick.load) * follow;
+            g_flick.pose = finger_pose_lerp(g_flick.from, kPoseFlickLoaded,
+                                            g_flick.load);
             if (!held)
             {
                 g_flick.phase = 2;
                 g_flick.started = now;
                 g_flick.hit_done = false;
+                g_flick.from = g_flick.pose;
                 vr_input_weapon_haptic(true, 0.15f);
             }
             return;
@@ -11543,13 +15887,27 @@ namespace trlvr
         const float e = frequency.QuadPart
             ? (float)((double)(now.QuadPart - g_flick.started.QuadPart) /
                       (double)frequency.QuadPart) : 1.0f;
-        // Snap straight in 40 ms, hold the flicked finger 1.5 s, then relax
-        // back to the idle hand over 0.3 s (user, 2026-10-03). Holding Y
-        // again after the hit window loads another flick.
+        // Snap straight in 60 ms (through the recorded mid-snap frame; the
+        // user's own flick took about that), hold the flicked finger 1.5
+        // s, then relax back to the idle hand over 0.3 s (user,
+        // 2026-10-03). Holding Y again after the hit window loads another
+        // flick.
         const float straight = -0.15f;
-        if (e < 0.04f)
+        const float snap = 0.06f;
+        if (e < snap)
+            g_flick.pose = e < 0.5f * snap
+                ? finger_pose_lerp(g_flick.from, kPoseFlickSnap,
+                                   e / (0.5f * snap))
+                : finger_pose_lerp(kPoseFlickSnap, kPoseFlickOpen,
+                                   (e - 0.5f * snap) / (0.5f * snap));
+        else if (e < 1.5f)
+            g_flick.pose = kPoseFlickOpen;
+        else
+            g_flick.pose = finger_pose_lerp(kPoseFlickOpen, kPoseRelaxed,
+                                            (e - 1.5f) / 0.3f);
+        if (e < snap)
         {
-            g_flick.amount = 1.0f + (straight - 1.0f) * (e / 0.04f);
+            g_flick.amount = 1.0f + (straight - 1.0f) * (e / snap);
             g_flick.fist = 1.0f;
         }
         else if (e < 1.5f)
@@ -11572,6 +15930,8 @@ namespace trlvr
         {
             g_flick.phase = 1;
             g_flick.tip_valid = false;
+            g_flick.from = g_flick.pose;
+            g_flick.load = 0.0f;
             return;
         }
         if (g_flick.hit_done || e > 0.15f || !g_flick.tip_valid ||
@@ -11787,34 +16147,12 @@ namespace trlvr
                 next < 0 ? " (none: shove and fall)" : " previewed");
             return;
         }
-        // 10..15: hang offset -x +x -y +y -z +z (5 mm), 16: reset.
+        // 10..16 used to tune the hang offset; Lara now hangs from the
+        // index finger itself (2026-10-09).
         if (key >= 10 && key <= 16)
         {
-            hang_load();
-            if (key == 16)
-                g_hang_offset[0] = g_hang_offset[1] = g_hang_offset[2] = 0.0f;
-            else
-            {
-                const int axis = (key - 10) / 2;
-                // Engine axes: x right, y DOWN, z forward -- numpad 8 is up.
-                float step = (key % 2) ? 0.005f : -0.005f;
-                if (axis == 1)
-                    step = -step;
-                g_hang_offset[axis] += step;
-            }
-            wchar_t path[MAX_PATH]{}, value[32]{};
-            swprintf_s(path, L"%strlvr.ini", exe_dir());
-            const wchar_t* keys[3] = { L"board_hang_x", L"board_hang_y",
-                                       L"board_hang_z" };
-            for (int k = 0; k < 3; ++k)
-            {
-                swprintf_s(value, L"%.3f", g_hang_offset[k]);
-                WritePrivateProfileStringW(L"vr", keys[k], value, path);
-            }
-            WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
-            log("board: hang offset (%+.3f, %+.3f, %+.3f) m along the hand "
-                "(right, down, forward); saved", g_hang_offset[0], g_hang_offset[1],
-                g_hang_offset[2]);
+            log("board: the hang offset is no longer tuned -- Lara hangs "
+                "from the index finger's last joint");
             return;
         }
         if (key == 0)
@@ -11950,6 +16288,26 @@ namespace trlvr
         return g_first_person_active;
     }
 
+    bool camera_pouch_model_shown(int item)
+    {
+        return item >= 0 && item < 2 && g_first_person_active &&
+               g_pouch_models[item].drawn_at &&
+               GetTickCount() - g_pouch_models[item].drawn_at < 250;
+    }
+
+    void camera_show_retail_gear_cross()
+    {
+        if (!g_fade_trigger)
+            return;
+        __try
+        {
+            g_fade_trigger(5);
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+    }
+
     namespace
     {
         int g_view_first_person = -1;   // -1: not read from config yet
@@ -11961,6 +16319,14 @@ namespace trlvr
         if (g_tp_mode < 0)
             g_tp_mode = config().third_person_mode;
         return g_tp_mode;
+    }
+
+    void camera_set_third_person_mode(int mode)
+    {
+        g_tp_mode = mode >= 0 && mode <= 2 ? mode : 0;
+        log("view: third-person preset %s (pause menu)",
+            mode == 1 ? "shoulder" : mode == 2 ? "board"
+            : mode == 3 ? "all (cycle from classic)" : "classic");
     }
 
     bool camera_view_first_person()
@@ -12139,6 +16505,29 @@ namespace trlvr
     bool camera_first_person_vine_climbing()
     {
         return g_first_person_active && g_first_person_vine_climbing;
+    }
+
+    bool camera_first_person_lara_height(float* metres)
+    {
+        if (!metres || !g_first_person_active || !g_first_person_instance)
+            return false;
+        const float scale = tune_world_scale();
+        if (!(scale > 0.0f))
+            return false;
+        __try
+        {
+            const float z = *reinterpret_cast<const float*>(
+                static_cast<const unsigned char*>(g_first_person_instance) +
+                0x18);
+            if (!std::isfinite(z))
+                return false;
+            *metres = z / scale;
+            return true;
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER)
+        {
+            return false;
+        }
     }
 
     bool camera_first_person_vine_look_angle(float* radians)
@@ -12407,6 +16796,41 @@ namespace trlvr
 
     void camera_first_person_gpu_frame_end()
     {
+        ++g_present_count;
+        // Roomscale: the move asked for this frame, outside any game update
+        // or camera build.
+        if (g_room_request_valid)
+        {
+            g_room_request_valid = false;
+            void* lara = lara_instance();
+            float root[3]{};
+            bool same = false;
+            __try
+            {
+                if (lara)
+                {
+                    memcpy(root, static_cast<const unsigned char*>(lara) +
+                           0x10, sizeof(root));
+                    // Only from where it was measured: if she moved since,
+                    // the request is stale.
+                    same = fabsf(root[0] - g_room_request_from[0]) < 0.5f &&
+                           fabsf(root[1] - g_room_request_from[1]) < 0.5f;
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                same = false;
+            }
+            if (same && room_set_lara_position(lara, g_room_request))
+            {
+                // The mod's move: not game motion for the room anchor.
+                const float dx = g_room_request[0] - root[0];
+                const float dy = g_room_request[1] - root[1];
+                g_room_last[0] = g_room_request[0];
+                g_room_last[1] = g_room_request[1];
+                g_room_moved += sqrtf(dx * dx + dy * dy);
+            }
+        }
         // The D3D proxy also runs in its standalone load test. That process
         // has no retail camera or screen-stack globals to inspect.
         if (!g_camera_head_initialized)
@@ -13078,6 +17502,17 @@ namespace trlvr
 
         {
             tramp = nullptr;
+            // push ecx / mov eax, [esp+14h] -- two complete instructions.
+            static const unsigned char kMarkerSignature[] =
+                { 0x51, 0x8B, 0x44, 0x24, 0x14 };
+            void* marker_tramp = nullptr;
+            if (hook_install((void*)kGetHMarkerTransform,
+                             (void*)&detour_marker_transform, &marker_tramp,
+                             kMarkerSignature, sizeof(kMarkerSignature),
+                             "GetHMarkerTransform (first-person hand "
+                             "markers)"))
+                g_marker_original =
+                    reinterpret_cast<PFN_GetHMarkerTransform>(marker_tramp);
             if (hook_install((void*)kG2InstanceBuildTransforms,
                              (void*)&detour_build_transforms, &tramp,
                              kBuildTransformsSignature,
@@ -13131,5 +17566,17 @@ namespace trlvr
         {
             g_setshake = (PFN_SetShake)tramp;
         }
+
+        // fild [esp+8] / fmul [0x00F05600] -- whole instructions, no
+        // relatives.
+        const unsigned char kShock1Sig[10] =
+            { 0xDB, 0x44, 0x24, 0x08, 0xD8, 0x0D, 0x00, 0x56, 0xF0, 0x00 };
+        tramp = nullptr;
+        if (hook_install((void*)0x0054FED0, (void*)&detour_shock1, &tramp,
+                         kShock1Sig, sizeof(kShock1Sig),
+                         "PADSHOCK_Shock1 (refused screen shakes keep their "
+                         "pad jolt)"))
+            g_shock1 = (PFN_Shock1)tramp;
+        route_padshock_to_controllers();
     }
 }

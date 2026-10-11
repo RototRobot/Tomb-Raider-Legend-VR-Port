@@ -1,6 +1,9 @@
 #include "water_stereo.h"
 
 #include "hook.h"
+#include "reflection_stereo.h"
+
+#include "../common/config.h"
 
 #include "../common/log.h"
 
@@ -49,7 +52,9 @@ namespace trlvr
             return write_code(patch.at, replacement, sizeof(replacement));
         }
 
-        void disable_mono_planar_reflection()
+        // stereo: the reflection is drawn per eye (reflection_stereo), so
+        // only the next-gen route, which that does not cover, is cut.
+        void disable_mono_planar_reflection(bool stereo)
         {
             // Keep device settings and resource lifetime intact. These are
             // only the render-time gates for the game's separate planar
@@ -102,6 +107,12 @@ namespace trlvr
                 return;
             }
 
+            if (stereo)
+            {
+                log("water stereo: planar reflection kept (drawn per eye); "
+                    "next-gen reflection call suppressed");
+                return;
+            }
             for (const BranchPatch& patch : patches)
             {
                 if (!force_unconditional_jump(patch))
@@ -168,8 +179,13 @@ namespace trlvr
             reflection_route ? "next-gen" : "previous-gen",
             reflection_route);
 
-        disable_mono_planar_reflection();
-        disable_mono_waterfx_scene_sample();
+        disable_mono_planar_reflection(reflection_stereo_init());
+        if (config().water_effects)
+            log("water stereo: WaterFX scene sample 0x4FE kept -- the screen "
+                "copy is split by eye (needs Water Effects on in the Setup "
+                "dialog)");
+        else
+            disable_mono_waterfx_scene_sample();
 
         const unsigned char sig[] = { 0xB8, 0x34, 0x27, 0x00, 0x00 };
         if (hook_install((void*)kWaterEndScene, (void*)&detour,

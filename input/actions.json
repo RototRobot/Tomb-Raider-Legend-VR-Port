@@ -30,6 +30,8 @@
     { "name": "/actions/gameplay/in/pda",        "type": "boolean", "requirement": "optional" },
     { "name": "/actions/gameplay/in/hand_left",  "type": "pose", "requirement": "optional" },
     { "name": "/actions/gameplay/in/hand_right", "type": "pose", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/skeleton_left",  "type": "skeleton", "skeleton": "/skeleton/hand/left", "requirement": "optional" },
+    { "name": "/actions/gameplay/in/skeleton_right", "type": "skeleton", "skeleton": "/skeleton/hand/right", "requirement": "optional" },
     { "name": "/actions/gameplay/out/haptic_left",  "type": "vibration", "requirement": "optional" },
     { "name": "/actions/gameplay/out/haptic_right", "type": "vibration", "requirement": "optional" }
   ],
@@ -65,6 +67,8 @@
       "/actions/gameplay/in/pda": "PDA (Tab)",
       "/actions/gameplay/in/hand_left": "Left hand grip pose",
       "/actions/gameplay/in/hand_right": "Right hand grip pose",
+      "/actions/gameplay/in/skeleton_left": "Left hand fingers (skeleton)",
+      "/actions/gameplay/in/skeleton_right": "Right hand fingers (skeleton)",
       "/actions/gameplay/out/haptic_left": "Left handhold cue",
       "/actions/gameplay/out/haptic_right": "Right handhold cue"
     }

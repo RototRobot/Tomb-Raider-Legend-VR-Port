@@ -50,6 +50,46 @@ namespace trlvr
     // centimetres, to measure the drawn hand against the controller in each
     // view. F5 reloads.
     bool tune_hand_ruler_enabled();
+    // Theatre window placement: its offset (and the eye anchored to it) from
+    // where it first appears, metres (right, up, forward). [vr]
+    // theatre_window_right/up/forward; the handle saves them.
+    void tune_theatre_offset(float out[3]);
+    void tune_set_theatre_offset(const float in[3]);
+    // Board placement moved by the diorama's handle, metres (right, up,
+    // forward) in the recentred frame. [vr] board_offset_right/up/forward.
+    void tune_board_offset(float out[3]);
+    void tune_set_board_offset(const float in[3]);
+    // [developer] gear_cross_debug: draw each gear cross grab sphere and the
+    // point of each controller that is tested against them. F5 reloads.
+    bool tune_gear_cross_debug();
+    // [developer] finger_debug: SteamVR's hand skeleton drawn at each
+    // controller with five finger-curl bars, and the finger numbers logged
+    // once a second. F5 reloads.
+    bool tune_finger_debug();
+    // [developer] finger_record: numpad / starts and stops recording both
+    // hands' finger poses to trlvr_finger_poses.csv. F5 reloads.
+    bool tune_finger_record();
+    // Built-in tuning profiles (2026-10-08): hand model, aim, holsters, gear
+    // and gear cross defaults per controller type, used for any key the INI
+    // does not set. 0 = the developer's Reverb G2 tuning (also WMR, Index
+    // and anything unknown), 1 = Oculus Touch (a Quest tester's tuning).
+    // vr_input picks it from SteamVR's controller type; changing it reloads.
+    void tune_set_controller_profile(int profile, const char* type);
+    // [controls] reset_controller_tuning_on_load = 1: at startup, before
+    // anything reads them, remove the saved hand tuning (Hand Calibration,
+    // the numpad hand / grip alignment and the aim-ray offsets) from
+    // trlvr.ini, so the controller profile's defaults apply again (Oculus
+    // Touch for Quest, the default for every other controller). Returns
+    // how many saved values were removed, or -1 with the option off.
+    int tune_reset_controller_tuning_on_load();
+    int tune_controller_profile();
+    // An INI value with the profile's default when the INI has none (the
+    // old auto-written holster values count as none). False if neither.
+    bool tune_profile_read(const wchar_t* section, const wchar_t* key,
+                           wchar_t* out, size_t out_count);
+    // The profile's own default, ignoring the INI.
+    bool tune_profile_default(const wchar_t* section, const wchar_t* key,
+                              float* out);
     bool tune_hand_debug_selected_left();
     bool tune_hand_debug_rotation_mode();
     float tune_first_person_belt_height();

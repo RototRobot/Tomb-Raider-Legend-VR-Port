@@ -86,8 +86,20 @@ start-up.
   auto-centring or shake), `shoulder` (close behind Lara at life size) and
   `board` (Lara a few inches tall on a tabletop world).
 - **Camera collision** keeps the view out of rock and walls.
+- **Scale and zoom by hand**: turn your off hand palm up to bring out two
+  sliders that resize the world and move the camera in or out, saved per
+  camera style. Lara's VR hands scale with it.
+- **Board diorama** (`board_diorama = 1`): in `board` the tabletop world sits
+  in an open box in a dark room; grab the bar on its edge to move it.
+- **Theatre mode**: cutscenes, and optionally third-person play, are shown
+  through a large window fixed in the room, still in 3D, instead of moving
+  your view. Comfortable for anyone who finds a moving camera hard.
 - **A 3D gear cross** of the game's own item icons floats in front of you with
-  immersive controls; grip an icon to use it.
+  immersive controls; grip an icon to use it. Or, with `gear_menu = radial`
+  (always, with the classic layout), hold the left stick and push it towards
+  an item.
+- **Wall touch**: walking beside a wall with nothing drawn, Lara reaches out and
+  runs her hand along it, and keeps it there for a moment when she stops.
 
 
 ### First person (optional)
@@ -98,18 +110,32 @@ start-up.
   them away. Grip over a shoulder for the long gun.
 - **Belt and pouches**: grab the grapple and fling it, lift the binoculars to
   your face, take a grenade or flare from the belt, and bring a medipack to
-  your mouth.
+  your mouth. The pouches show the game's own medipack and grenade models
+  while you carry any. The light's glow and the grapple's rope follow the gear
+  in your hands.
 - **Two-handed long guns**: the off hand on the foregrip steadies the aim.
 - **Accurate shooting**: shots go where the gun points (no random spread in
   first person), with a VR crosshair at the impact point, recoil and haptics.
   Lock-on targeting follows your head and is widened for VR.
 - **Hand-over-hand traversal**: grip ledges, vines, chains and swing bars and
   pull yourself along them; alternate hands quickly to shimmy fast; pull down
-  with both hands to climb onto a ledge. A one-hand catch is secured by
+  with both hands to climb onto a ledge. On a vine each grip climbs one way
+  only (up or down, set by your first pull); let go and grip again to change. A one-hand catch is secured by
   grabbing the hold (or automatically, with `auto_secure_catch = bars` or `all`).
 - **Jumps go where you look** off chains and poles; on vines the stick works
   relative to your view.
 - **Physical crouch**: crouch for real to crouch.
+- **Roomscale**: walk around your room and Lara follows, stopping at walls; a
+  real step plays her walk animation.
+- **Hand collision**: hands stop at walls and floors, and at Lara's own body
+  in full-body mode.
+- **Body physics** (full body): the torso gives a little as she moves, and
+  your hands press into it rather than passing through.
+- **Finger tracking** (`finger_tracking = 1`): on controllers that report
+  fingers (Quest, Index), Lara's fingers follow yours, with natural poses for
+  carrying items and the grapple flick.
+- **Hardcore mode** (off by default): the view turns with Lara's body through
+  flips, rolls and spins instead of staying level. Not for everyone.
 - **Holster setup in game**: Pause menu → *VR Settings* → *VR Holster Setup*
   lets you place the holsters, belt items and pouches where they suit your body.
 - **Hand calibration in game**: Pause menu → *VR Settings* → *Hand Calibration*
@@ -129,6 +155,25 @@ start-up.
   button instead of the keyboard key, including for left-handed play.
 - **Smooth or snap turning**, an optional comfort vignette, and movies and
   loading screens shown on a world-locked screen.
+- **VR settings in the pause menu** (immersive controls, during a level):
+  *Display* becomes *VR Settings*, and its entries change VR options on the spot
+  and save them to `trlvr.ini`. Press an entry to step through its choices:
+
+  | Entry | Choices |
+  |---|---|
+  | VR Holster Setup | Place holsters, belt items and pouches |
+  | Hand Calibration | Line Lara's hands and aim up with your controllers |
+  | Theatre | Off · Cutscenes · Always |
+  | Third Person | Classic · Shoulder · Board · All |
+  | Hand Collision | Off · On · On + Body |
+  | Body | Hands · Full |
+  | Left Handed | Off · On |
+  | Hardcore Mode | Off · On |
+
+  The On/Off column on the right still shows the game's own setting; the label
+  is what counts.
+- **Five languages**: the mod's own text follows the game's language (English,
+  French, German, Italian, Spanish).
 
 ---
 
@@ -142,9 +187,12 @@ game's **Setup** dialog turn **off**:
 | Setting | Why |
 |---|---|
 | Next Generation Content | Its separate renderer gives a black scene in VR |
-| Fullscreen Effects | Flat-screen post effects smear the two eyes into each other |
 
-Depth of Field is switched off by the mod itself (`depth_of_field`).
+The mod sets three other options itself at every start, whatever the Setup
+dialog says: **Depth of Field off** and **Fullscreen Effects off** (both blur
+or smear the view in VR), and **anti-aliasing (FSAA) on**, capped by `msaa`.
+Set `depth_of_field`, `fullscreen_effects` or `fsaa` to `game` to keep the
+Setup dialog's choice instead.
 
 ### 2. Copy the files
 
@@ -199,7 +247,7 @@ Defaults for Oculus Touch-style controllers (Reverb G2, Quest, Rift):
 | Control | Action |
 |---|---|
 | Left stick | Move |
-| Left stick click / double click / hold | Pause / recentre the view / health pack |
+| Left stick click / double click / hold | Pause / recentre the view / gear menu |
 | Right stick | Turn |
 | Right stick click / double click / hold | Switch weapons / PDA / binoculars |
 | Left trigger | Action, interact, pull the grapple |
@@ -210,6 +258,9 @@ Defaults for Oculus Touch-style controllers (Reverb G2, Quest, Rift):
 | B | Dive, crouch, roll; back in menus |
 | X | Accurate aim |
 | Y tap / hold | Grenade or flare / personal light |
+
+The gear menu: hold the left stick, then push it towards an item (up health
+pack, right binoculars, down switch weapon, left personal light).
 
 Index, WMR and per-controller details are in
 [`release/VR CONTROLLER BINDINGS.txt`](release/VR%20CONTROLLER%20BINDINGS.txt).
@@ -234,8 +285,15 @@ Mostly for diagnosing problems. Each writes what it did to `trlvr.log`.
 | F3 | Time the next frame on the GPU (`gpu profile` lines) |
 | F4 | Log every draw of the next frame |
 | F5 | Reload hand offsets from `trlvr.ini` |
+| F7 | View prescale fix on/off (for comparison) |
+| F8 | Step the ledge visibility marker |
 | F9 | Capture the interface textures |
 | `[` / `]` | Nearer / farther convergence of first-person world markers |
+| `\` | Switch between first and third person |
+| Numpad 0 | Log a snapshot of both hands' finger tracking |
+| Numpad / | Start / stop recording finger poses to `trlvr_finger_poses.csv` |
+
+The game's own keys (Home, End, Delete, Page Up/Down, Insert) are left alone.
 
 ---
 
@@ -271,6 +329,18 @@ first and third person at any time in gameplay.
 | `first_person_body` | `hands` | `full` draws Lara's whole body below the view |
 | `third_person_mode` | `classic` | `classic`, `shoulder` or `board`; `all` makes the right-stick long press cycle classic → shoulder → board → first person |
 | `left_handed` | `0` | Main hand on the left; swaps the triggers' roles |
+| `cutscene_mode` | `normal` | `theatre` shows cutscenes through a window fixed in the room |
+| `gameplay_theatre` | `0` | Third-person play through the same window (`board` excluded) |
+| `theatre_backdrop` | `000000` | Colour of the room round the window (a chroma-key colour suits passthrough) |
+| `board_diorama` | `0` | `board` camera: the world in an open box you can grab and move |
+| `hand_collision` | `0` | First-person hands stop at walls and floors |
+| `hand_body_collision` | `1` | Hands stop at Lara's body (full body) |
+| `body_spring` / `body_soft` | `1` / `1` | Torso and soft-body movement in full body |
+| `roomscale` / `roomscale_walk` | `1` / `1` | First person: walking in your room moves Lara; real steps play her walk |
+| `finger_tracking` | `0` | Lara's fingers follow yours on controllers that track fingers |
+| `first_person_hardcore` | `0` | The view turns with Lara through flips and rolls |
+| `first_person_hardcore_threshold` | `20` | Degrees of body tilt before hardcore mode turns the view |
+| `reset_controller_tuning_on_load` | `0` | Forget hand calibration and aim tuning at each start (handy when switching headsets) |
 | `pistol_mode` | `akimbo` | `single`: each hip draws its own pistol, fired by that hand |
 | `aim_mode` | `hand` | `hands` aims between both pistols; `hands_head` mixes in the headset |
 | `two_handed_mode` | `auto` | Long-gun foregrip: `auto` (bring the hand close), `toggle`, `hold` |
@@ -279,12 +349,18 @@ first and third person at any time in gameplay.
 | `physical_crouch` | `1` | Crouch for real to crouch |
 | `auto_secure_catch` | `off` | One-hand catches secure themselves: `bars` (swing bars only) or `all` (ledges and bars) |
 | `catch_extra_time` | `4.5` | Extra seconds to secure a one-hand catch by hand (first person, about 6 s in all; `0` = game timing) |
+| `shake_rumble` | `1` | The game's controller rumble (screen shakes, explosions) on both VR controllers |
+| `gear_cross_x_rate` | `1.0` | Third-person gear cross: `0` turns with your head, `1` stays put in the room (look around to find it), in between follows part of the way; recentring brings it back in front |
 | `first_person_pullup_anim` | `266` | Ledge pull-up animation used in first person (`-1` = the game's choice); replaces those in `first_person_pullup_replace` (`236`, the slow one) |
 | `first_person_no_spread` | `1` | Shots go exactly where the gun points |
 | `camera_collision` | `1` | Third-person view stops short of walls |
+| `wall_touch` | `1` | Third person: Lara runs her hand along walls she walks beside |
+| `gear_menu` | `cross` | Immersive third person: `radial` uses the hold-and-push gear menu instead of the 3D cross |
 | `ui_scale` | `0.6` | Size of the HUD and menus |
 | `hud_follow` | `0.85` | How closely the HUD follows your head (1 = locked) |
-| `msaa` | `4` | Anti-aliasing cap when FSAA is on: `0`, `2`, `4` or `8` |
+| `fsaa` | `on` | The game's anti-aliasing: `on`, `off` or `game` (the Setup dialog's choice) |
+| `msaa` | `4` | Anti-aliasing strength while FSAA is on: `0` (off), `2`, `4` or `8` |
+| `fullscreen_effects` | `off` | The game's glow/bloom: `on`, `off` or `game` |
 | `first_person_object_culling` | `frustum` | `open` draws every object in a visible room, at a large CPU cost |
 | `terrain_culling` | `frustum` | `open` draws every terrain strip of a visible room |
 | `depth_of_field` | `off` | `on` or `game` (keep the launcher's setting) |
@@ -299,7 +375,7 @@ the CPU. In rough order of effect:
    start-up, so restart the game after changing it.
 2. **Keep the culling settings on `frustum`** (the default). `open` costs a lot
    of CPU in busy rooms.
-3. **`msaa`**: `2` or `0` frees GPU time.
+3. **`msaa`**: `2` or `0` frees GPU time (or `fsaa = off`).
 4. Turning off Water Effects, Reflections and Shadows in the Setup dialog.
 5. If 90 fps is out of reach, a **fixed half-rate with Motion Smoothing** in
    SteamVR usually feels smoother than a frame rate that keeps jumping.
@@ -367,15 +443,15 @@ build; report problems with it here, not upstream.
   scene. Keep it off.
 - **Water looks flatter than on a monitor.** The game's water reflection and
   full-screen water effect only exist for one eye, so they are skipped.
-- **Changing anti-aliasing in the in-game options crashes the game.** Change it
-  in the Setup dialog before starting.
-- **Cinematics play in third person** on a world-locked view.
+- **Graphics options can only be changed in the Setup dialog.** Changing them
+  in game rebuilds the display, which VR does not survive, so during a level
+  those entries are VR settings instead (see
+  [Interface and comfort](#interface-and-comfort)).
+- **Cinematics play in third person.** Theatre mode shows them on a screen in
+  the room instead.
 - **Some wet-rock decals flicker by view angle.** The flat game does the same.
 - **Performance dips in a few busy scenes**, for example animal attacks. The
   `perf:` lines in the log help pin these down.
-- **No hand collision yet.** In first person your hands pass through walls and
-  through Lara's body.
-
 ---
 
 ## Uninstalling
@@ -391,8 +467,8 @@ trlvr_launcher.log   trl_vr_d3d9.log
 
 On GOG, rename `D3D9.dll.gog-dxwrapper` back to `D3D9.dll`. The game's own
 files were never changed. The game saves its settings when it quits, so
-Depth of Field may show as off in the Setup dialog afterwards; turn it back on
-there if you want it.
+Depth of Field, Fullscreen Effects and anti-aliasing may show the mod's choice
+in the Setup dialog afterwards; set them back there if you want.
 
 ---
 

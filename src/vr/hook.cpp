@@ -118,36 +118,62 @@ namespace trlvr
     // settings from the registry with 0x00EC3730 (key path, settings) into
     // the block at 0x00F12008, before any device exists; EnableDepthOfField
     // is the byte at +0x0C (read at 0x00EC3925, saved from [esi+0x0C]).
-    // The loader is hooked from DllMain and the byte overwritten after it
-    // runs. The game saves the block back on exit, so the launcher then
-    // shows the INI's choice.
+    // EnableFullscreenEffects is the byte at +0x0B (the save order of the
+    // names at 0x00F08E50.. : VSync +0x09, FullscreenEffects +0x0B).
+    // The loader runs before the game loads this DLL (2026-10-11: no log of
+    // the hook in any session, and the registry's depth of field was in
+    // effect -- the distance looked blurred), so the block is overwritten
+    // directly when the DLL loads, and the hook stays for any later load.
+    // The game saves the block back on exit, so the launcher then shows the
+    // INI's choice.
     namespace
     {
         typedef bool (__cdecl* PFN_LoadGraphicsSettings)(const char*, void*);
         PFN_LoadGraphicsSettings g_load_graphics_settings = nullptr;
 
+        void override_settings(void* settings, const char* when)
+        {
+            struct Flag { int value; unsigned offset; const char* name;
+                          const char* key; };
+            const Flag flags[3] = {
+                { config().depth_of_field, 0x0C, "depth of field",
+                  "depth_of_field" },
+                { config().fullscreen_effects, 0x0B, "fullscreen effects",
+                  "fullscreen_effects" },
+                { config().fsaa, 0x0A, "anti-aliasing (FSAA)", "fsaa" } };
+            for (const Flag& f : flags)
+            {
+                if (f.value < 0 || !settings)
+                    continue;
+                __try
+                {
+                    unsigned char* flag =
+                        static_cast<unsigned char*>(settings) + f.offset;
+                    const unsigned char was = *flag;
+                    *flag = f.value ? 1 : 0;
+                    log("settings: %s %s by [vr] %s (game setting was %s; "
+                        "%s)", f.name, f.value ? "ON" : "OFF", f.key,
+                        was ? "on" : "off", when);
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+            }
+        }
+
         bool __cdecl detour_load_graphics_settings(const char* key,
                                                    void* settings)
         {
             const bool loaded = g_load_graphics_settings(key, settings);
-            const int dof = config().depth_of_field;
-            if (settings && dof >= 0)
-            {
-                unsigned char* flag =
-                    static_cast<unsigned char*>(settings) + 0x0C;
-                const unsigned char was = *flag;
-                *flag = dof ? 1 : 0;
-                log("settings: depth of field %s by [vr] depth_of_field "
-                    "(game setting was %s)", dof ? "ON" : "OFF",
-                    was ? "on" : "off");
-            }
+            override_settings(settings, "on load");
             return loaded;
         }
     }
 
     void hook_apply_settings_overrides()
     {
-        if (config().depth_of_field < 0)
+        if (config().depth_of_field < 0 && config().fullscreen_effects < 0 &&
+            config().fsaa < 0)
             return;
         // Only in the game: another host (the proxy test) has nothing here.
         MEMORY_BASIC_INFORMATION info{};
@@ -165,6 +191,14 @@ namespace trlvr
                          "graphics settings loader (depth_of_field)"))
             g_load_graphics_settings =
                 reinterpret_cast<PFN_LoadGraphicsSettings>(tramp);
+        // Already loaded by now: set the live block before the device copies
+        // it (PCDeviceManager init, 0x00415C36).
+        MEMORY_BASIC_INFORMATION block{};
+        if (VirtualQuery((void*)0x00F12008, &block, sizeof(block)) &&
+            block.State == MEM_COMMIT &&
+            (block.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE |
+                              PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY)))
+            override_settings((void*)0x00F12008, "at DLL load");
     }
 
     void hook_apply_gog_crash_guard()

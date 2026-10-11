@@ -499,7 +499,8 @@ namespace trlvr
         if (base->GetType() == D3DRTYPE_TEXTURE)
             check_icon(static_cast<IDirect3DTexture9*>(base));
         bool skip = false;
-        if (config().immersive_controls && !camera_first_person_active())
+        if (config().immersive_controls && !config().gear_menu_radial &&
+            !camera_first_person_active())
             for (IDirect3DTexture9* gear : g_gear_hud_texture)
                 if (gear && base == gear)
                     skip = true;

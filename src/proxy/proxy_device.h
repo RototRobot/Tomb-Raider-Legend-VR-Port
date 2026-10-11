@@ -13,9 +13,11 @@
 #include "../vr/hud_capture.h"
 #include "../vr/tune.h"
 #include "../vr/vr_submit.h"
+#include "../vr/reflection_stereo.h"
 #include "msaa_cap.h"
 #include "gpu_profile.h"
 #include "../vr/perf_cpu.h"
+#include "../common/log.h"
 #include <cstring>
 #include <intrin.h>
 #include <d3d9.h>
@@ -37,6 +39,7 @@ namespace trlvr
 
         ~ProxyDevice()
         {
+            reflection_stereo_release();
             if (_device)
                 _device->Release();
             // CreateDevice took a reference on the wrapper that made us.
@@ -67,7 +70,7 @@ namespace trlvr
         STDMETHOD(Present)(THIS_ CONST RECT* pSourceRect, CONST RECT* pDestRect, HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion);
         STDMETHOD(Reset)(THIS_ D3DPRESENT_PARAMETERS* pPresentationParameters);
         STDMETHOD(SetVertexShaderConstantF)(THIS_ UINT StartRegister, CONST float* pConstantData, UINT Vector4fCount);
-        STDMETHOD(SetTexture)(THIS_ DWORD Stage, IDirect3DBaseTexture9* pTexture) { return _device->SetTexture(Stage, pTexture); }
+        STDMETHOD(SetTexture)(THIS_ DWORD Stage, IDirect3DBaseTexture9* pTexture) { reflection_stereo_note_texture(Stage, pTexture); return _device->SetTexture(Stage, pTexture); }
 
         /*** forwarded ***/
         STDMETHOD(TestCooperativeLevel)(THIS) { return _device->TestCooperativeLevel(); }
@@ -116,16 +119,16 @@ namespace trlvr
         STDMETHOD(UpdateTexture)(THIS_ IDirect3DBaseTexture9* pSourceTexture, IDirect3DBaseTexture9* pDestinationTexture) { return _device->UpdateTexture(pSourceTexture, pDestinationTexture); }
         STDMETHOD(GetRenderTargetData)(THIS_ IDirect3DSurface9* pRenderTarget, IDirect3DSurface9* pDestSurface) { return _device->GetRenderTargetData(pRenderTarget, pDestSurface); }
         STDMETHOD(GetFrontBufferData)(THIS_ UINT iSwapChain, IDirect3DSurface9* pDestSurface) { return _device->GetFrontBufferData(iSwapChain, pDestSurface); }
-        STDMETHOD(StretchRect)(THIS_ IDirect3DSurface9* pSourceSurface, CONST RECT* pSourceRect, IDirect3DSurface9* pDestSurface, CONST RECT* pDestRect, D3DTEXTUREFILTERTYPE Filter) { gpu_profile_event_begin("StretchRect", pSourceSurface, pDestSurface); const HRESULT hr = _device->StretchRect(pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter); gpu_profile_event_end(); return hr; }
+        STDMETHOD(StretchRect)(THIS_ IDirect3DSurface9* pSourceSurface, CONST RECT* pSourceRect, IDirect3DSurface9* pDestSurface, CONST RECT* pDestRect, D3DTEXTUREFILTERTYPE Filter) { gpu_profile_event_begin("StretchRect", pSourceSurface, pDestSurface); const HRESULT hr = _device->StretchRect(pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter); if (SUCCEEDED(hr)) reflection_stereo_note_copy(_device, pDestSurface, pSourceRect, pDestRect); gpu_profile_event_end(); return hr; }
         STDMETHOD(ColorFill)(THIS_ IDirect3DSurface9* pSurface, CONST RECT* pRect, D3DCOLOR color) { return _device->ColorFill(pSurface, pRect, color); }
         STDMETHOD(CreateOffscreenPlainSurface)(THIS_ UINT Width, UINT Height, D3DFORMAT Format, D3DPOOL Pool, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle) { return _device->CreateOffscreenPlainSurface(Width, Height, Format, Pool, ppSurface, pSharedHandle); }
         STDMETHOD(SetRenderTarget)(THIS_ DWORD RenderTargetIndex, IDirect3DSurface9* pRenderTarget);
         STDMETHOD(GetRenderTarget)(THIS_ DWORD RenderTargetIndex, IDirect3DSurface9** ppRenderTarget) { return _device->GetRenderTarget(RenderTargetIndex, ppRenderTarget); }
-        STDMETHOD(SetDepthStencilSurface)(THIS_ IDirect3DSurface9* pNewZStencil) { return _device->SetDepthStencilSurface(pNewZStencil); }
+        STDMETHOD(SetDepthStencilSurface)(THIS_ IDirect3DSurface9* pNewZStencil) { reflection_stereo_note_depth(pNewZStencil); return _device->SetDepthStencilSurface(pNewZStencil); }
         STDMETHOD(GetDepthStencilSurface)(THIS_ IDirect3DSurface9** ppZStencilSurface) { return _device->GetDepthStencilSurface(ppZStencilSurface); }
         STDMETHOD(BeginScene)(THIS) { return _device->BeginScene(); }
         STDMETHOD(EndScene)(THIS) { return _device->EndScene(); }
-        STDMETHOD(Clear)(THIS_ DWORD Count, CONST D3DRECT* pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil) { IDirect3DSurface9* target = nullptr; if (_device->GetRenderTarget(0, &target) == D3D_OK && target) target->Release(); gpu_profile_event_begin(Flags & D3DCLEAR_TARGET ? "Clear colour+" : "Clear depth", nullptr, target); const HRESULT hr = _device->Clear(Count, pRects, Flags, Color, Z, Stencil); gpu_profile_event_end(); return hr; }
+        STDMETHOD(Clear)(THIS_ DWORD Count, CONST D3DRECT* pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil) { IDirect3DSurface9* target = nullptr; if (_device->GetRenderTarget(0, &target) == D3D_OK && target) target->Release(); gpu_profile_event_begin(Flags & D3DCLEAR_TARGET ? "Clear colour+" : "Clear depth", nullptr, target); const HRESULT hr = _device->Clear(Count, pRects, Flags, Color, Z, Stencil); if (SUCCEEDED(hr)) reflection_stereo_after_clear(_device, Count, pRects, Flags, Color, Z, Stencil); gpu_profile_event_end(); return hr; }
         STDMETHOD(SetTransform)(THIS_ D3DTRANSFORMSTATETYPE State, CONST D3DMATRIX* pMatrix);
         STDMETHOD(GetTransform)(THIS_ D3DTRANSFORMSTATETYPE State, D3DMATRIX* pMatrix) { return _device->GetTransform(State, pMatrix); }
         STDMETHOD(MultiplyTransform)(THIS_ D3DTRANSFORMSTATETYPE State, CONST D3DMATRIX* pMatrix) { return _device->MultiplyTransform(State, pMatrix); }
@@ -139,7 +142,22 @@ namespace trlvr
         STDMETHOD(GetLightEnable)(THIS_ DWORD Index, BOOL* pEnable) { return _device->GetLightEnable(Index, pEnable); }
         STDMETHOD(SetClipPlane)(THIS_ DWORD Index, CONST float* pPlane) { return _device->SetClipPlane(Index, pPlane); }
         STDMETHOD(GetClipPlane)(THIS_ DWORD Index, float* pPlane) { return _device->GetClipPlane(Index, pPlane); }
-        STDMETHOD(SetRenderState)(THIS_ D3DRENDERSTATETYPE State, DWORD Value) { return _device->SetRenderState(State, Value); }
+        STDMETHOD(SetRenderState)(THIS_ D3DRENDERSTATETYPE State, DWORD Value)
+        {
+            // Theatre diagnostics: whether the game itself uses the stencil
+            // (the dark room's hand mark shares it).
+            if (State == D3DRS_STENCILENABLE && Value)
+            {
+                static bool reported = false;
+                if (!reported)
+                {
+                    reported = true;
+                    log("render: the game enables the stencil test itself "
+                        "(caller %p)", _ReturnAddress());
+                }
+            }
+            return _device->SetRenderState(State, Value);
+        }
         STDMETHOD(GetRenderState)(THIS_ D3DRENDERSTATETYPE State, DWORD* pValue) { return _device->GetRenderState(State, pValue); }
         STDMETHOD(CreateStateBlock)(THIS_ D3DSTATEBLOCKTYPE Type, IDirect3DStateBlock9** ppSB) { return _device->CreateStateBlock(Type, ppSB); }
         STDMETHOD(BeginStateBlock)(THIS) { return _device->BeginStateBlock(); }
@@ -231,8 +249,60 @@ namespace trlvr
                         D3DRS_CLIPPLANEENABLE, 0));
             }
 
+            // Theatre (user 2026-10-10): the third-person controller hands
+            // mark their pixels in stencil bit kTheatreHandStencil, and the
+            // dark room (vr_submit) is drawn everywhere else -- a depth
+            // test there also let near world geometry through the black.
+            // Only with a stencil in the depth buffer.
+            static const D3DRENDERSTATETYPE kStencilStates[8] = {
+                D3DRS_STENCILENABLE, D3DRS_STENCILFUNC, D3DRS_STENCILREF,
+                D3DRS_STENCILWRITEMASK, D3DRS_STENCILPASS,
+                D3DRS_STENCILFAIL, D3DRS_STENCILZFAIL,
+                D3DRS_TWOSIDEDSTENCILMODE };
+            DWORD saved_stencil[8]{};
+            bool restore_stencil = false;
+            if (vr_dark_room_active() && !camera_first_person_active())
+            {
+                const int gpu_hand = camera_first_person_current_gpu_hand();
+                IDirect3DSurface9* depth = nullptr;
+                D3DSURFACE_DESC depth_desc{};
+                const bool stencil = (gpu_hand == 2 || gpu_hand == 3) &&
+                    SUCCEEDED(_device->GetDepthStencilSurface(&depth)) &&
+                    depth && SUCCEEDED(depth->GetDesc(&depth_desc)) &&
+                    (depth_desc.Format == D3DFMT_D24S8 ||
+                     depth_desc.Format == D3DFMT_D24FS8 ||
+                     depth_desc.Format == D3DFMT_D24X4S4 ||
+                     depth_desc.Format == D3DFMT_D15S1);
+                if (depth)
+                    depth->Release();
+                if (stencil)
+                {
+                    for (int s = 0; s < 8; ++s)
+                        _device->GetRenderState(kStencilStates[s],
+                                                &saved_stencil[s]);
+                    _device->SetRenderState(D3DRS_STENCILENABLE, TRUE);
+                    _device->SetRenderState(D3DRS_STENCILFUNC,
+                                            D3DCMP_ALWAYS);
+                    _device->SetRenderState(D3DRS_STENCILREF,
+                                            kTheatreHandStencil);
+                    _device->SetRenderState(D3DRS_STENCILWRITEMASK, 0xFF);
+                    _device->SetRenderState(D3DRS_STENCILPASS,
+                                            D3DSTENCILOP_REPLACE);
+                    _device->SetRenderState(D3DRS_STENCILFAIL,
+                                            D3DSTENCILOP_KEEP);
+                    _device->SetRenderState(D3DRS_STENCILZFAIL,
+                                            D3DSTENCILOP_KEEP);
+                    _device->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
+                    restore_stencil = true;
+                }
+            }
+
             const auto restore_scoped_state = [&]()
             {
+                if (restore_stencil)
+                    for (int s = 0; s < 8; ++s)
+                        _device->SetRenderState(kStencilStates[s],
+                                                saved_stencil[s]);
                 if (restore_clip_planes)
                     _device->SetRenderState(D3DRS_CLIPPLANEENABLE,
                                             saved_clip_planes);
@@ -242,16 +312,61 @@ namespace trlvr
                     _device->SetRenderState(D3DRS_ZENABLE, saved_z_enable);
             };
 
+            // The water reflection: the left eye into the game's target, the
+            // right eye into its twin, each with that eye's (mirrored) camera.
+            if (reflection_stereo_draw_here(_device) && vr_have_game_c0())
+            {
+                const int mode = reflection_stereo_reflection_mode();
+                if (mode == 2)
+                {
+                    restore_scoped_state();
+                    return D3D_OK;
+                }
+                if (mode == 1)
+                {
+                    const HRESULT hr = issue();
+                    restore_scoped_state();
+                    return hr;
+                }
+                D3DVIEWPORT9 viewport{};
+                _device->GetViewport(&viewport);
+                HRESULT hr = D3D_OK;
+                for (int p = 0; p < 2; ++p)
+                {
+                    if (p == 1)
+                    {
+                        reflection_stereo_bind_twin(_device, true);
+                        _device->SetViewport(&viewport);
+                    }
+                    float regs[16];
+                    if (vr_substitute_c0_for_eye(vr_game_c0(), regs,
+                                                 p == 0 ? EyeLeft : EyeRight))
+                        _device->SetVertexShaderConstantF(0, regs, 4);
+                    else
+                        reflection_stereo_note_unsubstituted();
+                    hr = issue();
+                }
+                reflection_stereo_bind_twin(_device, false);
+                _device->SetViewport(&viewport);
+                _device->SetVertexShaderConstantF(0, vr_draw_c0_restore(), 4);
+                restore_scoped_state();
+                return hr;
+            }
+
             const int passes = stereo_passes();
+            reflection_stereo_note_draw(_device, passes > 1);
             if (passes > 1)
             {
                 HRESULT hr = D3D_OK;
                 for (int p = 0; p < passes; ++p)
                 {
                     stereo_begin_pass(_device, p);
+                    // The right eye's water samples its own reflection.
+                    reflection_stereo_eye_textures(_device, p);
                     sample_hand_projection(p == 0 ? EyeLeft : EyeRight);
                     hr = issue();
                 }
+                reflection_stereo_restore_textures(_device);
                 stereo_end_draw(_device);
                 restore_scoped_state();
                 return hr;

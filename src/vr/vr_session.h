@@ -122,6 +122,9 @@ namespace trlvr
     // Latest controller position in a yaw-only body frame, metres. This is a
     // practical torso approximation for gestures when no body tracker exists:
     // right/up/forward are positive along those player-relative directions.
+    // The controller's own tracked point (no hand model), body frame.
+    bool vr_controller_raw_body_position(bool left, float* right, float* up,
+                                         float* forward);
     bool vr_controller_body_position(bool left, float* right, float* up,
                                      float* forward);
 
@@ -217,6 +220,75 @@ namespace trlvr
     // The SteamVR grip pose without any calibration (head frame, game
     // units): where the palm really is, for the calibration guide.
     bool vr_controller_grip_uncorrected_head_pose(bool left, Mat4* out);
+    // The headset's forward direction flattened to the floor, in tracking
+    // space (x, z) -- the yaw the body-frame zones are measured in.
+    bool vr_head_forward_xz(float* x, float* z);
+    // The head's displacement from its position origin as the camera uses
+    // it (vr_head_camera_view): the base camera's own axes, game units,
+    // move scale applied. False without a position origin.
+    bool vr_head_position_offset(float out[3]);
+    // Move the position origin by d (same axes and units): the eye keeps
+    // its place in the world while the body under it is moved (roomscale),
+    // or stops where it is when the body cannot follow (a wall).
+    void vr_shift_head_position_origin(const float d[3]);
+    // The palm of Lara's hand model (hand_model 2, after hand calibration)
+    // in the head frame, game units -- the same for every controller,
+    // since calibration fits the model to the real hand.
+    bool vr_hand_palm_head_position(bool left, float out[3]);
+    // A head-frame point (game units) in the body frame of
+    // vr_controller_body_position (metres: right, up, forward).
+    bool vr_head_point_body_position(const float head[3], float* right,
+                                     float* up, float* forward);
+    bool vr_hand_palm_body_position(bool left, float* right, float* up,
+                                    float* forward);
+
+    // Cutscene theatre (cutscene_mode = theatre): true while a cutscene is
+    // shown through the room-fixed window. The head view is then measured
+    // from where the head was when the cutscene began (so the cutscene
+    // camera is "at" that spot, looking through the window), at 1:1.
+    bool vr_theatre_active();
+    // The black surround as a triangle list in the head frame (game
+    // units): a closed box round the player with the window cut out of its
+    // front. Returns the vertex count (0 when inactive); alpha fades in.
+    unsigned vr_theatre_surround(float (*out)[3], unsigned* colours,
+                                 unsigned max, float* alpha);
+    // The theatre window's move handle (a bar under the window): grip it
+    // to drag the window round the room. claim[hand] while that grip is
+    // on it (not the game's grapple/lock-on); entered[hand] the frame a
+    // hand first reaches it.
+    void vr_theatre_handle_update(bool left_grip, bool right_grip,
+                                  bool claim[2], bool entered[2]);
+    // Board-mode diorama (board_diorama): active while board-mode play is
+    // shown through the box. The box is fixed in the room round Lara's
+    // spot (board_distance ahead, board_height below the head at the last
+    // recentre). Writes the open faces to mark as head-frame triangles
+    // (game units) and whether the eye is inside the box: from outside the
+    // world shows only through the facing openings, from inside everywhere
+    // but the openings.
+    bool vr_diorama_active();
+    // Where the diorama's handle has moved the board: metres (right, up,
+    // forward) in the recentred frame. camera_head places the board seat
+    // by it, so the world moves with the box.
+    void vr_board_offset(float out[3]);
+    // The diorama's handle bar as head-frame triangles, and its colour.
+    unsigned vr_diorama_handle(float (*out)[3], unsigned max,
+                               unsigned* colour);
+    unsigned vr_diorama_openings(float (*out)[3], unsigned max,
+                                 bool* eye_inside);
+    // The dark room (theatre or diorama) is being drawn this frame.
+    bool vr_dark_room_active();
+    // Diorama marks its openings with kTheatreHandStencil + 1, so one
+    // masked test (mask 0xFE) skips hands and openings together.
+
+    // Theatre: the stencil value the third-person controller hands write
+    // (all eight bits) as they are drawn; the dark room is drawn wherever
+    // the stencil is not exactly this. A single bit was not enough: the
+    // game's own water marks the stencil with the high bit set too (user
+    // screenshots 2026-10-10: ground behind water showed through).
+    const unsigned kTheatreHandStencil = 0x5A;
+    // Head frame (game units) -> this eye's D3D clip space, row vectors:
+    // the headset's own frustum, for drawing with fixed-function clipping.
+    bool vr_head_clip_matrix(Eye eye, float out[4][4]);
     bool vr_substitute_c0_for_eye(const float* in_regs16, float* out_regs16, Eye eye);
 
     // Remember what the game asked for and what we uploaded instead, so a

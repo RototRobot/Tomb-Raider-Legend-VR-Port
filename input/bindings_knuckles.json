@@ -4,6 +4,10 @@
   "name": "Tomb Raider: Legend VR",
   "bindings": {
     "/actions/gameplay": {
+      "skeleton": [
+        { "output": "/actions/gameplay/in/skeleton_left", "path": "/user/hand/left/input/skeleton/left" },
+        { "output": "/actions/gameplay/in/skeleton_right", "path": "/user/hand/right/input/skeleton/right" }
+      ],
       "poses": [
         { "output": "/actions/gameplay/in/hand_left", "path": "/user/hand/left/pose/grip" },
         { "output": "/actions/gameplay/in/hand_right", "path": "/user/hand/right/pose/grip" }
