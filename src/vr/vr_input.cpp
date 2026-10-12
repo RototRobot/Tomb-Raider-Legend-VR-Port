@@ -975,7 +975,8 @@ namespace trlvr
                     g_holster_grip_consumed[hand] = false;
                 // The free hand at the long gun's fore-end: its grip holds
                 // the gun, not the holster, belt items or grapple.
-                if (camera_two_hand_grip_claims(left))
+                if (camera_two_hand_grip_claims(left) ||
+                    camera_bike_grip_claims(left))
                 {
                     if (grip)
                         g_holster_grip_consumed[hand] = true;
@@ -4302,8 +4303,9 @@ namespace trlvr
             {
                 // Independent first-person heading. Letting the third-person
                 // camera own yaw made strafing and jumps swing the headset.
-                // One full stick gives 120 degrees/second, with the existing
-                // fine-control dead zone and response curve.
+                // One full stick gives smooth_turn_speed degrees/second
+                // (120 by default), with the existing fine-control dead
+                // zone and response curve.
                 if (config().snap_turn)
                 {
                     // One step per push past 0.6, re-armed under 0.3.
@@ -4318,7 +4320,8 @@ namespace trlvr
                         g_snap_turn_armed = true;
                 }
                 else
-                    g_first_person_turn -= shape(x) * 2.0943951f * dt;
+                    g_first_person_turn -= shape(x) *
+                        config().smooth_turn_speed * 0.0174532925f * dt;
                 g_mouse_rem[0] = 0.0f;
             }
             else

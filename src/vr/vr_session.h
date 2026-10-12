@@ -127,6 +127,11 @@ namespace trlvr
                                          float* forward);
     bool vr_controller_body_position(bool left, float* right, float* up,
                                      float* forward);
+    // A controller's raw pose in SteamVR's tracking space: position in
+    // metres and the 3x3 rotation (row-major, local axes as columns).
+    bool vr_controller_tracking_pose(bool left, float pos[3], float rot[9]);
+    // The headset's yaw-only forward in tracking space (x, z), unit.
+    bool vr_hmd_tracking_forward(float* fx, float* fz);
 
     // Controller velocity relative to the headset along its yaw-only forward
     // direction, metres/second. Head turning alone does not count as a throw.

@@ -295,6 +295,50 @@ namespace trlvr
             char name[40]{};
         };
         GameplayGun g_gameplay_gun;
+        bool laras_long_gun_held();
+
+        // Per-gun aim correction while a long gun is held, degrees up:
+        // [developer] aim_pitch_<weapon> (the name before "_rbweapon").
+        // The shotgun's barrel sits higher in the hand than the rifle's
+        // (user 2026-10-12: its crosshair was low while the pistols and
+        // rifle were accurate). Re-read once a second, so editing the INI
+        // takes effect in game.
+        float held_long_gun_aim_pitch()
+        {
+            if (!laras_long_gun_held() || !g_gameplay_gun.name[0])
+                return 0.0f;
+            static char cached_name[40]{};
+            static float cached = 0.0f;
+            static DWORD read_at = 0;
+            const DWORD now = GetTickCount();
+            if (strcmp(cached_name, g_gameplay_gun.name) == 0 &&
+                now - read_at < 1000)
+                return cached;
+            strncpy_s(cached_name, g_gameplay_gun.name, _TRUNCATE);
+            read_at = now;
+            char weapon[40]{};
+            strncpy_s(weapon, g_gameplay_gun.name, _TRUNCATE);
+            if (char* suffix = strstr(weapon, "_rbweapon"))
+                *suffix = 0;
+            wchar_t wide[40]{}, key[96]{}, text[64]{}, path[MAX_PATH]{};
+            for (int i = 0; i < 39 && weapon[i]; ++i)
+                wide[i] = static_cast<wchar_t>(weapon[i]);
+            swprintf_s(key, L"aim_pitch_%s", wide);
+            swprintf_s(path, L"%strlvr.ini", exe_dir());
+            GetPrivateProfileStringW(L"developer", key, L"", text, 64, path);
+            wchar_t* end = nullptr;
+            const float value = text[0] ? wcstof(text, &end) : 0.0f;
+            // Tuned in the headset (2026-10-12).
+            const float fallback = strcmp(weapon, "shotgun") == 0 ? 10.0f
+                                                                   : 0.0f;
+            const float next = text[0] && end != text &&
+                std::isfinite(value) && fabsf(value) <= 30.0f
+                ? value : fallback;
+            if (next != cached)
+                log("first-person: %s aim pitch %+.1f degrees", weapon, next);
+            cached = next;
+            return cached;
+        }
         // The two pistols' gameplay copies (left, right), moved the same
         // way while drawn so their muzzle flashes leave the held guns; an
         // undrawn pistol that retail put in Lara's hand (single-pistol
@@ -1092,6 +1136,7 @@ namespace trlvr
                 }
                 else
                     tune_aim_offset(&pitch, &yaw);
+                pitch += held_long_gun_aim_pitch();
                 pitch *= 0.0174532925f;
                 yaw *= 0.0174532925f;
                 // Engine local axes: X right, Y down, Z forward.
@@ -4008,6 +4053,7 @@ namespace trlvr
             {
                 if (left)
                     yaw = -yaw;
+                pitch += held_long_gun_aim_pitch();
             }
             else
                 tune_aim_offset(&pitch, &yaw);
@@ -4033,6 +4079,7 @@ namespace trlvr
         {
             char weapon[40]{};
             float offset[3]{};       // forward, right, up
+            DWORD read_at = 0;       // re-read once a second: live edits
         };
         Foregrip g_foregrips[12];
         int g_foregrip_count = 0;
@@ -4060,14 +4107,25 @@ namespace trlvr
         {
             if (strcmp(weapon, kLeftAdjust) == 0)
             {
-                out[0] = out[1] = out[2] = 0.0f;
+                // Tuned left-handed in the headset (2026-10-12); its old
+                // +0.04 m side value is now done by mirroring.
+                out[0] = 0.0f; out[1] = 0.0f; out[2] = 0.01f;
                 return;
             }
-            const bool rifle = strcmp(weapon, "smgmpfive") != 0;
-            out[0] = config().two_handed_grip_distance +
-                     (rifle ? 0.12f : 0.06f);
-            out[1] = -0.07f;
-            out[2] = 0.0f;
+            // Tuned in the headset (user INI 2026-10-12); any other gun
+            // (the shotgun, guns not reached yet) falls back to the MP5's,
+            // the middle of the tuned ones.
+            if (strcmp(weapon, "autorifle") == 0)
+            {
+                out[0] = 0.31f; out[1] = -0.02f; out[2] = 0.09f;
+                return;
+            }
+            if (strcmp(weapon, "shotgun") == 0)
+            {
+                out[0] = 0.51f; out[1] = -0.05f; out[2] = 0.05f;
+                return;
+            }
+            out[0] = 0.32f; out[1] = -0.02f; out[2] = 0.10f;
         }
 
         Foregrip* foregrip_for(const char* object_name)
@@ -4076,12 +4134,23 @@ namespace trlvr
             strncpy_s(weapon, object_name ? object_name : "gun", _TRUNCATE);
             if (char* suffix = strstr(weapon, "_rbweapon"))
                 *suffix = 0;
-            for (int i = 0; i < g_foregrip_count; ++i)
+            Foregrip* grip = nullptr;
+            for (int i = 0; i < g_foregrip_count && !grip; ++i)
                 if (strcmp(g_foregrips[i].weapon, weapon) == 0)
-                    return &g_foregrips[i];
-            Foregrip* grip = g_foregrip_count < 12
-                ? &g_foregrips[g_foregrip_count++] : &g_foregrips[11];
-            strncpy_s(grip->weapon, weapon, _TRUNCATE);
+                    grip = &g_foregrips[i];
+            const DWORD now = GetTickCount();
+            if (grip && now - grip->read_at < 1000)
+                return grip;
+            const bool first = !grip;
+            if (!grip)
+            {
+                grip = g_foregrip_count < 12
+                    ? &g_foregrips[g_foregrip_count++] : &g_foregrips[11];
+                strncpy_s(grip->weapon, weapon, _TRUNCATE);
+            }
+            grip->read_at = now;
+            const float before[3] = { grip->offset[0], grip->offset[1],
+                                      grip->offset[2] };
             float defaults[3] = {};
             foregrip_defaults(weapon, defaults);
             wchar_t path[MAX_PATH]{}, keys[3][96]{};
@@ -4098,9 +4167,11 @@ namespace trlvr
                     std::isfinite(value) && fabsf(value) <= 1.0f
                     ? value : defaults[a];
             }
-            log("first-person: %s foregrip forward %.2f, right %+.2f, up "
-                "%+.2f m", weapon, grip->offset[0], grip->offset[1],
-                grip->offset[2]);
+            if (first || before[0] != grip->offset[0] ||
+                before[1] != grip->offset[1] || before[2] != grip->offset[2])
+                log("first-person: %s foregrip forward %.2f, right %+.2f, up "
+                    "%+.2f m", weapon, grip->offset[0], grip->offset[1],
+                    grip->offset[2]);
             return grip;
         }
 
@@ -4129,6 +4200,29 @@ namespace trlvr
             const Foregrip* grip = foregrip_for(g_gameplay_gun.name);
             float offset[3] = { grip->offset[0], grip->offset[1],
                                 grip->offset[2] };
+            // Foregrips are tuned right-handed; a left-handed hold mirrors
+            // the side offset. The left trigger frame here is not mirrored
+            // (its right axis still points to the player's right), which
+            // the old shared left adjustment (+0.04 m right) only made up
+            // for on guns tuned 0.02 m left (user 2026-10-12: the
+            // left-handed shotgun grip clipped the barrel).
+            if (config().left_handed)
+            {
+                const float* a = world.m[0];
+                const float* b = world.m[1];
+                const float* c = world.m[2];
+                const float det = a[0] * (b[1] * c[2] - b[2] * c[1]) -
+                                  a[1] * (b[0] * c[2] - b[2] * c[0]) +
+                                  a[2] * (b[0] * c[1] - b[1] * c[0]);
+                if (det > 0.0f)
+                    offset[1] = -offset[1];
+                static int reported = 0;
+                if (!reported++)
+                    log("first-person: left-handed foregrip frame %s; side "
+                        "offset %s", det > 0.0f ? "not mirrored"
+                        : "mirrored", det > 0.0f ? "mirrored here"
+                        : "used as tuned");
+            }
             if (config().left_handed)
             {
                 const Foregrip* adjust = foregrip_for(kLeftAdjust);
@@ -4164,8 +4258,211 @@ namespace trlvr
         // saved for this weapon at once; 7 saves again. (Headset test: the
         // first version only listened while held, so a 7 pressed after
         // letting go was ignored and the tuning was lost.)
+        // Per-gun model rotation in the hand (user 2026-10-12: the
+        // shotgun's barrel was not in line with the crosshair, which is
+        // right for the pistols and rifle). [developer] gun_pitch_<weapon>,
+        // gun_yaw_<weapon>, gun_roll_<weapon> in degrees (pitch + muzzle
+        // up, yaw + right, roll + clockwise from behind), turning the drawn
+        // long gun about the trigger hand in the hand's own axes (engine
+        // local: X right, Y down, Z forward). Re-read once a second (live
+        // INI edits). [developer] gun_tuning_debug = 1: with a long gun
+        // drawn, Numpad 8/2 pitch, 4/6 yaw, 9/3 roll (half a degree), 5
+        // zero; every change is saved at once.
+        struct GunTilt
+        {
+            char weapon[40]{};
+            float deg[3]{};          // pitch, yaw, roll
+            DWORD read_at = 0;
+        };
+        GunTilt g_gun_tilts[8];
+        int g_gun_tilt_count = 0;
+        const wchar_t* const kGunTiltAxes[3] = { L"pitch", L"yaw", L"roll" };
+
+        void gun_tilt_key(const char* weapon, int axis, wchar_t key[96])
+        {
+            wchar_t wide[40]{};
+            for (int i = 0; i < 39 && weapon[i]; ++i)
+                wide[i] = static_cast<wchar_t>(weapon[i]);
+            swprintf_s(key, 96, L"gun_%s_%s", kGunTiltAxes[axis], wide);
+        }
+
+        GunTilt* gun_tilt_for(const char* object_name)
+        {
+            char weapon[40]{};
+            strncpy_s(weapon, object_name ? object_name : "gun", _TRUNCATE);
+            if (char* suffix = strstr(weapon, "_rbweapon"))
+                *suffix = 0;
+            GunTilt* tilt = nullptr;
+            for (int i = 0; i < g_gun_tilt_count && !tilt; ++i)
+                if (strcmp(g_gun_tilts[i].weapon, weapon) == 0)
+                    tilt = &g_gun_tilts[i];
+            const DWORD now = GetTickCount();
+            if (tilt && now - tilt->read_at < 1000)
+                return tilt;
+            const bool first = !tilt;
+            if (!tilt)
+            {
+                tilt = g_gun_tilt_count < 8 ? &g_gun_tilts[g_gun_tilt_count++]
+                                            : &g_gun_tilts[7];
+                strncpy_s(tilt->weapon, weapon, _TRUNCATE);
+            }
+            tilt->read_at = now;
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%strlvr.ini", exe_dir());
+            bool changed = false;
+            for (int a = 0; a < 3; ++a)
+            {
+                wchar_t key[96]{}, text[64]{};
+                gun_tilt_key(weapon, a, key);
+                GetPrivateProfileStringW(L"developer", key, L"", text, 64,
+                                         path);
+                wchar_t* end = nullptr;
+                const float v = text[0] ? wcstof(text, &end) : 0.0f;
+                // Built-in: the shotgun as tuned in the headset
+                // (2026-10-12: pitch -2, yaw +1, roll +7.5).
+                const float builtin = strcmp(weapon, "shotgun") == 0
+                    ? (a == 0 ? -2.0f : a == 1 ? 1.0f : 7.5f) : 0.0f;
+                const float next = text[0] && end != text &&
+                    std::isfinite(v) && fabsf(v) <= 90.0f ? v : builtin;
+                changed = changed || next != tilt->deg[a];
+                tilt->deg[a] = next;
+            }
+            if (changed || (first && (tilt->deg[0] || tilt->deg[1] ||
+                                      tilt->deg[2])))
+                log("first-person: %s turned in the hand pitch %+.1f, yaw "
+                    "%+.1f, roll %+.1f degrees", weapon, tilt->deg[0],
+                    tilt->deg[1], tilt->deg[2]);
+            return tilt;
+        }
+
+        void gun_tilt_save(const GunTilt* tilt)
+        {
+            wchar_t path[MAX_PATH]{};
+            swprintf_s(path, L"%strlvr.ini", exe_dir());
+            for (int a = 0; a < 3; ++a)
+            {
+                wchar_t key[96]{}, text[32]{};
+                gun_tilt_key(tilt->weapon, a, key);
+                swprintf_s(text, L"%.1f", tilt->deg[a]);
+                WritePrivateProfileStringW(L"developer", key, text, path);
+            }
+        }
+
+        // World-space turn of a gun held by `controller` (world pose):
+        // apply as  pose * gun_tilt_world(...). The tuning is made right-
+        // handed; a left-handed hold gets its mirror image (user
+        // 2026-10-12: one tune for both). Yaw and roll swap direction in a
+        // mirror; if the left controller's frame is itself mirrored
+        // (determinant < 0, as the grip frames are) that already happens.
+        Mat4 gun_tilt_world(const char* name, const Mat4& controller,
+                            bool left_hand)
+        {
+            const GunTilt* tilt = gun_tilt_for(name);
+            if (!tilt->deg[0] && !tilt->deg[1] && !tilt->deg[2])
+                return Mat4::identity();
+            float side = 1.0f;
+            if (left_hand)
+            {
+                const float* a = controller.m[0];
+                const float* b = controller.m[1];
+                const float* c = controller.m[2];
+                const float det = a[0] * (b[1] * c[2] - b[2] * c[1]) -
+                                  a[1] * (b[0] * c[2] - b[2] * c[0]) +
+                                  a[2] * (b[0] * c[1] - b[1] * c[0]);
+                side = det > 0.0f ? -1.0f : 1.0f;
+            }
+            const float k = 0.0174532925f;
+            const float yaw = tilt->deg[1] * side, roll = tilt->deg[2] * side;
+            const float cp = cosf(tilt->deg[0] * k), sp = sinf(tilt->deg[0] * k);
+            const float cy = cosf(yaw * k), sy = sinf(yaw * k);
+            const float cr = cosf(roll * k), sr = sinf(roll * k);
+            Mat4 rx = Mat4::identity(), ry = Mat4::identity(),
+                 rz = Mat4::identity();
+            rx.m[1][1] = cp; rx.m[1][2] = sp; rx.m[2][1] = -sp; rx.m[2][2] = cp;
+            ry.m[0][0] = cy; ry.m[0][2] = -sy; ry.m[2][0] = sy; ry.m[2][2] = cy;
+            rz.m[0][0] = cr; rz.m[0][1] = sr; rz.m[1][0] = -sr; rz.m[1][1] = cr;
+            return rigid_inverse(controller) * (rz * rx * ry) * controller;
+        }
+
+        bool g_gun_tuning = false;
+        bool g_gun_tuning_read = false;
+
+        void gun_tuning_update()
+        {
+            if (!g_gun_tuning_read)
+            {
+                wchar_t path[MAX_PATH]{};
+                swprintf_s(path, L"%strlvr.ini", exe_dir());
+                g_gun_tuning = GetPrivateProfileIntW(L"developer",
+                    L"gun_tuning_debug", 0, path) != 0;
+                g_gun_tuning_read = true;
+                if (g_gun_tuning)
+                    log("tune: gun_tuning_debug on -- with a long gun drawn, "
+                        "Numpad 8/2 pitch, 4/6 yaw, 9/3 roll, 5 zero");
+            }
+            if (!g_gun_tuning || !g_gameplay_gun.name[0])
+                return;
+            HWND foreground = GetForegroundWindow();
+            DWORD pid = 0;
+            GetWindowThreadProcessId(foreground, &pid);
+            if (!foreground || pid != GetCurrentProcessId())
+                return;
+            static bool down[7]{};
+            static ULONGLONG repeat_at[7]{};
+            const ULONGLONG now = GetTickCount64();
+            auto key = [&](int slot, int vk, bool repeat) {
+                if (!(GetAsyncKeyState(vk) & 0x8000))
+                    return down[slot] = false;
+                if (!down[slot])
+                {
+                    down[slot] = true;
+                    repeat_at[slot] = now + 300;
+                    return true;
+                }
+                if (repeat && now >= repeat_at[slot])
+                {
+                    repeat_at[slot] = now + 80;
+                    return true;
+                }
+                return false;
+            };
+            GunTilt* tilt = gun_tilt_for(g_gameplay_gun.name);
+            const int keys[6] = { VK_NUMPAD8, VK_NUMPAD2, VK_NUMPAD6,
+                                  VK_NUMPAD4, VK_NUMPAD9, VK_NUMPAD3 };
+            const int axes[6] = { 0, 0, 1, 1, 2, 2 };
+            const float signs[6] = { +1, -1, +1, -1, +1, -1 };
+            bool changed = false;
+            for (int i = 0; i < 6; ++i)
+                if (key(i, keys[i], true))
+                {
+                    tilt->deg[axes[i]] = fmaxf(-90.0f, fminf(90.0f,
+                        tilt->deg[axes[i]] + signs[i] * 0.5f));
+                    changed = true;
+                }
+            if (key(6, VK_NUMPAD5, false))
+            {
+                tilt->deg[0] = tilt->deg[1] = tilt->deg[2] = 0.0f;
+                changed = true;
+            }
+            if (changed)
+            {
+                // Tuned right-handed; left-handed play mirrors it.
+                if (config().left_handed)
+                    log("tune: note -- gun turns are tuned for the right hand "
+                        "and mirrored for the left; tune right-handed");
+                gun_tilt_save(tilt);
+                tilt->read_at = GetTickCount();
+                log("tune: %s turned in the hand pitch %+.1f, yaw %+.1f, "
+                    "roll %+.1f degrees (saved to trlvr.ini)", tilt->weapon,
+                    tilt->deg[0], tilt->deg[1], tilt->deg[2]);
+            }
+        }
+
         void foregrip_tuning_update()
         {
+            gun_tuning_update();
+            if (g_gun_tuning)
+                return; // one numpad user at a time
             if (!g_foregrip_tuning_read)
             {
                 wchar_t path[MAX_PATH]{};
@@ -4907,9 +5204,360 @@ namespace trlvr
             r.start = now ? now : 1;
         }
 
+        // Motorbike (user 2026-10-11). Lara rides while her player state
+        // (CharacterState chain at PlayerData::work - 0x70 + 4) holds
+        // VehicleState (retail vtable 0x00F05AE4: dtor 0x005856A0,
+        // MessageHandler, Process 0x005856D0). Her retail animation keeps
+        // both hands on the handlebars, so a hand that grips its bar is
+        // simply drawn at her animated wrist (first_person_hand_delta
+        // returns identity while pinned).
+        //
+        // The bike's physics: Bike::Process (0x0051F7C0, thiscall, vtable
+        // 0x00F050AC) -> Vehicle::Process (0x0051EC30) with (dt, steer,
+        // reverse, accelerate): steer -1..1 is scaled by the steering limit
+        // (+0x278) and rate-limited toward it (+0x274); the two flags drive
+        // Vehicle::UpdateState (0x0051E6D0; accelerate -> state 2, reverse
+        // -> state 6). bike_handlebars 2 / 3 replace steer with the hands,
+        // and 3 the flags with a pulse-width throttle from the right grip's
+        // twist.
+        const uintptr_t kVehicleStateVtable = 0x00F05AE4;
+        bool weapon_drawn_in_hand(int hand);
+        bool laras_long_gun_held();
+
+        bool lara_riding_vehicle()
+        {
+            __try
+            {
+                const unsigned char* player =
+                    *reinterpret_cast<unsigned char* const*>(0x0111713C);
+                if (!player)
+                    return false;
+                const unsigned char* state =
+                    *reinterpret_cast<unsigned char* const*>(player - 0x70 + 4);
+                for (int depth = 0; depth < 5 && state; ++depth)
+                {
+                    if (*reinterpret_cast<const uintptr_t*>(state) ==
+                        kVehicleStateVtable)
+                        return true;
+                    state = *reinterpret_cast<unsigned char* const*>(
+                        state + 8);
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+            return false;
+        }
+
+        struct BikeBar
+        {
+            bool held = false;
+            bool grip_was = false;
+            float pos0[3]{};        // tracking space, at the grab
+            float rot0[9]{};
+            // Her hand on this bar, in her root segment's frame: learned
+            // while no weapon is out (shooting takes the retail hand off
+            // the bar; user 2026-10-11: "Lara is holding the bars when not
+            // shooting").
+            Mat4 zone_local = Mat4::identity();
+            bool zone_valid = false;
+            Mat4 zone_world = Mat4::identity();
+            bool in_reach = false;
+        };
+        struct BikeState
+        {
+            bool riding = false;
+            unsigned frame = ~0u;
+            BikeBar bar[2];
+            float fwd[2] = { 0.0f, 1.0f };   // tracking yaw at the first grab
+            bool steer_valid = false;
+            float steer_right = 0.0f;        // -1..1, + = right
+            bool throttle_valid = false;
+            float throttle = 0.0f;           // 0..1
+            bool brake = false;
+            float pwm = 0.0f;
+            float speed = 0.0f;              // Vehicle +0x284
+            int zone_moving_frames[2] = { 0, 0 };
+            int game_sign = 0;               // game steer sign for right
+            DWORD report_at = 0;
+        };
+        BikeState g_bike;
+        bool g_bike_bar_pin[2] = { false, false };
+
+        bool camera_bike_hand_on_bar(int hand)
+        {
+            return hand >= 0 && hand < 2 && g_bike_bar_pin[hand];
+        }
+
+        void bike_release(const char* why)
+        {
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                if (g_bike.bar[hand].held)
+                    log("bike: %s hand let go of the handlebar (%s)",
+                        hand == 0 ? "left" : "right", why);
+                g_bike.bar[hand].held = false;
+                g_bike_bar_pin[hand] = false;
+            }
+            g_bike.steer_valid = false;
+            g_bike.throttle_valid = false;
+        }
+
+        // Once a frame, while Lara's first-person model is drawn.
+        void bike_frame_update(const float* lara_matrices)
+        {
+            if (g_bike.frame == g_present_count)
+                return;
+            g_bike.frame = g_present_count;
+            const bool riding = config().immersive_controls &&
+                config().bike_handlebars > 0 && g_first_person_active &&
+                lara_riding_vehicle();
+            if (riding != g_bike.riding)
+            {
+                g_bike.riding = riding;
+                log("bike: Lara %s the motorbike%s", riding ? "is riding"
+                    : "is off", riding && config().bike_handlebars
+                    ? " -- grip a handlebar to hold it" : "");
+            }
+            if (!riding)
+            {
+                bike_release("off the bike");
+                for (int hand = 0; hand < 2; ++hand)
+                {
+                    g_bike.bar[hand].zone_valid = false;
+                    g_bike.zone_moving_frames[hand] = 0;
+                }
+                for (BikeBar& b : g_bike.bar)
+                    b.grip_was = false;
+                return;
+            }
+            Mat4 eye;
+            memcpy(&eye.m[0][0], static_cast<const unsigned char*>(
+                       kMainCamera) + kOffCwTransform, sizeof(eye.m));
+            const float scale = tune_world_scale();
+            const bool weapons_out = weapon_drawn_in_hand(0) ||
+                weapon_drawn_in_hand(1) || laras_long_gun_held();
+            const Mat4 root = matrix_from_floats(lara_matrices);
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                BikeBar& b = g_bike.bar[hand];
+                const bool left = hand == 0;
+                const int w = g_first_person_wrist_segment[hand];
+                // Her hands are on the bars while riding along; stopped she
+                // puts a hand down (user 2026-10-12: the left zone dropped
+                // to her side when the bike stopped). Taken once at the
+                // start of a ride, then from ~1 s of riding with no weapon
+                // out, and then kept.
+                const bool moving = fabsf(g_bike.speed) > 1.0f;
+                if (w >= 0 && !weapons_out &&
+                    (!b.zone_valid ||
+                     (moving && g_bike.zone_moving_frames[hand] < 90)))
+                {
+                    if (moving)
+                        ++g_bike.zone_moving_frames[hand];
+                    b.zone_local = matrix_from_floats(lara_matrices + w * 16) *
+                                   rigid_inverse(root);
+                    b.zone_valid = true;
+                }
+                if (b.zone_valid)
+                    b.zone_world = b.zone_local * root;
+                // Within reach: the palm 0.22 m from the bar.
+                float d = 1.0e9f;
+                float palm[3];
+                if (b.zone_valid && scale > 0.0f &&
+                    vr_hand_palm_head_position(left, palm))
+                {
+                    const Mat4 at = translation(palm[0], palm[1], palm[2]) *
+                                    eye;
+                    d = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const float e = at.m[3][k] - b.zone_world.m[3][k];
+                        d += e * e;
+                    }
+                    d = sqrtf(d) / scale;
+                }
+                b.in_reach = d <= 0.22f && !weapon_drawn_in_hand(hand);
+                // A grip press toggles the hold (user 2026-10-11).
+                const bool grip = vr_input_grip_held(left);
+                const bool edge = grip && !b.grip_was;
+                b.grip_was = grip;
+                if (!edge)
+                    continue;
+                if (b.held)
+                {
+                    b.held = false;
+                    log("bike: %s hand let go of the handlebar",
+                        left ? "left" : "right");
+                    vr_input_handhold_haptic(left);
+                    continue;
+                }
+                if (weapon_drawn_in_hand(hand))
+                    continue;
+                if (!b.in_reach)
+                {
+                    static unsigned misses = 0;
+                    if (misses++ < 8 && d < 1.0f)
+                        log("bike: %s grip %.2f m from the handlebar (needs "
+                            "0.22 m)", left ? "left" : "right", d);
+                    continue;
+                }
+                if (!vr_controller_tracking_pose(left, b.pos0, b.rot0))
+                    continue;
+                if (!g_bike.bar[1 - hand].held)
+                {
+                    float fx = 0.0f, fz = 1.0f;
+                    if (vr_hmd_tracking_forward(&fx, &fz))
+                    {
+                        g_bike.fwd[0] = fx;
+                        g_bike.fwd[1] = fz;
+                    }
+                }
+                b.held = true;
+                vr_input_handhold_haptic(left);
+                log("bike: %s hand gripped the handlebar (%.2f m from it)",
+                    left ? "left" : "right", d);
+            }
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                if (g_bike.bar[hand].held && weapon_drawn_in_hand(hand))
+                {
+                    g_bike.bar[hand].held = false;
+                    log("bike: %s hand let go of the handlebar (weapon "
+                        "drawn)", hand == 0 ? "left" : "right");
+                }
+                g_bike_bar_pin[hand] = g_bike.bar[hand].held;
+            }
+
+            // Steering: each held hand's travel along the forward of the
+            // first grab (fixed, so looking around does not steer). Left
+            // forward turns right, right forward turns left.
+            g_bike.steer_valid = false;
+            g_bike.throttle_valid = false;
+            if (config().bike_handlebars < 2)
+                return;
+            float sum = 0.0f;
+            int hands = 0;
+            // The twist throttle is on whichever hand holds a bar -- the
+            // main hand's if both (user 2026-10-12: "it should work for
+            // either hand"; shooting with the main hand leaves the off hand
+            // on its bar).
+            const int main_hand = config().left_handed ? 0 : 1;
+            const int throttle_hand = g_bike.bar[main_hand].held ? main_hand
+                : g_bike.bar[1 - main_hand].held ? 1 - main_hand : -1;
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                BikeBar& b = g_bike.bar[hand];
+                float pos[3], rot[9];
+                if (!b.held ||
+                    !vr_controller_tracking_pose(hand == 0, pos, rot))
+                    continue;
+                const float travel =
+                    (pos[0] - b.pos0[0]) * g_bike.fwd[0] +
+                    (pos[2] - b.pos0[2]) * g_bike.fwd[1];
+                sum += (hand == 0 ? travel : -travel) /
+                       config().bike_steer_range;
+                ++hands;
+                if (hand == throttle_hand && config().bike_handlebars >= 3)
+                {
+                    // Twist = the change in the controller's nose pitch
+                    // since the grab (tracking space, y up; OpenVR local
+                    // -Z is forward). Back (top of the fist toward you)
+                    // lifts the nose: positive, speed up; forward slows.
+                    const float p0 = asinf(fmaxf(-1.0f, fminf(1.0f,
+                                               -b.rot0[1 * 3 + 2])));
+                    const float p1 = asinf(fmaxf(-1.0f, fminf(1.0f,
+                                               -rot[1 * 3 + 2])));
+                    // Nose down is speed-up (user 2026-10-12: flipped).
+                    const float twist = (p0 - p1) * 57.2957795f;
+                    const float t = twist / config().bike_twist_range;
+                    g_bike.throttle = fmaxf(-1.0f, fminf(1.0f, t));
+                    g_bike.brake = t <= -0.33f;
+                    g_bike.throttle_valid = std::isfinite(t);
+                }
+            }
+            if (hands)
+            {
+                g_bike.steer_right = fmaxf(-1.0f, fminf(1.0f, sum / hands));
+                g_bike.steer_valid = std::isfinite(g_bike.steer_right);
+            }
+        }
+
+        typedef void(__thiscall* PFN_BikeProcess)(void*, float, float, int,
+                                                   int);
+        PFN_BikeProcess g_bike_process = nullptr;
+
+        void __fastcall detour_bike_process(void* self, void*, float dt,
+                                            float steer, int reverse,
+                                            int accelerate)
+        {
+            const bool active = g_bike.riding && config().bike_handlebars >= 2;
+            __try
+            {
+                g_bike.speed = *reinterpret_cast<const float*>(
+                    static_cast<const unsigned char*>(self) + 0x284);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+            // The game's sign for "right" (negative, log 2026-10-11),
+            // confirmed from its own keyboard steering:
+            // D alone held while its steer is clearly non-zero.
+            if (!g_bike.game_sign && fabsf(steer) > 0.3f)
+            {
+                const bool a = (GetAsyncKeyState('A') & 0x8000) != 0;
+                const bool d = (GetAsyncKeyState('D') & 0x8000) != 0;
+                if (a != d)
+                {
+                    g_bike.game_sign = (steer > 0.0f) == d ? 1 : -1;
+                    log("bike: the game steers right with %s values "
+                        "(learned from the %s key)",
+                        g_bike.game_sign > 0 ? "positive" : "negative",
+                        d ? "D" : "A");
+                }
+            }
+            const float in_steer = steer;
+            const int in_reverse = reverse, in_accel = accelerate;
+            if (active && g_bike.steer_valid)
+                steer = g_bike.steer_right *
+                        (g_bike.game_sign ? (float)g_bike.game_sign : -1.0f);
+            if (active && config().bike_handlebars >= 3 &&
+                g_bike.throttle_valid)
+            {
+                // The game's throttle is on / off: a third of the twist
+                // range back holds it, a third forward brakes, between
+                // coasts (user 2026-10-12: the pulsed throttle felt
+                // inconsistent).
+                accelerate = g_bike.throttle >= 0.33f ? 1 : 0;
+                reverse = g_bike.brake ? 1 : 0;
+            }
+            const DWORD now = GetTickCount();
+            static unsigned reports = 0;
+            if (reports < 40 && now - g_bike.report_at >= 2000)
+            {
+                ++reports;
+                g_bike.report_at = now;
+                log("bike: process dt %.4f steer %+.2f -> %+.2f, reverse %d "
+                    "-> %d, accelerate %d -> %d (hands %d%d, twist %+.2f, "
+                    "speed %.1f)",
+                    dt, in_steer, steer, in_reverse & 0xFF, reverse & 0xFF,
+                    in_accel & 0xFF, accelerate & 0xFF,
+                    g_bike.bar[0].held ? 1 : 0, g_bike.bar[1].held ? 1 : 0,
+                    g_bike.throttle, g_bike.speed);
+            }
+            g_bike_process(self, dt, steer, reverse, accelerate);
+        }
+
         Mat4 first_person_hand_delta(int hand, const Mat4& original_wrist,
                                      const Mat4& controller)
         {
+            // On the handlebar: her hand on the bar (the bar pose learned
+            // while she was not shooting).
+            if (camera_bike_hand_on_bar(hand))
+                return g_bike.bar[hand].zone_valid
+                    ? rigid_inverse(original_wrist) *
+                      g_bike.bar[hand].zone_world
+                    : Mat4::identity();
             if (first_person_grip_model_ready(hand))
             {
                 Mat4 grip_hand;
@@ -5131,6 +5779,16 @@ namespace trlvr
         // draw -- whenever retail combat is active.
         bool weapon_drawn_in_hand(int hand)
         {
+            // On the motorbike retail shoots one pistol (her left); in VR
+            // it is the main hand's, whichever hand drew it, and the off
+            // hand stays free for the handlebar (user 2026-10-12).
+            if (config().immersive_controls && g_bike.riding)
+            {
+                const int main = config().left_handed ? 0 : 1;
+                return hand == main &&
+                    (vr_input_holster_hand_drawn(true) ||
+                     vr_input_holster_hand_drawn(false));
+            }
             if (config().immersive_controls)
                 return vr_input_holster_hand_drawn(hand == 0);
             return retail_combat_state() != 0;
@@ -5544,6 +6202,27 @@ namespace trlvr
         // True when `inst` is Lara's drawn long gun: a long-gun object held
         // within 0.5 m of her animated right wrist (enemies carry the same
         // objects, metres away).
+        // Lara's own long gun: the instance in her inventory's long-weapon
+        // slot (Player::InvItems[1].pInst, PlayerData::work +0x3F0). On
+        // the motorbike her retail long gun is held well away from her
+        // right wrist, so the 0.5 m test hid it (user 2026-10-11: the long
+        // gun "disappeared often").
+        bool is_laras_long_gun_instance(const void* instance)
+        {
+            __try
+            {
+                const unsigned char* player =
+                    *reinterpret_cast<unsigned char* const*>(0x0111713C);
+                return player && instance &&
+                    *reinterpret_cast<void* const*>(player + 0x3F0) ==
+                        instance;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
         bool is_laras_held_long_gun(const float* own,
                                     const char* name)
         {
@@ -5573,13 +6252,24 @@ namespace trlvr
         int pistol_side(void* weapon);
         bool laras_long_gun_held();
 
+        Mat4 hand_attachment_grip(int hand);
+
         void move_gameplay_pistol(void* instance, unsigned char* inst,
                                   const char* name)
         {
             if (*reinterpret_cast<void**>(inst + 0xB8) !=
                 g_first_person_instance)
                 return;
-            const int side = pistol_side(instance);
+            int side = pistol_side(instance);
+            // Motorbike: retail fires its one pistol from her left hand;
+            // the drawn one is in the main hand (first_person_draw_linked_
+            // weapon), so its gameplay copy -- muzzle flash and shot
+            // origin -- goes there too (user 2026-10-12: flashes came from
+            // the left hand when right-handed).
+            const short link_marker = *reinterpret_cast<short*>(inst + 0xBE);
+            if (g_bike.riding && side >= 0 && link_marker != 4 &&
+                link_marker != 6)
+                side = config().left_handed ? 0 : 1;
             if (side < 0 || g_first_person_wrist_segment[side] < 0)
                 return;
             float* matrices = *reinterpret_cast<float**>(
@@ -5596,7 +6286,9 @@ namespace trlvr
             const short marker = *reinterpret_cast<short*>(inst + 0xBE);
             if (marker == 4 || marker == 6)
                 return; // on its hip: the holster draw owns it
-            const bool drawn = vr_input_holster_hand_drawn(side == 0) &&
+            const bool drawn = (g_bike.riding
+                                    ? weapon_drawn_in_hand(side)
+                                    : vr_input_holster_hand_drawn(side == 0)) &&
                                !laras_long_gun_held();
             Mat4 root;
             if (drawn)
@@ -5610,7 +6302,11 @@ namespace trlvr
                     kOffInstanceMatrices);
                 const Mat4 wrist = matrix_from_floats(
                     lara_matrices + g_first_person_wrist_segment[side] * 16);
-                root = first_person_hand_delta(side, wrist, controller);
+                // The fixed hand grip, as the drawn pistol uses.
+                Mat4 gun0 = matrix_from_floats(matrices);
+                root = rigid_inverse(gun0) * hand_attachment_grip(side) *
+                       wrist * first_person_hand_delta(side, wrist,
+                                                       controller);
             }
             else if (config().single_pistols && config().immersive_controls)
                 root = translation(0.0f, 0.0f, -100000.0f); // out of sight
@@ -5715,6 +6411,12 @@ namespace trlvr
             return result;
         }
 
+        bool long_gun_far_grip(const char* name, const Mat4& gun0,
+                               const Mat4& wrist, Mat4* local);
+        bool is_laras_long_gun_instance(const void* instance);
+        Mat4 gun_tilt_world(const char* name, const Mat4& controller,
+                            bool left_hand);
+
         void __cdecl detour_build_transforms(void* instance)
         {
             g_build_transforms(instance);
@@ -5751,7 +6453,10 @@ namespace trlvr
                     g_gameplay_gun.tick = GetTickCount();
                     return;
                 }
-                if (!is_laras_held_long_gun(matrices, name))
+                if (!is_laras_held_long_gun(matrices, name) &&
+                    !(weapon_is_long_gun(name) && weapon_drawn_in_hand(1) &&
+                      long_gun_selection_settled() &&
+                      is_laras_long_gun_instance(instance)))
                     return;
                 const int count = instance_segment_count(inst, nullptr);
                 if (count <= 0 || count > 8)
@@ -5765,6 +6470,21 @@ namespace trlvr
                 bool mirrored = false;
                 if (!long_gun_grip(wrist, &grip, &mirrored))
                     return;
+                // Held away from her hand (the shotgun; any long gun on the
+                // bike): the learned or fixed grip instead of the retail
+                // pose, as the draw does.
+                {
+                    Mat4 far_local;
+                    const Mat4 gun0 = matrix_from_floats(matrices);
+                    if (!mirrored &&
+                        long_gun_far_grip(name, gun0, wrist, &far_local))
+                        grip = rigid_inverse(gun0) * far_local * wrist * grip;
+                    Mat4 controller;
+                    if (first_person_controller_world_pose(mirrored,
+                                                           &controller))
+                        grip = grip * gun_tilt_world(name, controller,
+                                                     mirrored);
+                }
                 Mat4 mirror = Mat4::identity();
                 mirror.m[0][0] = -1.0f;
                 GameplayGun& gun = g_gameplay_gun;
@@ -5838,6 +6558,90 @@ namespace trlvr
             for (int k = 0; k < 3; ++k)
                 original.m[3][k] += shift[k];
             return original;
+        }
+
+        // A weapon's grip in Lara's hand: its pose in her wrist's frame.
+        // Retail attaches a held weapon at a fixed point of her hand; the
+        // grips learned on foot (user INI 2026-10-12) settled on exactly
+        // the same values for both pistols and the assault rifle, mirrored
+        // left / right -- that attachment. So pistols always use it (a
+        // checkpoint loaded on the bike, or a pose the game holds away from
+        // her hand, no longer matters), and long guns fall back to the
+        // right hand's when away from it (learned per session otherwise,
+        // since a long gun's model can sit differently).
+        struct LearnedGrip
+        {
+            char name[40]{};
+            int hand = -1;
+            Mat4 local = Mat4::identity();
+            bool valid = false;
+            bool fixed = false;     // pistols: always this grip
+            bool learned = false;   // long guns: learned this session
+        };
+        LearnedGrip g_learned_grips[12];
+
+        Mat4 hand_attachment_grip(int hand)
+        {
+            // Rows: rotation; offset in metres (her wrist frame).
+            const float scale = tune_world_scale();
+            const float s = scale > 0.0f ? scale : 1.0f;
+            Mat4 m = Mat4::identity();
+            const float side = hand == 0 ? 1.0f : -1.0f;
+            m.m[0][0] = 0.0f; m.m[0][1] = 0.0f; m.m[0][2] = side;
+            m.m[1][0] = -side; m.m[1][1] = 0.0f; m.m[1][2] = 0.0f;
+            m.m[2][0] = 0.0f; m.m[2][1] = -1.0f; m.m[2][2] = 0.0f;
+            m.m[3][0] = 0.0949f * side * s;
+            m.m[3][1] = -0.0165f * s;
+            m.m[3][2] = -0.0181f * s;
+            return m;
+        }
+
+        int learned_grip_slot(const char* name, int hand)
+        {
+            if (!name || hand < 0 || hand > 1)
+                return -1;
+            for (int i = 0; i < 12; ++i)
+                if (g_learned_grips[i].hand == hand &&
+                    strcmp(g_learned_grips[i].name, name) == 0)
+                    return i;
+            for (int i = 0; i < 12; ++i)
+            {
+                LearnedGrip& g = g_learned_grips[i];
+                if (g.hand >= 0)
+                    continue;
+                strncpy_s(g.name, name, _TRUNCATE);
+                g.hand = hand;
+                g.local = hand_attachment_grip(hand);
+                g.valid = true;
+                g.fixed = weapon_is_pistol(name);
+                return i;
+            }
+            return -1;
+        }
+
+        // A long gun's grip when the game holds it away from her right
+        // wrist (> 0.6 m) or she rides the bike: the grip learned on foot
+        // this session, else the hand attachment.
+        bool long_gun_far_grip(const char* name, const Mat4& gun0,
+                               const Mat4& wrist, Mat4* local)
+        {
+            const float scale = tune_world_scale();
+            if (!(scale > 0.0f))
+                return false;
+            float d = 0.0f;
+            for (int k = 0; k < 3; ++k)
+            {
+                const float e = gun0.m[3][k] - wrist.m[3][k];
+                d += e * e;
+            }
+            d = sqrtf(d) / scale;
+            if (!std::isfinite(d) || (d <= 0.6f && !g_bike.riding))
+                return false;
+            const int slot = learned_grip_slot(name, 1);
+            if (slot < 0)
+                return false;
+            *local = g_learned_grips[slot].local;
+            return true;
         }
 
         bool first_person_draw_linked_weapon(void* instance, int a2,
@@ -5999,8 +6803,10 @@ namespace trlvr
                     return false;
                 }
                 const float scale = tune_world_scale();
-                if (!std::isfinite(wrist_distance) || scale <= 0.0f ||
-                    wrist_distance > 0.5f * scale)
+                const bool hers = is_laras_long_gun_instance(instance);
+                if (!hers && (!std::isfinite(wrist_distance) ||
+                              scale <= 0.0f ||
+                              wrist_distance > 0.5f * scale))
                     return false; // someone else's gun: draw it untouched
                 if (!long_gun_selection_settled())
                 {
@@ -6076,6 +6882,24 @@ namespace trlvr
                 // Marker 4 (left) / 6 (right) on the hip; once drawn the
                 // pistol's side comes from its remembered identity.
                 hand = pistol_side(instance);
+                // Motorbike: the pistol out of its holster goes to the main
+                // hand; a second one is hidden.
+                if (g_bike.riding && link_marker != 4 && link_marker != 6)
+                {
+                    static void* bike_pistol = nullptr;
+                    static DWORD bike_pistol_at = 0;
+                    const DWORD now = GetTickCount();
+                    if (bike_pistol && bike_pistol != instance &&
+                        now - bike_pistol_at < 250)
+                        return true;
+                    if (bike_pistol != instance)
+                        log("first-person: motorbike pistol %p drawn in the "
+                            "%s hand", instance,
+                            config().left_handed ? "left" : "right");
+                    bike_pistol = instance;
+                    bike_pistol_at = now;
+                    hand = config().left_handed ? 0 : 1;
+                }
             }
             else if (link_marker >= 0)
             {
@@ -6156,6 +6980,75 @@ namespace trlvr
                 parent_matrices + g_first_person_wrist_segment[hand] * 16);
             const Mat4 delta = first_person_hand_delta(hand, wrist,
                                                         controller);
+            // The pistol's grip in Lara's hand, learned on foot (user
+            // 2026-10-11: on the motorbike the drawn guns floated out to
+            // the side -- the retail pose there does not have the gun in
+            // her animated hand, so gun x inv(wrist) was not a grip).
+            // While the gun sits within 0.2 m of her wrist the grip is
+            // learned; past 0.3 m (or on the bike) the learned grip is used.
+            bool use_learned_grip = false;
+            Mat4 learned_fix = Mat4::identity();
+            // One slot per weapon name and hand, kept in trlvr.ini so a
+            // save loaded straight onto the bike has it (user 2026-10-12).
+            int grip_slot = -1;
+            if (!(long_gun && config().left_handed))
+                grip_slot = learned_grip_slot(name, hand);
+            const float near_limit = long_gun ? 0.5f : 0.2f;
+            const float far_limit = long_gun ? 0.6f : 0.3f;
+            if (grip_slot >= 0 && (long_gun || weapon_is_pistol(name)))
+            {
+                LearnedGrip& lg = g_learned_grips[grip_slot];
+                const float scale = tune_world_scale();
+                __try
+                {
+                    float shift0[3] = {};
+                    const bool gameplay0 = gameplay_gun_match(
+                        instance, *reinterpret_cast<float**>(
+                            child + kOffInstanceMatrices), shift0);
+                    const Mat4 gun0 = gameplay0
+                        ? gameplay_gun_original(instance, 0, shift0)
+                        : matrix_from_floats(*reinterpret_cast<float**>(
+                              child + kOffInstanceMatrices));
+                    float d = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const float e = gun0.m[3][k] - wrist.m[3][k];
+                        d += e * e;
+                    }
+                    d = scale > 0.0f ? sqrtf(d) / scale : 0.0f;
+                    if (!lg.fixed && std::isfinite(d) && d < near_limit &&
+                        !g_bike.riding)
+                    {
+                        lg.local = gun0 * rigid_inverse(wrist);
+                        if (!lg.learned)
+                        {
+                            const Mat4& g = lg.local;
+                            log("first-person: %s grip learned (%.2f m from "
+                                "her %s wrist; offset %+.2f %+.2f %+.2f m)",
+                                name, d, hand == 0 ? "left" : "right",
+                                g.m[3][0] / scale, g.m[3][1] / scale,
+                                g.m[3][2] / scale);
+                        }
+                        lg.learned = true;
+                    }
+                    else if (lg.valid && (lg.fixed ||
+                             d > far_limit || g_bike.riding))
+                    {
+                        use_learned_grip = true;
+                        learned_fix = rigid_inverse(gun0) * lg.local *
+                                      wrist * delta;
+                        static unsigned reports = 0;
+                        if (reports++ < 8)
+                            log("first-person: %s is %.2f m from her wrist%s; "
+                                "drawn with the learned grip", name, d,
+                                g_bike.riding ? " (motorbike)" : "");
+                    }
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    use_learned_grip = false;
+                }
+            }
             // Left-handed long gun. Reusing the right hand's calibration on
             // the left controller stood the gun on end (headset test): the
             // two controllers' frames are mirror images. The right-hand grip
@@ -6225,6 +7118,9 @@ namespace trlvr
                         GetTickCount() - g_gameplay_gun.tick),
                         ++miss_reports;
             }
+            const Mat4 gun_turn = long_gun
+                ? gun_tilt_world(name, controller, left_controller)
+                : Mat4::identity();
             float saved[512][16]{};
             for (int segment = 0; segment < child_count; ++segment)
             {
@@ -6236,9 +7132,10 @@ namespace trlvr
                         ? gameplay_gun_original(instance, segment,
                                                 gameplay_shift)
                         : matrix_from_floats(child_matrices + segment * 16);
-                const Mat4 moved = mirror_grip
+                const Mat4 moved = (mirror_grip
                     ? mirror * original * right_grip * mirror * controller
-                    : original * delta;
+                    : use_learned_grip ? original * learned_fix
+                    : original * delta) * gun_turn;
                 memcpy(child_matrices + segment * 16, &moved.m[0][0],
                        sizeof(moved.m));
             }
@@ -11396,6 +12293,7 @@ namespace trlvr
             }
             if (!valid)
                 return;
+            bike_frame_update(matrices);
 
             bool hand_bone[2][512]{};
             for (int bone = 0; bone < count; ++bone)
@@ -11852,6 +12750,7 @@ namespace trlvr
                 // weapon (the game's own grip pose is right there).
                 g_fp_finger_block[hand] =
                     grip.held ? "holding a ledge or bar"
+                    : camera_bike_hand_on_bar(hand) ? "holding the handlebar"
                     : weapon_drawn_in_hand(hand) ? "a weapon in that hand"
                     : laras_long_gun_held() ? "a long gun is held"
                     : nullptr;
@@ -16472,6 +17371,32 @@ namespace trlvr
               GetTickCount() - g_gameplay_gun.tick <= 250));
     }
 
+    bool camera_bike_grip_claims(bool left)
+    {
+        const BikeBar& b = g_bike.bar[left ? 0 : 1];
+        return g_bike.riding && (b.held || b.in_reach);
+    }
+
+    bool camera_bike_bar_zone(int hand, float head[3], int* state)
+    {
+        if (hand < 0 || hand > 1 || !g_bike.riding ||
+            !g_bike.bar[hand].zone_valid || !head || !state)
+            return false;
+        const BikeBar& b = g_bike.bar[hand];
+        Mat4 eye;
+        memcpy(&eye.m[0][0], static_cast<const unsigned char*>(
+                   kMainCamera) + kOffCwTransform, sizeof(eye.m));
+        Mat4 inverse;
+        if (!invert(eye, &inverse))
+            return false;
+        const Mat4 local = b.zone_world * inverse;
+        for (int k = 0; k < 3; ++k)
+            head[k] = local.m[3][k];
+        *state = b.held ? 2 : b.in_reach ? 1 : 0;
+        return std::isfinite(head[0]) && std::isfinite(head[1]) &&
+               std::isfinite(head[2]);
+    }
+
     bool camera_two_hand_grip_claims(bool left)
     {
         if (!config().two_handed_guns || !g_first_person_active ||
@@ -17364,6 +18289,18 @@ namespace trlvr
                              "DRAW_DrawInstance (isolated tracked hands)"))
             {
                 g_draw_instance = (PFN_DrawInstance)tramp;
+            }
+            if (config().immersive_controls)
+            {
+                // Bike::Process: push ebp / mov ebp, esp / and esp, -16.
+                static const unsigned char kBikeProcessSig[] = {
+                    0x55, 0x8B, 0xEC, 0x83, 0xE4, 0xF0 };
+                tramp = nullptr;
+                if (hook_install((void*)0x0051F7C0,
+                                 (void*)&detour_bike_process, &tramp,
+                                 kBikeProcessSig, sizeof(kBikeProcessSig),
+                                 "Bike::Process (handlebars)"))
+                    g_bike_process = (PFN_BikeProcess)tramp;
             }
             tramp = nullptr;
             if (hook_install((void*)kGetBoneVB,

@@ -256,6 +256,18 @@ namespace trlvr
         // turns of snap_turn_degrees.
         bool snap_turn = false;
         float snap_turn_degrees = 30.0f;
+        // Smooth turning speed at full stick, degrees per second.
+        float smooth_turn_speed = 120.0f;
+        // Motorbike handlebars (first person, immersive): 0 off, 1 grab
+        // for show (the stick rides), 2 the hands steer (stick throttle),
+        // 3 the hands steer and the right grip twists the throttle.
+        int bike_handlebars = 1;
+        // Hand travel (metres) for full steering lock, and twist (degrees)
+        // for full throttle.
+        float bike_steer_range = 0.10f;
+        float bike_twist_range = 30.0f;
+        // Draw the handlebar grab points (rings).
+        bool bike_handlebar_markers = false;
         // 0 auto (proximity engages and releases, no button), 1 toggle
         // (free-hand grip press at the foregrip takes hold, press again to
         // let go), 2 hold (grip must stay pressed).

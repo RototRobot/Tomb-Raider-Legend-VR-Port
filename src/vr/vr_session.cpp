@@ -2036,6 +2036,49 @@ namespace trlvr
         return true;
     }
 
+    bool vr_controller_tracking_pose(bool left, float pos[3], float rot[9])
+    {
+        if (!g_ready || !g_system || !g_pose_valid || !pos || !rot)
+            return false;
+        const vr::ETrackedControllerRole role = left
+            ? vr::TrackedControllerRole_LeftHand
+            : vr::TrackedControllerRole_RightHand;
+        const vr::TrackedDeviceIndex_t index =
+            g_system->GetTrackedDeviceIndexForControllerRole(role);
+        if (index == vr::k_unTrackedDeviceIndexInvalid ||
+            index >= vr::k_unMaxTrackedDeviceCount)
+            return false;
+        const vr::TrackedDevicePose_t& controller = g_tracked_poses[index];
+        if (!controller.bPoseIsValid || !controller.bDeviceIsConnected)
+            return false;
+        const vr::HmdMatrix34_t& cm = controller.mDeviceToAbsoluteTracking;
+        for (int r = 0; r < 3; ++r)
+        {
+            pos[r] = cm.m[r][3];
+            for (int c = 0; c < 3; ++c)
+                rot[r * 3 + c] = cm.m[r][c];
+        }
+        return true;
+    }
+
+    bool vr_hmd_tracking_forward(float* fx, float* fz)
+    {
+        if (!g_ready || !g_pose_valid || !fx || !fz)
+            return false;
+        const vr::TrackedDevicePose_t& hmd =
+            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        if (!hmd.bPoseIsValid)
+            return false;
+        float x = -hmd.mDeviceToAbsoluteTracking.m[0][2];
+        float z = -hmd.mDeviceToAbsoluteTracking.m[2][2];
+        const float length = sqrtf(x * x + z * z);
+        if (length < 1.0e-4f)
+            return false;
+        *fx = x / length;
+        *fz = z / length;
+        return true;
+    }
+
     bool vr_controller_body_forward_speed(bool left, float* speed)
     {
         if (!speed || !g_ready || !g_system || !g_pose_valid)

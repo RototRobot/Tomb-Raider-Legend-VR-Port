@@ -130,6 +130,11 @@ namespace trlvr
             { L"controls", L"aim_mode", L"hand" },
             { L"controls", L"turn_mode", L"smooth" },
             { L"controls", L"snap_turn_degrees", L"30" },
+            { L"controls", L"smooth_turn_speed", L"120" },
+            { L"controls", L"bike_handlebars", L"1" },
+            { L"controls", L"bike_steer_range", L"0.10" },
+            { L"controls", L"bike_twist_range", L"30" },
+            { L"controls", L"bike_handlebar_markers", L"0" },
             { L"controls", L"two_handed_mode", L"auto" },
             { L"controls", L"two_handed_grip_distance", L"0.30" },
             { L"controls", L"two_handed_radius", L"0.15" },
@@ -406,6 +411,22 @@ namespace trlvr
             L"; steps of snap_turn_degrees (first person).\r\n"
             L"turn_mode = smooth\r\n"
             L"snap_turn_degrees = 30\r\n"
+            L"; Smooth turning speed at full stick, degrees per second\r\n"
+            L"; (30 to 360).\r\n"
+            L"smooth_turn_speed = 120\r\n"
+            L"; Motorbike handlebars (first person, immersive controls): grip\r\n"
+            L"; a handlebar to hold it. 0 = off; 1 = for show, the stick\r\n"
+            L"; still rides; 2 = your hands steer (push the left hand forward\r\n"
+            L"; to turn right, the right hand forward to turn left), the stick\r\n"
+            L"; still does the throttle; 3 = as 2, and twist the right grip\r\n"
+            L"; back for throttle (forward to brake).\r\n"
+            L"bike_handlebars = 1\r\n"
+            L"; Hand travel in metres for full steering lock.\r\n"
+            L"bike_steer_range = 0.10\r\n"
+            L"; Right-grip twist in degrees for full throttle.\r\n"
+            L"bike_twist_range = 30\r\n"
+            L"; 1 = show where to grip the handlebars (small rings).\r\n"
+            L"bike_handlebar_markers = 0\r\n"
             L"; auto = bring the free hand to the foregrip to hold, move it away\r\n"
             L"; to let go; toggle = press its grip there to hold, press again to\r\n"
             L"; let go; hold = keep its grip pressed.\r\n"
@@ -898,6 +919,28 @@ namespace trlvr
             g_config.snap_turn_degrees =
                 std::isfinite(degrees) && degrees >= 5.0f && degrees <= 180.0f
                     ? degrees : 30.0f;
+            const float speed = read_float(L"controls",
+                                           L"smooth_turn_speed", L"120",
+                                           path);
+            g_config.smooth_turn_speed =
+                std::isfinite(speed) && speed >= 30.0f && speed <= 360.0f
+                    ? speed : 120.0f;
+            const int bars = GetPrivateProfileIntW(L"controls",
+                                                   L"bike_handlebars", 1,
+                                                   path);
+            g_config.bike_handlebars = bars >= 0 && bars <= 3 ? bars : 1;
+            const float steer = read_float(L"controls", L"bike_steer_range",
+                                           L"0.10", path);
+            g_config.bike_steer_range =
+                std::isfinite(steer) && steer >= 0.03f && steer <= 0.4f
+                    ? steer : 0.10f;
+            const float twist = read_float(L"controls", L"bike_twist_range",
+                                           L"30", path);
+            g_config.bike_twist_range =
+                std::isfinite(twist) && twist >= 10.0f && twist <= 90.0f
+                    ? twist : 30.0f;
+            g_config.bike_handlebar_markers = GetPrivateProfileIntW(
+                L"controls", L"bike_handlebar_markers", 0, path) != 0;
         }
         {
             wchar_t mode[32] = {};

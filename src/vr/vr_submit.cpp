@@ -3123,6 +3123,73 @@ namespace trlvr
                              0.80f, 0.25f, 0.156f);
         }
 
+        // Motorbike handlebar grab points (user 2026-10-11): a small ring
+        // pair where Lara's hand holds each bar -- yellow, green in reach;
+        // hidden while held.
+        void draw_bike_bars(IDirect3DSurface9* back)
+        {
+            if (!config().bike_handlebar_markers ||
+                !stereo_same_frame_active() || !camera_first_person_active())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float metre = tune_world_scale();
+            if (!(metre > 0.0f))
+                return;
+            static DebugLineVertex lines[2 * 2 * 2 * 48];
+            unsigned used = 0;
+            const float eye_width = desc.Width * 0.5f;
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                float centre[3]{};
+                int state = 0;
+                if (!camera_bike_bar_zone(hand, centre, &state) || state == 2)
+                    continue;
+                const DWORD colour = state == 1 ? 0xFF40FF60u : 0xFFFFD040u;
+                const float r = 0.05f * metre;
+                for (int ring = 0; ring < 2; ++ring)
+                    for (int i = 0; i < 24; ++i)
+                    {
+                        const float a0 = 6.2831853f * i / 24.0f;
+                        const float a1 = 6.2831853f * (i + 1) / 24.0f;
+                        float p[2][3];
+                        for (int e = 0; e < 2; ++e)
+                        {
+                            const float a = e ? a1 : a0;
+                            // Head frame: x right, y down, z forward.
+                            p[e][0] = centre[0] + (ring ? 0.0f : r * cosf(a));
+                            p[e][1] = centre[1] + r * sinf(a);
+                            p[e][2] = centre[2] + (ring ? r * cosf(a) : 0.0f);
+                        }
+                        for (int eye_index = 0; eye_index < 2; ++eye_index)
+                        {
+                            const Eye eye = eye_index ? EyeRight : EyeLeft;
+                            float uv[2][2];
+                            bool ok = true;
+                            for (int e = 0; e < 2 && ok; ++e)
+                                ok = vr_project_head_point(eye, p[e][0], p[e][1],
+                                                           p[e][2], &uv[e][0],
+                                                           &uv[e][1]) &&
+                                     uv[e][0] > -0.5f && uv[e][0] < 1.5f &&
+                                     uv[e][1] > -0.5f && uv[e][1] < 1.5f;
+                            if (!ok ||
+                                used + 2 > sizeof(lines) / sizeof(lines[0]))
+                                continue;
+                            lines[used++] = { eye_width * (eye_index + uv[0][0]),
+                                              desc.Height * uv[0][1], 0.0f,
+                                              1.0f, colour };
+                            lines[used++] = { eye_width * (eye_index + uv[1][0]),
+                                              desc.Height * uv[1][1], 0.0f,
+                                              1.0f, colour };
+                        }
+                    }
+            }
+            if (used)
+                draw_hand_lines(back, desc, lines, used);
+        }
+
         void draw_pouch_items(IDirect3DSurface9* back)
         {
             if (!stereo_same_frame_active() || !camera_first_person_active() ||
@@ -3923,6 +3990,7 @@ namespace trlvr
             draw_handhold_debug(back_buffer);
             draw_aim_debug_laser(back_buffer);
             draw_pouch_items(back_buffer);
+            draw_bike_bars(back_buffer);
             draw_gear_tuning_panel(back_buffer);
             draw_hand_calibration_panel(back_buffer);
             draw_notice_panel(back_buffer);

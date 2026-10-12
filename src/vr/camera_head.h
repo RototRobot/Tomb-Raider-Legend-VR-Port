@@ -132,6 +132,12 @@ namespace trlvr
     // hold) the fore-end of Lara's drawn long gun; its grip button then
     // belongs to the two-handed hold.
     bool camera_two_hand_grip_claims(bool left);
+    // Motorbike: a grip near or on a handlebar belongs to the bar, not the
+    // holsters or belt.
+    bool camera_bike_grip_claims(bool left);
+    // A handlebar's grab point in the head frame (game units); state 0 out
+    // of reach, 1 in reach, 2 held.
+    bool camera_bike_bar_zone(int hand, float head[3], int* state);
     bool camera_two_hand_engaged();
     // True only during the retail LedgeClimb pull-up animation, after the
     // hanging state has released the tracked hand anchors.
