@@ -35,6 +35,8 @@ namespace trlvr
 
             { L"vr", L"enabled", L"1" },
             { L"vr", L"submit", L"1" },
+            { L"vr", L"xr_runtime_json", L"" },
+            { L"vr", L"xr_copy_wait", L"1" },
             { L"vr", L"stereo", L"1" },
             { L"vr", L"stereo_same_frame", L"1" },
             { L"vr", L"stereo_lock_pose", L"1" },
@@ -189,6 +191,10 @@ namespace trlvr
             L"; 0 is the untouched flat-game baseline.\r\n"
             L"enabled = 1\r\n"
             L"submit = 1\r\n"
+            L"; OpenXR runtime manifest (a 32-bit one). Empty uses the registered runtime.\r\n"
+            L"xr_runtime_json =\r\n"
+            L"; 1 waits for the GPU copy into the headset's image before handing it over.\r\n"
+            L"xr_copy_wait = 1\r\n"
             L"stereo = 1\r\n"
             L"; Both eyes in one game frame. Keep Depth of Field and Fullscreen Effects off.\r\n"
             L"stereo_same_frame = 1\r\n"
@@ -661,6 +667,9 @@ namespace trlvr
 
         g_config.vr_enabled = read_bool(L"vr", L"enabled", true, path);
         g_config.vr_submit = read_bool(L"vr", L"submit", true, path);
+        GetPrivateProfileStringW(L"vr", L"xr_runtime_json", L"",
+                                 g_config.xr_runtime_json, MAX_PATH, path);
+        g_config.xr_copy_wait = read_bool(L"vr", L"xr_copy_wait", true, path);
         g_config.stereo = read_bool(L"vr", L"stereo", true, path);
         g_config.stereo_same_frame = read_bool(L"vr", L"stereo_same_frame", true, path);
         g_config.stereo_lock_pose = read_bool(L"vr", L"stereo_lock_pose", true, path);

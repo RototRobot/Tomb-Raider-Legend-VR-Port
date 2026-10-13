@@ -40,6 +40,7 @@ namespace trlvr
         ~ProxyDevice()
         {
             reflection_stereo_release();
+            vr_submit_device_closing(_device);
             if (_device)
                 _device->Release();
             // CreateDevice took a reference on the wrapper that made us.

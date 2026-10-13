@@ -18,7 +18,7 @@
 #include <dwrite.h>
 #include <cwchar>
 
-#include "openvr.h"
+#include "xr_runtime.h"
 #include "d3d9_vr.h"
 
 namespace trlvr
@@ -28,7 +28,6 @@ namespace trlvr
         typedef HRESULT(__stdcall* PFN_Direct3DCreateVR9)(IDirect3DDevice9*, IDirect3DVR9**);
 
         IDirect3DVR9* g_vr = nullptr;
-        vr::IVRCompositor* g_comp = nullptr;
         IDirect3DDevice9* g_device = nullptr;
 
         // One image per eye. In alternating mode only one is redrawn each
@@ -3582,136 +3581,137 @@ namespace trlvr
             return true;
         }
 
-        // Split deliberately into two halves.
+        // OpenXR swapchain images belong to the runtime, so a finished frame
+        // is copied into one rather than handed over in place. The copy is
+        // recorded by DXVK itself (CopySurfaceToImage), in order with the
+        // frame it reads.
         //
-        // prepare_surface flushes DXVK's command stream and waits for the GPU.
-        // It must NOT be called while the submission queue is locked: DXVK's
-        // own submit thread needs that lock to push work to the queue, so
-        // waiting for GPU work while holding it deadlocks the process. That is
-        // not hypothetical -- it hung on the first stereo frame, every thread
-        // waiting, when these two were briefly a single function.
+        // The locking rule is the one this file has always had: DXVK's own
+        // submit thread needs the submission queue to push work to the GPU,
+        // so nothing may wait for the GPU while holding it. That deadlock is
+        // not hypothetical -- it hung on the first stereo frame, every
+        // thread waiting, when the two halves were briefly one function.
         //
-        // So: prepare both eyes first, then take the lock only around the
-        // Submit calls, which are quick and do not wait on anything.
-        struct EyeSubmission
+        // So the queue is held only round the OpenXR calls that may use the
+        // VkQueue themselves (swapchain creation, acquire, release and
+        // xrEndFrame), and the copy, which may wait, happens between them
+        // with the queue free.
+        //
+        // Set when there was no frame to submit into: the session is not
+        // running (headset off, still starting), which is not a failure.
+        bool g_no_frame = false;
+
+        bool surface_size(IDirect3DSurface9* surface, UINT* w, UINT* h)
         {
-            vr::VRVulkanTextureData_t vk;
-            bool ok;
-        };
-
-        EyeSubmission prepare_surface(IDirect3DSurface9* surface)
-        {
-            EyeSubmission out{};
-            out.ok = false;
-            if (!surface)
-                return out;
-
-            log_set_activity("DXVK TransferSurface");
-            const bool transferred =
-                SUCCEEDED(g_vr->TransferSurface(surface, TRUE));
-            log_set_activity(nullptr);
-            if (!transferred)
-                return out;
-
-            D3D9_TEXTURE_VR_DESC desc{};
-            log_set_activity("DXVK GetVRDesc");
-            const bool described = SUCCEEDED(g_vr->GetVRDesc(surface, &desc));
-            log_set_activity(nullptr);
-            if (!described)
-                return out;
-            // Never hand the compositor an incomplete description (SiN VR
-            // 1.0.1 lesson): every handle set, a real size, one sample.
-            if (!desc.Image || !desc.Device || !desc.PhysicalDevice ||
-                !desc.Instance || !desc.Queue || !desc.Width ||
-                !desc.Height || !desc.Format || desc.SampleCount != 1)
-            {
-                static bool reported = false;
-                if (!reported)
-                {
-                    reported = true;
-                    log("submit: incomplete surface description (image %llX, "
-                        "%ux%u, format %u, samples %u) -- frame skipped",
-                        (unsigned long long)desc.Image, desc.Width,
-                        desc.Height, (unsigned)desc.Format,
-                        desc.SampleCount);
-                }
-                return out;
-            }
-
-            out.vk.m_nImage            = desc.Image;
-            out.vk.m_pDevice           = (VkDevice_T*)desc.Device;
-            out.vk.m_pPhysicalDevice   = (VkPhysicalDevice_T*)desc.PhysicalDevice;
-            out.vk.m_pInstance         = (VkInstance_T*)desc.Instance;
-            out.vk.m_pQueue            = (VkQueue_T*)desc.Queue;
-            out.vk.m_nQueueFamilyIndex = desc.QueueFamilyIndex;
-            out.vk.m_nWidth            = desc.Width;
-            out.vk.m_nHeight           = desc.Height;
-            out.vk.m_nFormat           = (uint32_t)desc.Format;
-            out.vk.m_nSampleCount      = desc.SampleCount;
-            out.ok = true;
-            return out;
+            D3DSURFACE_DESC d{};
+            if (!surface || FAILED(surface->GetDesc(&d)) || !d.Width ||
+                !d.Height)
+                return false;
+            *w = d.Width;
+            *h = d.Height;
+            return true;
         }
 
-        bool submit_prepared(vr::EVREye eye, EyeSubmission& s,
-                             const vr::VRTextureBounds_t* bounds = nullptr)
+        // One surface holding both eyes side by side, one surface shown to
+        // both eyes (mono), or a surface per eye (second != null).
+        bool submit_surfaces(IDirect3DSurface9* first, IDirect3DSurface9* second,
+                             bool side_by_side)
         {
-            if (!s.ok)
+            g_no_frame = !xr_frame_begun();
+            if (g_no_frame)
                 return false;
 
-            vr::Texture_t tex{};
-            tex.handle      = &s.vk;
-            tex.eType       = vr::TextureType_Vulkan;
-            tex.eColorSpace = vr::ColorSpace_Auto;
+            UINT w = 0, h = 0;
+            bool ok = surface_size(first, &w, &h) && xr_frame_should_render();
+            const unsigned total_w = second ? w * 2 : w;
 
-            // Bounds are how a double-wide surface becomes two eyes without
-            // a copy: the same image is submitted twice, each time naming
-            // the half that belongs to that eye.
-            log_set_activity(eye == vr::Eye_Left
-                ? "IVRCompositor::Submit (left eye)"
-                : "IVRCompositor::Submit (right eye)");
-            const bool ok = g_comp->Submit(eye, &tex, bounds,
-                                           vr::Submit_Default) ==
-                            vr::VRCompositorError_None;
-            log_set_activity(nullptr);
-            return ok;
+            if (ok && !xr_swapchain_matches(total_w, h))
+            {
+                // DXVK's wrappers for the old images go first, and wait for
+                // the GPU, so not under the queue lock.
+                log_set_activity("DXVK ReleaseExternalImages");
+                g_vr->ReleaseExternalImages();
+                log_set_activity(nullptr);
+                g_vr->LockSubmissionQueue();
+                ok = xr_swapchain_create(total_w, h);
+                g_vr->UnlockSubmissionQueue();
+            }
+
+            uint64_t image = 0;
+            bool acquired = false;
+            if (ok)
+            {
+                g_vr->LockSubmissionQueue();
+                acquired = ok = xr_swapchain_acquire(&image);
+                g_vr->UnlockSubmissionQueue();
+            }
+
+            if (ok)
+            {
+                D3D9_VR_EXTERNAL_IMAGE dst{};
+                dst.Image = image;
+                dst.Format = (VkFormat)xr_swapchain_format();
+                dst.Width = total_w;
+                dst.Height = h;
+                const BOOL wait = config().xr_copy_wait ? TRUE : FALSE;
+                log_set_activity("DXVK CopySurfaceToImage");
+                ok = SUCCEEDED(g_vr->CopySurfaceToImage(first, &dst, 0, 0,
+                                                        second ? FALSE : wait));
+                if (ok && second)
+                    ok = SUCCEEDED(g_vr->CopySurfaceToImage(second, &dst,
+                                                            (INT)w, 0, wait));
+                log_set_activity(nullptr);
+                if (!ok)
+                {
+                    static bool reported = false;
+                    if (!reported)
+                    {
+                        reported = true;
+                        log("submit: DXVK could not copy the %ux%u frame into "
+                            "the %ux%u swapchain image (multisampled, or the "
+                            "wrong size)", w, h, total_w, h);
+                    }
+                }
+            }
+
+            // Each eye is a rectangle of the one image.
+            XrRect left{ 0, 0, (int)total_w, (int)h };
+            XrRect right = left;
+            if (second || side_by_side)
+            {
+                left.width = right.width = (int)(total_w / 2);
+                right.x = left.width;
+                // Inverted stereo is hard to put into words and instant to
+                // recognise, so it is a key rather than a rebuild. A pair of
+                // surfaces is already swapped by the caller.
+                if (side_by_side && tune_swap_eyes())
+                {
+                    const XrRect t = left;
+                    left = right;
+                    right = t;
+                }
+            }
+
+            // The frame is always ended, with no layer if anything above
+            // failed: a frame begun and never ended stalls the session.
+            g_vr->LockSubmissionQueue();
+            if (acquired)
+                xr_swapchain_release();
+            const bool ended = xr_frame_end(ok ? &left : nullptr,
+                                            ok ? &right : nullptr);
+            g_vr->UnlockSubmissionQueue();
+            return ok && ended;
         }
 
         // Both eyes from one double-wide surface.
         bool submit_side_by_side(IDirect3DSurface9* surface)
         {
-            EyeSubmission s = prepare_surface(surface);
-            if (!s.ok)
-                return false;
-
-            vr::VRTextureBounds_t left{ 0.0f, 0.0f, 0.5f, 1.0f };
-            vr::VRTextureBounds_t right{ 0.5f, 0.0f, 1.0f, 1.0f };
-            if (tune_swap_eyes())
-            {
-                const vr::VRTextureBounds_t t = left;
-                left = right;
-                right = t;
-            }
-
-            g_vr->LockSubmissionQueue();
-            const bool ok = submit_prepared(vr::Eye_Left, s, &left)
-                         && submit_prepared(vr::Eye_Right, s, &right);
-            g_vr->UnlockSubmissionQueue();
-            return ok;
+            return submit_surfaces(surface, nullptr, true);
         }
 
-        // Prepare both, then lock only for the submits.
         bool submit_pair(IDirect3DSurface9* left, IDirect3DSurface9* right)
         {
-            EyeSubmission l = prepare_surface(left);
-            EyeSubmission r = (right == left) ? l : prepare_surface(right);
-            if (!l.ok || !r.ok)
-                return false;
-
-            g_vr->LockSubmissionQueue();
-            const bool ok = submit_prepared(vr::Eye_Left, l)
-                         && submit_prepared(vr::Eye_Right, r);
-            g_vr->UnlockSubmissionQueue();
-            return ok;
+            return submit_surfaces(left, right == left ? nullptr : right, false);
         }
         // The game's FSAA (launcher "EnableFSAA", 2026-10-04) makes the back
         // buffer multisampled, which the compositor cannot take. It is
@@ -3816,19 +3816,8 @@ namespace trlvr
         }
         if (g_ready)
             return true;
-        if (!real_device || !vr_ready())
+        if (!real_device || !vr_ready() || !config().vr_submit)
             return false;
-
-        g_comp = (vr::IVRCompositor*)vr_compositor_raw();
-        if (!g_comp)
-        {
-            log("submit: no IVRCompositor -- the session is not a Scene application");
-            return false;
-        }
-        // The mod's pose maths, recentring and holster/gesture frames are all
-        // in seated space. WaitGetPoses returns poses in the compositor's
-        // space (standing by default), and those poses now drive rendering.
-        g_comp->SetTrackingSpace(vr::TrackingUniverseSeated);
 
         // Direct3DCreateVR9 only exists in our DXVK fork. On stock DXVK or on
         // Windows' d3d9 it is simply absent, and we stay mono-on-screen.
@@ -3848,17 +3837,71 @@ namespace trlvr
             return false;
         }
 
-        g_device = real_device;
-        const HRESULT hr = create(real_device, &g_vr);
-        if (FAILED(hr) || !g_vr)
+        IDirect3DVR9* created = nullptr;
+        const HRESULT hr = create(real_device, &created);
+        if (FAILED(hr) || !created)
         {
             log("submit: Direct3DCreateVR9 failed (0x%08lX)", hr);
             return false;
         }
+        // The interface grew for OpenXR and its IID changed with it, so a
+        // d3d9_dxvk.dll from an older release is refused here rather than
+        // called through a vtable it does not have.
+        IDirect3DVR9* checked = nullptr;
+        if (FAILED(created->QueryInterface(__uuidof(IDirect3DVR9),
+                                           (void**)&checked)) || !checked)
+        {
+            created->Release();
+            log("submit: d3d9_dxvk.dll is from an older release (no OpenXR "
+                "interop) -- install the one built with this d3d9.dll");
+            return false;
+        }
+        checked->Release();
 
+        D3D9_VR_DEVICE_DESC desc{};
+        if (FAILED(created->GetDeviceDesc(&desc)) || !desc.Instance ||
+            !desc.PhysicalDevice || !desc.Device)
+        {
+            created->Release();
+            log("submit: DXVK did not describe its Vulkan device");
+            return false;
+        }
+
+        XrVulkanHandles vk{};
+        vk.instance = desc.Instance;
+        vk.physical_device = desc.PhysicalDevice;
+        vk.device = desc.Device;
+        vk.queue_family = desc.QueueFamilyIndex;
+        vk.queue_index = desc.QueueIndex;
+        // The runtime may use the queue while it sets the session up.
+        created->LockSubmissionQueue();
+        const bool session = xr_session_create(vk);
+        created->UnlockSubmissionQueue();
+        if (!session)
+        {
+            created->Release();
+            log("submit: no OpenXR session -- the game runs flat");
+            return false;
+        }
+
+        g_device = real_device;
+        g_vr = created;
         g_ready = true;
-        log("submit: Vulkan interop up; submitting mono to both eyes");
+        log("submit: Vulkan interop and OpenXR session up");
         return true;
+    }
+
+    void vr_submit_device_closing(IDirect3DDevice9* real_device)
+    {
+        // The session and its swapchain live on this device's VkDevice, so
+        // they go while it is still there.
+        if (!g_vr || real_device != g_device || !xr_session_exists())
+            return;
+        log("submit: the device is being released; ending the OpenXR session");
+        g_vr->ReleaseExternalImages();
+        g_vr->LockSubmissionQueue();
+        xr_session_destroy();
+        g_vr->UnlockSubmissionQueue();
     }
 
     void vr_submit_shutdown()
@@ -3878,25 +3921,20 @@ namespace trlvr
         }
         g_device = nullptr;
         g_ready = false;
-        g_comp = nullptr;
     }
 
     // Performance line every 5 s (user, 2026-10-05: the water area ran at
-    // about 30 against 55 elsewhere). From SteamVR's own frame timing:
-    // the GPU time of our scene, the compositor's, how often a frame was
-    // reprojected or dropped; plus the time between frames, how long
-    // WaitGetPoses blocked (long = waiting for the headset, so the game
-    // was fast enough) and the game's draw calls per frame.
+    // about 30 against 55 elsewhere): the time between frames, how long
+    // xrWaitFrame blocked (long = waiting for the headset, so the game was
+    // fast enough), how many frames the runtime asked not to be drawn, and
+    // the game's draw calls per frame. OpenXR has no frame-timing query, so
+    // the GPU and reprojection figures SteamVR used to give are gone.
     namespace
     {
         volatile LONG g_perf_draws = 0;
         LARGE_INTEGER g_perf_qpf{}, g_perf_last_frame{}, g_perf_window{};
-        unsigned g_perf_frames = 0, g_perf_reprojected = 0;
-        unsigned g_perf_cpu_late = 0, g_perf_gpu_late = 0;
-        unsigned g_perf_throttled = 0;
-        unsigned g_perf_dropped = 0, g_perf_timed = 0;
-        double g_perf_wait_ms = 0.0, g_perf_scene_gpu_ms = 0.0;
-        double g_perf_compositor_gpu_ms = 0.0, g_perf_frame_ms_max = 0.0;
+        unsigned g_perf_frames = 0, g_perf_not_rendered = 0;
+        double g_perf_wait_ms = 0.0, g_perf_frame_ms_max = 0.0;
         LONG g_perf_draw_total = 0;
 
         double perf_ms(const LARGE_INTEGER& a, const LARGE_INTEGER& b)
@@ -3906,8 +3944,7 @@ namespace trlvr
                   double(g_perf_qpf.QuadPart) : 0.0;
         }
 
-        void perf_frame(const LARGE_INTEGER& before,
-                        const LARGE_INTEGER& after)
+        void perf_frame(const LARGE_INTEGER& after)
         {
             if (!g_perf_qpf.QuadPart)
             {
@@ -3921,54 +3958,26 @@ namespace trlvr
             if (frame > g_perf_frame_ms_max && frame < 1000.0)
                 g_perf_frame_ms_max = frame;
             ++g_perf_frames;
-            g_perf_wait_ms += perf_ms(before, after);
+            g_perf_wait_ms += xr_frame_wait_ms();
+            if (!xr_frame_should_render())
+                ++g_perf_not_rendered;
             g_perf_draw_total += InterlockedExchange(&g_perf_draws, 0);
-
-            vr::Compositor_FrameTiming timing{};
-            timing.m_nSize = sizeof(timing);
-            if (g_comp->GetFrameTiming(&timing, 1))
-            {
-                ++g_perf_timed;
-                g_perf_scene_gpu_ms += timing.m_flPreSubmitGpuMs;
-                g_perf_compositor_gpu_ms += timing.m_flCompositorRenderGpuMs;
-                const uint32_t flags = timing.m_nReprojectionFlags;
-                if (flags & (vr::VRCompositor_ReprojectionReason_Cpu |
-                             vr::VRCompositor_ReprojectionReason_Gpu))
-                    ++g_perf_reprojected;
-                if (flags & vr::VRCompositor_ReprojectionReason_Cpu)
-                    ++g_perf_cpu_late;
-                if (flags & vr::VRCompositor_ReprojectionReason_Gpu)
-                    ++g_perf_gpu_late;
-                if (flags & vr::VRCompositor_ThrottleMask)
-                    ++g_perf_throttled;
-                g_perf_dropped += timing.m_nNumDroppedFrames;
-            }
 
             const double window = perf_ms(g_perf_window, after);
             if (window >= 5000.0 && g_perf_frames)
             {
                 const double n = g_perf_frames;
-                const double timed = g_perf_timed ? g_perf_timed : 1.0;
                 log("perf: %.0f fps (frame %.1f ms avg, %.0f worst; "
-                    "WaitGetPoses %.1f ms), GPU scene %.1f ms, compositor "
-                    "%.1f ms, reprojected %.0f%% (CPU late %.0f%%, GPU late "
-                    "%.0f%%, throttled %.0f%%), dropped %u, %.0f draws/frame",
+                    "xrWaitFrame %.1f ms), %u frames not drawn at the "
+                    "runtime's request, %.0f draws/frame",
                     n * 1000.0 / window, window / n, g_perf_frame_ms_max,
-                    g_perf_wait_ms / n, g_perf_scene_gpu_ms / timed,
-                    g_perf_compositor_gpu_ms / timed,
-                    100.0 * g_perf_reprojected / timed,
-                    100.0 * g_perf_cpu_late / timed,
-                    100.0 * g_perf_gpu_late / timed,
-                    100.0 * g_perf_throttled / timed, g_perf_dropped,
+                    g_perf_wait_ms / n, g_perf_not_rendered,
                     g_perf_draw_total / n);
                 perf_cpu_report(g_perf_frames);
                 camera_perf_instance_report(g_perf_frames);
                 g_perf_window = after;
-                g_perf_frames = g_perf_reprojected = g_perf_dropped = 0;
-                g_perf_cpu_late = g_perf_gpu_late = g_perf_throttled = 0;
-                g_perf_timed = 0;
-                g_perf_wait_ms = g_perf_scene_gpu_ms = 0.0;
-                g_perf_compositor_gpu_ms = g_perf_frame_ms_max = 0.0;
+                g_perf_frames = g_perf_not_rendered = 0;
+                g_perf_wait_ms = g_perf_frame_ms_max = 0.0;
                 g_perf_draw_total = 0;
             }
         }
@@ -4004,22 +4013,24 @@ namespace trlvr
             return;
 
         log_install_crash_handler();
-        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
-        LARGE_INTEGER before{}, after{};
-        QueryPerformanceCounter(&before);
-        log_set_activity("IVRCompositor::WaitGetPoses");
-        const bool posed = g_comp->WaitGetPoses(poses,
-            vr::k_unMaxTrackedDeviceCount, nullptr, 0) ==
-            vr::VRCompositorError_None;
-        log_set_activity(nullptr);
-        QueryPerformanceCounter(&after);
-        if (posed)
+        // A frame the submit path did not end (no back buffer, an early
+        // return) is ended empty before the next one is begun.
+        if (xr_frame_begun())
         {
-            vr_set_render_poses(poses, vr::k_unMaxTrackedDeviceCount);
-            log_set_activity("IVRCompositor::GetFrameTiming");
-            perf_frame(before, after);
-            log_set_activity(nullptr);
+            g_vr->LockSubmissionQueue();
+            xr_frame_end(nullptr, nullptr);
+            g_vr->UnlockSubmissionQueue();
         }
+
+        XrFrame frame{};
+        if (!xr_frame_wait(&frame))
+            return;
+        LARGE_INTEGER after{};
+        QueryPerformanceCounter(&after);
+        if (frame.eyes_valid)
+            vr_set_eye_views(frame.eyes);
+        vr_set_render_poses(frame.poses, kPoseCount);
+        perf_frame(after);
     }
 
     void vr_submit_frame(IDirect3DSurface9* back_buffer)
@@ -4037,7 +4048,7 @@ namespace trlvr
 
             if (!ok)
             {
-                if (g_failures++ == 0)
+                if (!g_no_frame && g_failures++ == 0)
                     log("submit: the compositor would not take the frame -- reporting once");
                 return;
             }
@@ -4083,7 +4094,7 @@ namespace trlvr
             IDirect3DSurface9* submitted = resolved_back_buffer(back_buffer);
             if (!submitted || !submit_side_by_side(submitted))
             {
-                if (g_failures++ == 0)
+                if (!g_no_frame && g_failures++ == 0)
                     log("submit: the compositor would not take the side-by-side "
                         "frame -- reporting once");
                 return;
@@ -4134,7 +4145,7 @@ namespace trlvr
 
         if (!ok)
         {
-            if (g_failures++ == 0)
+            if (!g_no_frame && g_failures++ == 0)
                 log("submit: the compositor would not take the frame -- reporting once");
             return;
         }

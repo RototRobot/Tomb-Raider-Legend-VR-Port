@@ -31,40 +31,39 @@ if exist "!DEST!\" (
     )
 )
 
-for %%F in ("build\d3d9.dll" "dist\d3d9_dxvk.dll" "dist\trlvr_launcher.exe" "release\READ ME FIRST.txt" "input\actions.json") do (
+for %%F in ("build\d3d9.dll" "dist\d3d9_dxvk.dll" "dist\trlvr_launcher.exe" "release\READ ME FIRST.txt") do (
     if not exist "!ROOT!%%~F" (
         echo ERROR: !ROOT!%%~F is missing. Run build.bat first.
         exit /b 1
     )
 )
-if not exist "!ROOT!third_party\openvr\bin\win32\openvr_api.dll" (
-    echo ERROR: openvr_api.dll ^(win32^) not found in third_party\openvr.
-    exit /b 1
-)
-
 if not exist "!MAIN!" mkdir "!MAIN!"
 
 copy /y "!ROOT!build\d3d9.dll"                          "!MAIN!\d3d9.dll" >nul
 copy /y "!ROOT!dist\d3d9_dxvk.dll"                      "!MAIN!\d3d9_dxvk.dll" >nul
 copy /y "!ROOT!dist\trlvr_launcher.exe"                 "!MAIN!\trlvr_launcher.exe" >nul
-copy /y "!ROOT!third_party\openvr\bin\win32\openvr_api.dll" "!MAIN!\openvr_api.dll" >nul
-copy /y "!ROOT!input\actions.json"                      "!MAIN!\trlvr_actions.json" >nul
-for %%F in ("!ROOT!input\bindings_*.json") do copy /y "%%~F" "!MAIN!\%%~nxF" >nul
 copy /y "!ROOT!release\READ ME FIRST.txt"               "!DEST!\READ ME FIRST.txt" >nul
 copy /y "!ROOT!release\VR CONTROLLER BINDINGS.txt"      "!DEST!\VR CONTROLLER BINDINGS.txt" >nul
 
 rem Licences: the mod's (Apache 2.0) and those of the binaries shipped with it
-rem (OpenVR's BSD licence asks for its notice beside the DLL).
+rem (the OpenXR loader is linked into d3d9.dll).
 if not exist "!DEST!\Licences" mkdir "!DEST!\Licences"
 copy /y "!ROOT!LICENSE"                        "!DEST!\Licences\LICENSE.txt" >nul
 copy /y "!ROOT!NOTICE"                         "!DEST!\Licences\NOTICE.txt" >nul
 copy /y "!ROOT!THIRD_PARTY_NOTICES.md"         "!DEST!\Licences\THIRD_PARTY_NOTICES.txt" >nul
 copy /y "!ROOT!dxvk-trlvr\LICENSE"             "!DEST!\Licences\DXVK-LICENSE.txt" >nul
-copy /y "!ROOT!third_party\openvr\LICENSE"     "!DEST!\Licences\OpenVR-LICENSE.txt" >nul
+copy /y "!ROOT!third_party\openxr\LICENSE"     "!DEST!\Licences\OpenXR-SDK-LICENSE.txt" >nul
 
 rem Retired from the package. The XInput proxy stopped shipping when the
-rem controllers moved to keyboard and mouse -- see src/vr/vr_input.cpp.
+rem controllers moved to keyboard and mouse -- see src/vr/vr_input.cpp. OpenVR
+rem and the SteamVR bindings went with the move to OpenXR.
 if exist "!MAIN!\xinput9_1_0.dll" del /q "!MAIN!\xinput9_1_0.dll"
+if exist "!MAIN!\openvr_api.dll" del /q "!MAIN!\openvr_api.dll"
+if exist "!MAIN!\trlvr_actions.json" del /q "!MAIN!\trlvr_actions.json"
+for %%F in (bindings_hpmotioncontroller.json bindings_holographic_controller.json bindings_oculus_touch.json bindings_knuckles.json) do (
+    if exist "!MAIN!\%%F" del /q "!MAIN!\%%F"
+)
+if exist "!DEST!\Licences\OpenVR-LICENSE.txt" del /q "!DEST!\Licences\OpenVR-LICENSE.txt"
 
 echo Tomb Raider: Legend VR release package, written by package.bat> "!MARK!"
 

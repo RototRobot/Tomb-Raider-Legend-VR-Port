@@ -17,6 +17,12 @@ namespace trlvr
 
         bool vr_enabled = true;
         bool vr_submit = true;
+        // OpenXR: a runtime manifest to use instead of the registered
+        // 32-bit one (XR_RUNTIME_JSON), and whether each frame's copy
+        // into the runtime's swapchain is waited for before it is handed
+        // over.
+        wchar_t xr_runtime_json[MAX_PATH] = L"";
+        bool xr_copy_wait = true;
         bool stereo = true;
         bool stereo_same_frame = true;
         bool stereo_lock_pose = true;

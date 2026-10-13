@@ -27,6 +27,7 @@ set SRC=%SRC% "%ROOT%src\common\log.cpp"
 set SRC=%SRC% "%ROOT%src\common\config.cpp"
 set SRC=%SRC% "%ROOT%src\vr\vr_math.cpp"
 set SRC=%SRC% "%ROOT%src\vr\vr_session.cpp"
+set SRC=%SRC% "%ROOT%src\vr\xr_runtime.cpp"
 set SRC=%SRC% "%ROOT%src\vr\vr_submit.cpp"
 set SRC=%SRC% "%ROOT%src\vr\tune.cpp"
 set SRC=%SRC% "%ROOT%src\vr\hook.cpp"
@@ -43,15 +44,18 @@ set SRC=%SRC% "%ROOT%src\vr\lang.cpp"
 set SRC=%SRC% "%ROOT%src\vr\hud_capture.cpp"
 set SRC=%SRC% "%ROOT%src\vr\perf_cpu.cpp"
 
-rem OpenVR headers only. openvr_api.dll is loaded at runtime rather than
-rem linked, so a missing or broken VR runtime cannot stop the game starting.
-set "OPENVR=%ROOT%third_party\openvr\headers"
-rem The VR interop header lives in our DXVK fork and pulls in Vulkan.
+rem OpenXR: headers and a static loader (third_party\openxr). Linking the
+rem loader in means there is no DLL of ours to go missing; a missing or
+rem broken runtime fails xrCreateInstance at run time and the game runs flat.
+set "OPENXR=%ROOT%third_party\openxr\include"
+set "OPENXRLIB=%ROOT%third_party\openxr\lib\win32\openxr_loader.lib"
+rem The VR interop header lives in our DXVK fork and pulls in Vulkan. The
+rem headers the fork vendors are used unless a Vulkan SDK is installed.
 set "DXVKVR=%ROOT%dxvk-trlvr\src\d3d9"
-set "VKINC="
+set "VKINC=%ROOT%dxvk-trlvr\include\vulkan\include"
 for /d %%D in ("C:\VulkanSDK\*") do set "VKINC=%%D\Include"
 
-set CFLAGS=/nologo /c /EHsc /MT /O2 /W4 /std:c++17 /DWIN32 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /I"%OPENVR%" /I"%DXVKVR%" /I"%VKINC%" /Fo"%OUT%\\"
+set CFLAGS=/nologo /c /EHsc /MT /O2 /W4 /std:c++17 /DWIN32 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /I"%OPENXR%" /I"%DXVKVR%" /I"%VKINC%" /Fo"%OUT%\\"
 set LFLAGS=/nologo /DLL /MACHINE:X86 /DEF:"%ROOT%src\proxy\d3d9.def" /OUT:"%OUT%\d3d9.dll"
 
 echo Compiling...
@@ -67,7 +71,7 @@ rem Deliberately NOT linking d3d9.lib: this DLL *is* d3d9.dll, and an import
 rem library would make it import from itself. Every entry point is resolved
 rem from the backend with GetProcAddress instead. dxguid.lib supplies the
 rem interface IIDs only, and pulls in no DLL.
-link %LFLAGS% "%OUT%\*.obj" dxguid.lib user32.lib kernel32.lib
+link %LFLAGS% "%OUT%\*.obj" "%OPENXRLIB%" dxguid.lib user32.lib kernel32.lib advapi32.lib
 if errorlevel 1 (
     echo BUILD FAILED ^(link^)
     exit /b 1

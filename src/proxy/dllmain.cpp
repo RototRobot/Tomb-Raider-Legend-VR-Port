@@ -6,6 +6,7 @@
 
 #include "../vr/hook.h"
 #include "../vr/tune.h"
+#include "../vr/vr_session.h"
 #include "backend.h"
 #include "proxy_d3d9.h"
 
@@ -37,6 +38,12 @@ extern "C"
             log("Direct3DCreate9: backend has no Direct3DCreate9");
             return nullptr;
         }
+
+        // Before the backend, not after: DXVK creates its Vulkan instance
+        // inside Direct3DCreate9, and by then it has to know which Vulkan
+        // extensions the OpenXR runtime needs. vr_init leaves them where
+        // the DXVK fork looks.
+        vr_init();
 
         IDirect3D9* d3d9 = real(SDKVersion);
         if (!d3d9)

@@ -8,11 +8,14 @@ zlib/libpng licence; see `dxvk-trlvr/LICENSE`. Its bundled headers and
 subprojects (Vulkan-Headers, SPIRV-Headers, mingw-directx-headers,
 dxbc-spirv, libdisplay-info) keep their own licences in their folders.
 
-## OpenVR (`third_party/openvr/`)
+## OpenXR SDK (`third_party/openxr/`)
 
-`openvr.h` and the 32-bit `openvr_api.dll` from Valve's
-[OpenVR SDK](https://github.com/ValveSoftware/openvr).
-BSD 3-Clause licence; see `third_party/openvr/LICENSE`.
+The OpenXR headers and a 32-bit static build of the OpenXR loader from the
+Khronos [OpenXR-SDK](https://github.com/KhronosGroup/OpenXR-SDK), release
+1.1.49. The loader is linked into `d3d9.dll`. Apache-2.0 licence (the loader
+bundles jsoncpp, MIT / public domain); see `third_party/openxr/LICENSE` and
+`third_party/openxr/COPYING.adoc`. `third_party/openxr/README.md` says how
+the library was built.
 
 ## TRAWindowed
 

@@ -103,7 +103,7 @@ namespace trlvr
                 pPresentationParameters->Windowed = TRUE;
                 pPresentationParameters->FullScreen_RefreshRateInHz = 0;
             }
-            // Same sizing as CreateDevice (proxy_d3d9.cpp): SteamVR's
+            // Same sizing as CreateDevice (proxy_d3d9.cpp): the runtime's
             // recommended per-eye size, then both eyes side by side. A reset
             // (a graphics option change) used to fall back to the window
             // size with one eye's width (2026-10-04).
@@ -118,7 +118,7 @@ namespace trlvr
                     pPresentationParameters->BackBufferHeight = rh & ~1u;
                     sized_from_headset = true;
                     log("device: reset back buffer %ux%u per eye from "
-                        "SteamVR's recommended render size", rw, rh);
+                        "the runtime's recommended render size", rw, rh);
                 }
             }
             if (config().force_windowed && !sized_from_headset)

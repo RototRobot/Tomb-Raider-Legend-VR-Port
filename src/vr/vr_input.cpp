@@ -51,7 +51,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 
-#include <openvr.h>
+#include "xr_runtime.h"
 
 #include <cmath>
 #include <cstdint>
@@ -71,7 +71,7 @@ namespace trlvr
             const char*          path;
             Output               out;
             WORD                 vk;
-            vr::VRActionHandle_t handle;
+            int                  handle;   // logical action id + 1
             bool                 was;      // for the edge-triggered recentre
         };
 
@@ -106,17 +106,21 @@ namespace trlvr
             GameGearTuning, GamePda
         };
 
-        vr::IVRInput*  g_input = nullptr;
-        vr::IVRSystem* g_system = nullptr;
+        // Logical actions: one per g_game entry, then the held flick. A
+        // handle is the id plus one, so zero still means "none".
+        const int kLogicalFlick = kGameButtons;
+        const int kLogicalCount = kGameButtons + 1;
+        const int kMoveHandle = kLogicalCount + 1;
+        const int kLookHandle = kLogicalCount + 2;
+        bool g_logical[kLogicalCount]{};
 
-        vr::VRActionSetHandle_t g_set_game = vr::k_ulInvalidActionSetHandle;
-        vr::VRActionHandle_t g_move = 0;
-        vr::VRActionHandle_t g_look = 0;
+        int g_move = kMoveHandle;
+        int g_look = kLookHandle;
         // Y held as a plain button (beside its click/long-press bindings):
         // the board-mode finger flick. The long-press "light" output only
         // pulses, so it could not hold the flick loaded (test 2026-10-03).
-        vr::VRActionHandle_t g_flick_action = 0;
-        vr::VRActionHandle_t g_handhold_haptic[2] = { 0, 0 };
+        int g_flick_action = kLogicalFlick + 1;
+        bool g_handhold_haptic[2] = { true, true };
         // Grip buttons as last sampled by vr_input_update (left, right).
         bool g_grip_held[2] = { false, false };
         // Snap turning: the right stick must return near centre between steps.
@@ -126,11 +130,8 @@ namespace trlvr
         ULONGLONG g_physical_stand_at = 0;
         // Physical triggers (left, right), as last sampled in gameplay.
         bool g_trigger_held[2] = { false, false };
-        // /actions/gameplay/in/hand_left|right, bound to /pose/grip.
-        vr::VRActionHandle_t g_hand_pose[2] = { 0, 0 };
         // SteamVR skeletal input (finger tracking, 2026-10-10): per hand,
         // the finger curls and splays read after each UpdateActionState.
-        vr::VRActionHandle_t g_skeleton[2] = { 0, 0 };
         struct FingerState
         {
             bool valid = false;
@@ -157,9 +158,6 @@ namespace trlvr
         bool g_finger_bones_valid[2] = { false, false };
         ULONGLONG g_finger_debug_logged = 0;
         unsigned g_grip_samples[2] = { 0, 0 };
-        vr::TrackedDeviceIndex_t g_grip_device[2] = {
-            vr::k_unTrackedDeviceIndexInvalid,
-            vr::k_unTrackedDeviceIndexInvalid };
         bool g_grip_missing_reported[2] = { false, false };
         bool g_handhold_haptic_error_reported[2] = { false, false };
 
@@ -289,7 +287,6 @@ namespace trlvr
         int      g_last_index = -2;
         short    g_last_screen = -2;
         unsigned g_frames_in_set = 0;
-        bool     g_reported_bindings = false;
         bool     g_first_output = false;
         bool     g_light_grip_was = false;
         // Third-person immersive: a left grip that toggled the chest light
@@ -780,7 +777,7 @@ namespace trlvr
         const uintptr_t kPlayerInvEndCombatMode = 0x005AC4B0;
         const uintptr_t kPlayerCombatAllowed = 0x005A52D0;
 
-        bool digital(vr::VRActionHandle_t h);
+        bool digital(int h);
         bool movie_active();
 
         // Weapon selection (playerInvProcess 0x005B1DA4..0x005B1DDA):
@@ -1973,15 +1970,9 @@ namespace trlvr
             return (v < 0.0f ? -1.0f : 1.0f) * s * s;
         }
 
-        bool digital(vr::VRActionHandle_t h)
+        bool digital(int h)
         {
-            if (!h)
-                return false;
-            vr::InputDigitalActionData_t d{};
-            return g_input->GetDigitalActionData(h, &d, sizeof(d),
-                                                 vr::k_ulInvalidInputValueHandle)
-                       == vr::VRInputError_None
-                && d.bActive && d.bState;
+            return h > 0 && h <= kLogicalCount && g_logical[h - 1];
         }
 
         // A real gamepad's right stick, for first-person turning when the
@@ -2054,78 +2045,213 @@ namespace trlvr
             return 0.0f;
         }
 
-        void analog(vr::VRActionHandle_t h, float* x, float* y)
+        void analog(int h, float* x, float* y)
         {
             *x = *y = 0.0f;
-            if (!h)
-                return;
-            vr::InputAnalogActionData_t a{};
-            if (g_input->GetAnalogActionData(h, &a, sizeof(a),
-                                             vr::k_ulInvalidInputValueHandle)
-                    != vr::VRInputError_None || !a.bActive)
-                return;
-            *x = a.x;
-            *y = a.y;
+            if (h == kMoveHandle)
+                xr_input_stick(0, x, y);
+            else if (h == kLookHandle)
+                xr_input_stick(1, x, y);
         }
 
-        // Which bindings file SteamVR reaches for is decided by the controller
-        // type, and guessing it wrong fails silently -- the G2's controllers
-        // are "hpmotioncontroller", not the older "holographic_controller",
-        // and nothing reports the mismatch. So say.
+        // SteamVR's bindings used to turn one button into a click, a double
+        // click and a long press. OpenXR only reports the button, so that
+        // lives here, with the same 0.65 s long press. Each result is a
+        // short pulse on its action, as SteamVR's was.
+        const ULONGLONG kLongPressMs = 650;
+        const ULONGLONG kDoubleClickMs = 350;
+        const ULONGLONG kPulseMs = 120;
+
+        struct ComplexButton
+        {
+            bool down = false;
+            bool long_fired = false;
+            bool click_pending = false;
+            ULONGLONG pressed_at = 0;
+            ULONGLONG released_at = 0;
+        };
+        // Per hand: stick click, and the button that carries grenade / light.
+        ComplexButton g_complex_stick[2];
+        ComplexButton g_complex_face;
+        ULONGLONG g_pulse_until[kLogicalCount]{};
+        bool g_trigger_down[2] = { false, false };
+        bool g_squeeze_down[2] = { false, false };
+
+        void pulse(int logical, ULONGLONG now)
+        {
+            if (logical >= 0 && logical < kLogicalCount)
+                g_pulse_until[logical] = now + kPulseMs;
+        }
+
+        // single / twice / held: logical ids, -1 for none.
+        void complex_update(ComplexButton& c, bool down, ULONGLONG now,
+                            int single, int twice, int held)
+        {
+            if (down && !c.down)
+            {
+                c.pressed_at = now;
+                c.long_fired = false;
+            }
+            if (down && held >= 0 && !c.long_fired &&
+                now - c.pressed_at >= kLongPressMs)
+            {
+                c.long_fired = true;
+                c.click_pending = false;
+                pulse(held, now);
+            }
+            if (!down && c.down && !c.long_fired)
+            {
+                if (twice < 0)
+                    pulse(single, now);
+                else if (c.click_pending &&
+                         now - c.released_at <= kDoubleClickMs)
+                {
+                    c.click_pending = false;
+                    pulse(twice, now);
+                }
+                else
+                {
+                    // A second click too late to be a double: the first one
+                    // was a click of its own.
+                    if (c.click_pending)
+                        pulse(single, now);
+                    c.click_pending = true;
+                    c.released_at = now;
+                }
+            }
+            // A click waits out the double-click window before it counts.
+            if (!down && c.click_pending &&
+                now - c.released_at > kDoubleClickMs)
+            {
+                c.click_pending = false;
+                pulse(single, now);
+            }
+            c.down = down;
+        }
+
+        // Analogue to button, with a gap between press and release so a
+        // finger resting at the threshold does not chatter.
+        bool threshold(bool was, float value, float press, float release)
+        {
+            return was ? value > release : value >= press;
+        }
+
+        // The physical inputs of this frame as the game's actions. This is
+        // the table the SteamVR bindings_*.json files used to hold.
+        void update_logical_actions()
+        {
+            const ULONGLONG now = GetTickCount64();
+            bool held[kLogicalCount]{};
+            if (!xr_input_active())
+            {
+                // Not focused (headset off, system menu open): nothing is
+                // held and no half-finished click survives.
+                for (int i = 0; i < kLogicalCount; ++i)
+                {
+                    g_logical[i] = false;
+                    g_pulse_until[i] = 0;
+                }
+                g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
+                g_complex_face = ComplexButton{};
+                g_trigger_down[0] = g_trigger_down[1] = false;
+                g_squeeze_down[0] = g_squeeze_down[1] = false;
+                return;
+            }
+
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                g_trigger_down[hand] = threshold(g_trigger_down[hand],
+                    xr_input_trigger(hand), 0.30f, 0.20f);
+                g_squeeze_down[hand] = threshold(g_squeeze_down[hand],
+                    xr_input_squeeze(hand), 0.50f, 0.35f);
+            }
+            held[GameInteract] = g_trigger_down[0];
+            held[GameFire] = g_trigger_down[1];
+            held[GameGrapple] = g_squeeze_down[0];
+            held[GameLockOn] = g_squeeze_down[1];
+
+            const XrControllerKind left = xr_input_controller(0);
+            const XrControllerKind right = xr_input_controller(1);
+            const bool index = left == XrControllerIndex ||
+                               right == XrControllerIndex;
+
+            // Stick clicks. The Index has trackpads for the long-press
+            // actions, so its sticks only click and double-click.
+            complex_update(g_complex_stick[0],
+                xr_input_button(0, XrButtonStick), now, GamePause,
+                GameRecentre, index ? -1 : GameMedkit);
+            complex_update(g_complex_stick[1],
+                xr_input_button(1, XrButtonStick), now, GameWeapon, GamePda,
+                index ? -1 : GameBinoculars);
+
+            bool face = false;      // the grenade / light / flick button
+            if (left == XrControllerWmr || right == XrControllerWmr)
+            {
+                // No face buttons: trackpad presses and the menu buttons.
+                held[GameJump] = xr_input_button(1, XrButtonTrackpad);
+                held[GameDive] = xr_input_button(0, XrButtonTrackpad);
+                held[GameAim] = xr_input_button(0, XrButtonMenu);
+                face = xr_input_button(1, XrButtonMenu);
+            }
+            else
+            {
+                // Touch, Reverb G2 and Index: A / B on the right, X / Y (or
+                // the left A / B) on the left.
+                held[GameJump] = xr_input_button(1, XrButtonPrimary);
+                held[GameDive] = xr_input_button(1, XrButtonSecondary);
+                held[GameAim] = xr_input_button(0, XrButtonPrimary);
+                face = xr_input_button(0, XrButtonSecondary);
+                if (index)
+                {
+                    held[GameMedkit] = xr_input_button(0, XrButtonTrackpad);
+                    held[GameBinoculars] = xr_input_button(1, XrButtonTrackpad);
+                }
+            }
+            held[kLogicalFlick] = face;
+            complex_update(g_complex_face, face, now, GameGrenade, -1,
+                           GameLight);
+
+            for (int i = 0; i < kLogicalCount; ++i)
+                g_logical[i] = held[i] || now < g_pulse_until[i];
+        }
+
+        const char* controller_type_name(XrControllerKind kind)
+        {
+            switch (kind)
+            {
+            case XrControllerTouch:    return "oculus_touch";
+            case XrControllerIndex:    return "knuckles";
+            case XrControllerWmr:      return "holographic_controller";
+            case XrControllerHpReverb: return "hpmotioncontroller";
+            case XrControllerSimple:   return "simple_controller";
+            default:                   return "";
+            }
+        }
+
+        // Which controller the runtime says each hand is. Decides the button
+        // layout above and the face-button names in the tutorial labels.
+        XrControllerKind g_logged_kind[2] = { XrControllerNone, XrControllerNone };
+
         void log_controllers()
         {
-            if (!g_system)
-                return;
-            int found = 0;
-            for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+            for (int hand = 0; hand < 2; ++hand)
             {
-                if (g_system->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller)
+                const XrControllerKind kind = xr_input_controller(hand);
+                if (kind == g_logged_kind[hand])
                     continue;
-                ++found;
-                char type[128]{};
-                vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-                g_system->GetStringTrackedDeviceProperty(
-                    i, vr::Prop_ControllerType_String, type, sizeof(type), &err);
-                const vr::ETrackedControllerRole role =
-                    g_system->GetControllerRoleForTrackedDeviceIndex(i);
-                if (_stricmp(type, "knuckles") == 0)
+                g_logged_kind[hand] = kind;
+                if (kind == XrControllerIndex)
                     g_controller_style = VrControllerIndex;
-                else if (_stricmp(type, "holographic_controller") == 0)
+                else if (kind == XrControllerWmr)
                     g_controller_style = VrControllerWmr;
-                const char* hand = role == vr::TrackedControllerRole_LeftHand  ? "left"
-                                 : role == vr::TrackedControllerRole_RightHand ? "right"
-                                 : "unassigned";
-                log("controls: %s hand is a \"%s\" -- SteamVR will use "
-                    "bindings_%s.json", hand, type[0] ? type : "?",
-                    type[0] ? type : "?");
+                else if (kind != XrControllerNone)
+                    g_controller_style = VrControllerTouch;
+                log("controls: %s hand is a \"%s\" (%s)",
+                    hand == 0 ? "left" : "right",
+                    kind == XrControllerNone ? "?" : controller_type_name(kind),
+                    xr_input_profile(hand)[0] ? xr_input_profile(hand)
+                                              : "no controller yet");
             }
-            if (!found)
-                log("controls: no controllers switched on yet -- they are "
-                    "picked up whenever they appear");
-        }
-
-        // An action with a handle but no binding reports inactive for ever,
-        // which looks exactly like a controller that is switched off. Count
-        // them once per set, a moment after the set first goes live.
-        void report_bound()
-        {
-            int bound = 0;
-            for (int i = 0; i < kGameButtons; ++i)
-            {
-                vr::InputDigitalActionData_t d{};
-                if (g_game[i].handle &&
-                    g_input->GetDigitalActionData(g_game[i].handle, &d, sizeof(d),
-                                                  vr::k_ulInvalidInputValueHandle)
-                        == vr::VRInputError_None && d.bActive)
-                    ++bound;
-            }
-            log("controls: %d of %d controller actions are bound", bound,
-                kGameButtons);
-            if (bound == 0)
-                log("controls:   nothing is bound -- SteamVR did not match a "
-                    "bindings file to these controllers. The lines above say "
-                    "which type it is looking for; SteamVR > Settings > "
-                    "Controllers > Manage Controller Bindings fixes it by hand.");
         }
 
         bool connect()
@@ -2134,86 +2260,17 @@ namespace trlvr
                 return true;
             if (g_given_up || !vr_ready())
                 return false;
-
-            g_input  = (vr::IVRInput*)vr_get_interface(vr::IVRInput_Version);
-            g_system = (vr::IVRSystem*)vr_get_interface(vr::IVRSystem_Version);
-            if (!g_input)
-            {
-                log("controls: no %s -- the controllers will not reach the game",
-                    vr::IVRInput_Version);
-                g_given_up = true;
+            // The actions belong to the OpenXR session, which the submit
+            // path creates with the device.
+            if (!vr_submit_ready())
                 return false;
-            }
 
-            wchar_t wide[MAX_PATH]{};
-            swprintf_s(wide, L"%strlvr_actions.json", exe_dir());
-            char path[MAX_PATH * 3]{};
-            WideCharToMultiByte(CP_UTF8, 0, wide, -1, path, (int)sizeof(path),
-                                nullptr, nullptr);
-
-            const vr::EVRInputError merr = g_input->SetActionManifestPath(path);
-            if (merr != vr::VRInputError_None)
-            {
-                log("controls: SetActionManifestPath(%s) failed, EVRInputError %d",
-                    path, (int)merr);
-                g_given_up = true;
-                return false;
-            }
-
-            if (g_input->GetActionSetHandle("/actions/gameplay", &g_set_game)
-                    != vr::VRInputError_None)
-            {
-                log("controls: the manifest has no gameplay action set");
-                g_given_up = true;
-                return false;
-            }
-
-            struct Named { const char* path; vr::VRActionHandle_t* h; };
-            const Named sticks[] = {
-                { "/actions/gameplay/in/move", &g_move },
-                { "/actions/gameplay/in/look", &g_look },
-                { "/actions/gameplay/in/flick", &g_flick_action },
-            };
-            for (const Named& s : sticks)
-                if (g_input->GetActionHandle(s.path, s.h) != vr::VRInputError_None || !*s.h)
-                    log("controls: action %s did not resolve", s.path);
-            for (Button& b : g_game)
-                if (g_input->GetActionHandle(b.path, &b.handle) != vr::VRInputError_None || !b.handle)
-                    log("controls: action %s did not resolve", b.path);
-            const char* haptic_paths[2] = {
-                "/actions/gameplay/out/haptic_left",
-                "/actions/gameplay/out/haptic_right"
-            };
-            for (int hand = 0; hand < 2; ++hand)
-                if (g_input->GetActionHandle(haptic_paths[hand],
-                        &g_handhold_haptic[hand]) != vr::VRInputError_None ||
-                    !g_handhold_haptic[hand])
-                    log("controls: optional action %s did not resolve",
-                        haptic_paths[hand]);
-            const char* pose_paths[2] = {
-                "/actions/gameplay/in/hand_left",
-                "/actions/gameplay/in/hand_right"
-            };
-            for (int hand = 0; hand < 2; ++hand)
-                if (g_input->GetActionHandle(pose_paths[hand],
-                        &g_hand_pose[hand]) != vr::VRInputError_None ||
-                    !g_hand_pose[hand])
-                    log("controls: optional action %s did not resolve",
-                        pose_paths[hand]);
-            const char* skeleton_paths[2] = {
-                "/actions/gameplay/in/skeleton_left",
-                "/actions/gameplay/in/skeleton_right"
-            };
-            for (int hand = 0; hand < 2; ++hand)
-                if (g_input->GetActionHandle(skeleton_paths[hand],
-                        &g_skeleton[hand]) != vr::VRInputError_None ||
-                    !g_skeleton[hand])
-                    log("controls: optional action %s did not resolve",
-                        skeleton_paths[hand]);
+            for (int i = 0; i < kGameButtons; ++i)
+                g_game[i].handle = i + 1;
             QueryPerformanceFrequency(&g_qpf);
             QueryPerformanceCounter(&g_last);
 
-            log("controls: connected -- %s", path);
+            log("controls: connected -- OpenXR actions");
             if (config().immersive_controls)
                 log("controls: immersive gestures enabled -- chest + left "
                     "grip toggles the personal light; either grip picks "
@@ -2361,129 +2418,26 @@ namespace trlvr
         // controllers, full with hand tracking.
         void read_fingers()
         {
+            // OpenXR has no skeletal input in its core. Until
+            // XR_EXT_hand_tracking is wired up there are no finger poses,
+            // and the game's own hand pose is kept.
             for (int hand = 0; hand < 2; ++hand)
             {
-                FingerState& f = g_fingers[hand];
-                const bool was = f.valid;
-                f.valid = false;
-                if (!config().finger_tracking || !g_skeleton[hand])
-                    continue;
-                vr::InputSkeletalActionData_t data{};
-                vr::VRSkeletalSummaryData_t summary{};
-                if (g_input->GetSkeletalActionData(g_skeleton[hand], &data,
-                        sizeof(data)) != vr::VRInputError_None ||
-                    !data.bActive ||
-                    g_input->GetSkeletalSummaryData(g_skeleton[hand],
-                        vr::VRSummaryType_FromDevice, &summary) !=
-                        vr::VRInputError_None)
-                {
-                    if (was)
-                        log("fingers: %s hand skeleton lost (active %d) -- "
-                            "switching between controllers and hand "
-                            "tracking, or SteamVR paused the input; the "
-                            "game's own hand pose until it returns",
-                            hand == 0 ? "left" : "right", (int)data.bActive);
-                    else if (!f.reported_off && !f.reported_on &&
-                             g_frames_in_set > 300)
-                    {
-                        f.reported_off = true;
-                        log("fingers: %s hand has no skeleton from SteamVR "
-                            "(active %d) -- the game's own hand pose is "
-                            "kept. A custom SteamVR binding without the "
-                            "\"%s hand fingers\" skeleton causes this.",
-                            hand == 0 ? "left" : "right", (int)data.bActive,
-                            hand == 0 ? "Left" : "Right");
-                    }
-                    continue;
-                }
-                vr::EVRSkeletalTrackingLevel level =
-                    vr::VRSkeletalTracking_Estimated;
-                g_input->GetSkeletalTrackingLevel(g_skeleton[hand], &level);
-                bool finite = true;
-                for (int i = 0; i < 5; ++i)
-                {
-                    const float c = summary.flFingerCurl[i];
-                    finite = finite && std::isfinite(c);
-                    f.curl[i] = c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c;
-                }
-                for (int i = 0; i < 4; ++i)
-                {
-                    const float s = summary.flFingerSplay[i];
-                    finite = finite && std::isfinite(s);
-                    f.splay[i] = s < 0.0f ? 0.0f : s > 1.0f ? 1.0f : s;
-                }
-                if (!finite)
-                    continue;
-                f.valid = true;
-                if (!f.reported_on || f.level != (int)level)
-                {
-                    f.reported_on = true;
-                    log("fingers: %s hand skeleton active, tracking level "
-                        "%s", hand == 0 ? "left" : "right",
-                        level == vr::VRSkeletalTracking_Full
-                            ? "full (hand tracking)"
-                            : level == vr::VRSkeletalTracking_Partial
-                            ? "partial (controller finger sensors)"
-                            : "estimated (controller buttons)");
-                }
-                f.level = (int)level;
-            }
-            // finger_debug: the skeleton itself, and once a second both
-            // summaries (device = what the fingers use, animation = what
-            // SteamVR's own hand shows).
-            const bool debug = tune_finger_debug();
-            const bool log_now = debug &&
-                GetTickCount64() - g_finger_debug_logged >= 1000;
-            if (log_now)
-                g_finger_debug_logged = GetTickCount64();
-            for (int hand = 0; hand < 2; ++hand)
-            {
-                g_finger_bones_valid[hand] = false;
+                g_fingers[hand].valid = false;
                 g_fingers[hand].spread_valid = false;
                 g_fingers[hand].thumb_valid = false;
-                vr::VRBoneTransform_t bones[31]{};
-                if (g_fingers[hand].valid && g_skeleton[hand] &&
-                    g_input->GetSkeletalBoneData(g_skeleton[hand],
-                        vr::VRSkeletalTransformSpace_Model,
-                        vr::VRSkeletalMotionRange_WithoutController, bones,
-                        31) == vr::VRInputError_None)
+                g_finger_bones_valid[hand] = false;
+            }
+            if (config().finger_tracking)
+            {
+                static bool reported = false;
+                if (!reported)
                 {
-                    for (int b = 0; b < 31; ++b)
-                        for (int k = 0; k < 3; ++k)
-                            g_finger_bones[hand][b][k] =
-                                bones[b].position.v[k];
-                    g_finger_bones_valid[hand] = true;
-                    g_fingers[hand].spread_valid = finger_spread_from_bones(
-                        g_finger_bones[hand], g_fingers[hand].spread);
-                    g_fingers[hand].thumb_valid = thumb_from_bones(
-                        g_finger_bones[hand], g_fingers[hand].curl[2],
-                        g_fingers[hand].palm_sign,
-                        g_fingers[hand].thumb);
+                    reported = true;
+                    log("fingers: finger_tracking = 1, but finger tracking "
+                        "is not available under OpenXR yet -- the game's own "
+                        "hand pose is kept");
                 }
-                if (!log_now)
-                    continue;
-                vr::VRSkeletalSummaryData_t anim{};
-                const bool have_anim = g_input->GetSkeletalSummaryData(
-                    g_skeleton[hand], vr::VRSummaryType_FromAnimation,
-                    &anim) == vr::VRInputError_None;
-                const FingerState& f = g_fingers[hand];
-                log("finger debug: %s level %d device %s curl %.2f %.2f %.2f "
-                    "%.2f %.2f splay %.2f %.2f %.2f %.2f | animation %s curl "
-                    "%.2f %.2f %.2f %.2f %.2f | bones %s, spread from the "
-                    "middle %s index %+.0f ring %+.0f pinky %+.0f deg | "
-                    "thumb tip %s (%.2f, %.2f, %.2f) spans, pinch %.2f",
-                    hand == 0 ? "L" : "R", f.level,
-                    f.valid ? "ok" : "NONE", f.curl[0], f.curl[1], f.curl[2],
-                    f.curl[3], f.curl[4], f.splay[0], f.splay[1], f.splay[2],
-                    f.splay[3], have_anim ? "ok" : "NONE",
-                    anim.flFingerCurl[0], anim.flFingerCurl[1],
-                    anim.flFingerCurl[2], anim.flFingerCurl[3],
-                    anim.flFingerCurl[4],
-                    g_finger_bones_valid[hand] ? "ok" : "NONE",
-                    f.spread_valid ? "" : "(none)",
-                    f.spread[0] * 57.29578f, f.spread[2] * 57.29578f,
-                    f.spread[3] * 57.29578f, f.thumb_valid ? "ok" : "NONE",
-                    f.thumb[0], f.thumb[1], f.thumb[2], f.thumb[3]);
             }
             // finger_record: numpad / starts and stops a recording of both
             // hands' poses (20 per second) into trlvr_finger_poses.csv --
@@ -2571,77 +2525,34 @@ namespace trlvr
                 }
         }
 
+        // The hand poses the session tracks are already OpenXR grip poses,
+        // so the grip is the tracked pose itself: an identity offset, set
+        // once that hand's controller is first seen.
         void measure_grip_offsets()
         {
-            if (!g_input || !g_system || config().hand_model != 2)
+            if (config().hand_model != 2)
                 return;
-            vr::TrackedDevicePose_t raw[vr::k_unMaxTrackedDeviceCount]{};
-            g_system->GetDeviceToAbsoluteTrackingPose(
-                vr::TrackingUniverseSeated, 0.0f, raw,
-                vr::k_unMaxTrackedDeviceCount);
             for (int hand = 0; hand < 2; ++hand)
             {
-                if (!g_hand_pose[hand])
+                if (g_grip_samples[hand])
                     continue;
-                vr::InputPoseActionData_t pose{};
-                const vr::EVRInputError error =
-                    g_input->GetPoseActionDataRelativeToNow(
-                        g_hand_pose[hand], vr::TrackingUniverseSeated, 0.0f,
-                        &pose, sizeof(pose),
-                        vr::k_ulInvalidInputValueHandle);
-                vr::InputOriginInfo_t origin{};
-                const bool have_origin = error == vr::VRInputError_None &&
-                    pose.bActive && pose.pose.bPoseIsValid &&
-                    g_input->GetOriginTrackedDeviceInfo(
-                        pose.activeOrigin, &origin, sizeof(origin)) ==
-                        vr::VRInputError_None &&
-                    origin.trackedDeviceIndex < vr::k_unMaxTrackedDeviceCount;
-                if (!have_origin ||
-                    !raw[origin.trackedDeviceIndex].bPoseIsValid)
+                float position[3], rotation[9];
+                if (!vr_controller_tracking_pose(hand == 0, position, rotation))
                 {
                     if (!g_grip_missing_reported[hand] &&
-                        g_frames_in_set > 300 && !g_grip_samples[hand])
+                        g_frames_in_set > 300)
                     {
                         g_grip_missing_reported[hand] = true;
-                        log("controls: no %s grip pose from SteamVR (error %d, "
-                            "active %d) -- that hand keeps the original "
-                            "placement. A custom SteamVR binding without the "
-                            "\"%s hand grip pose\" action causes this.",
-                            hand == 0 ? "left" : "right", (int)error,
-                            (int)pose.bActive, hand == 0 ? "Left" : "Right");
+                        log("controls: no %s grip pose from the runtime yet "
+                            "-- that hand keeps the original placement until "
+                            "its controller is tracked",
+                            hand == 0 ? "left" : "right");
                     }
                     continue;
                 }
-                if (origin.trackedDeviceIndex != g_grip_device[hand])
-                {
-                    g_grip_device[hand] = origin.trackedDeviceIndex;
-                    g_grip_samples[hand] = 0;
-                }
-                if (g_grip_samples[hand] >= 30)
-                    continue; // locked: the offset is rigid
-                // Engine convention, metres: P = device -> world.
-                const Mat4 grip_view = view_from_pose(
-                    &pose.pose.mDeviceToAbsoluteTracking.m[0][0], 1.0f);
-                const Mat4 raw_view = view_from_pose(
-                    &raw[origin.trackedDeviceIndex]
-                        .mDeviceToAbsoluteTracking.m[0][0], 1.0f);
-                // grip-local -> raw-local = P_grip * inv(P_raw).
-                const Mat4 offset = rigid_inverse(grip_view) * raw_view;
-                bool finite = true;
-                for (int r = 0; r < 4; ++r)
-                    for (int k = 0; k < 4; ++k)
-                        finite = finite && std::isfinite(offset.m[r][k]);
-                if (!finite)
-                    continue;
-                if (++g_grip_samples[hand] == 30)
-                {
-                    vr_set_controller_grip_offset(hand == 0, offset);
-                    log("controls: %s grip pose locked: offset (%+.3f, "
-                        "%+.3f, %+.3f) m from the raw pose; forward axis "
-                        "(%+.2f, %+.2f, %+.2f)", hand == 0 ? "left" : "right",
-                        offset.m[3][0], offset.m[3][1], offset.m[3][2],
-                        offset.m[2][0], offset.m[2][1], offset.m[2][2]);
-                }
+                g_grip_samples[hand] = 1;
+                vr_set_controller_grip_offset(hand == 0, Mat4::identity());
+                log("controls: %s grip pose live", hand == 0 ? "left" : "right");
             }
         }
     }
@@ -2649,21 +2560,18 @@ namespace trlvr
     void vr_input_handhold_haptic(bool left)
     {
         const int hand = left ? 0 : 1;
-        if (!g_ready || !g_input || !g_handhold_haptic[hand] ||
+        if (!g_ready || !g_handhold_haptic[hand] ||
             !config().immersive_controls || !game_has_focus())
             return;
 
         // One short tactile cue per zone entry; the draw hook owns the
         // entry/exit latch and never calls this continuously while inside.
-        const vr::EVRInputError error = g_input->TriggerHapticVibrationAction(
-            g_handhold_haptic[hand], 0.0f, 0.04f, 120.0f, 0.30f,
-            vr::k_ulInvalidInputValueHandle);
-        if (error != vr::VRInputError_None &&
+        if (!xr_input_haptic(hand, 0.04f, 120.0f, 0.30f) &&
             !g_handhold_haptic_error_reported[hand])
         {
             g_handhold_haptic_error_reported[hand] = true;
-            log("controls: %s handhold haptic failed, EVRInputError %d",
-                left ? "left" : "right", (int)error);
+            log("controls: %s handhold haptic failed",
+                left ? "left" : "right");
         }
     }
 
@@ -2979,17 +2887,15 @@ namespace trlvr
     void vr_input_weapon_haptic(bool left, float strength)
     {
         const int hand = left ? 0 : 1;
-        if (!g_ready || !g_input || !g_handhold_haptic[hand] ||
+        if (!g_ready || !g_handhold_haptic[hand] ||
             !config().weapon_haptics || !game_has_focus())
             return;
         // A short, sharp pulse per shot; strength 0..1 scales amplitude and
         // length (pistol lighter, long guns heavier).
         const float s = strength < 0.0f ? 0.0f : strength > 1.0f ? 1.0f
                                                                   : strength;
-        g_input->TriggerHapticVibrationAction(
-            g_handhold_haptic[hand], 0.0f, 0.03f + 0.04f * s,
-            180.0f - 60.0f * s, 0.45f + 0.55f * s,
-            vr::k_ulInvalidInputValueHandle);
+        xr_input_haptic(hand, 0.03f + 0.04f * s, 180.0f - 60.0f * s,
+                        0.45f + 0.55f * s);
     }
 
     // The game's own rumble, as it would drive a pad (user 2026-10-09:
@@ -3016,16 +2922,14 @@ namespace trlvr
             const float low = g_motor[0], high = g_motor[1];
             const float amplitude = fmaxf(low, high);
             if (amplitude < 0.02f || now < g_rumble_next || !g_ready ||
-                !g_input || !game_has_focus())
+                !game_has_focus())
                 return;
             g_rumble_next = now + 25;
             const float frequency = (low * 55.0f + high * 170.0f) /
                                     (low + high);
             for (int hand = 0; hand < 2; ++hand)
                 if (g_handhold_haptic[hand])
-                    g_input->TriggerHapticVibrationAction(
-                        g_handhold_haptic[hand], 0.0f, 0.05f, frequency,
-                        amplitude, vr::k_ulInvalidInputValueHandle);
+                    xr_input_haptic(hand, 0.05f, frequency, amplitude);
         }
     }
 
@@ -3115,20 +3019,11 @@ namespace trlvr
             }
         }
 
-        vr::VRActiveActionSet_t active{};
-        active.ulActionSet = g_set_game;
-        log_set_activity("IVRInput::UpdateActionState");
-        const bool updated = g_input->UpdateActionState(&active,
-            sizeof(active), 1) == vr::VRInputError_None;
-        log_set_activity(nullptr);
-        if (!updated)
-            return;
+        // xrSyncActions already ran with the frame's poses (xr_frame_wait).
+        update_logical_actions();
+        log_controllers();
 
-        if (++g_frames_in_set == 30 && !g_reported_bindings)
-        {
-            g_reported_bindings = true;
-            report_bound();
-        }
+        ++g_frames_in_set;
         measure_grip_offsets();
         read_fingers();
 
@@ -3406,25 +3301,19 @@ namespace trlvr
         // Tuning profile by controller type (2026-10-08): oculus_touch gets
         // the Quest tester's hand/aim/holster defaults, anything else the
         // Reverb G2 ones. Checked every 2 s until a controller reports.
-        if (!g_profile_decided && g_system &&
+        if (!g_profile_decided &&
             GetTickCount64() >= g_profile_next_check)
         {
             g_profile_next_check = GetTickCount64() + 2000;
-            for (vr::TrackedDeviceIndex_t i = 0;
-                 i < vr::k_unMaxTrackedDeviceCount && !g_profile_decided; ++i)
+            XrControllerKind kind = xr_input_controller(1);
+            if (kind == XrControllerNone)
+                kind = xr_input_controller(0);
+            if (kind != XrControllerNone)
             {
-                if (g_system->GetTrackedDeviceClass(i) !=
-                    vr::TrackedDeviceClass_Controller)
-                    continue;
-                char type[128]{};
-                vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-                g_system->GetStringTrackedDeviceProperty(i,
-                    vr::Prop_ControllerType_String, type, sizeof(type), &err);
-                if (!type[0])
-                    continue;
+                const char* type = controller_type_name(kind);
                 g_profile_decided = true;
                 tune_set_controller_profile(
-                    _stricmp(type, "oculus_touch") == 0 ? 1 : 0, type);
+                    kind == XrControllerTouch ? 1 : 0, type);
                 g_gear_loaded = false;   // the gear cross re-reads too
             }
         }

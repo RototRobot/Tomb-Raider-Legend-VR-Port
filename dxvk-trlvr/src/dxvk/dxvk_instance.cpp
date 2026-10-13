@@ -2,7 +2,6 @@
 #include <buildenv.h>
 
 #include "dxvk_instance.h"
-#include "dxvk_openvr.h"
 #include "dxvk_openxr.h"
 #include "dxvk_platform_exts.h"
 
@@ -42,7 +41,6 @@ namespace dxvk {
     // Initialize extension providers
     m_extProviders.push_back(&DxvkPlatformExts::s_instance);
 #ifdef _WIN32
-    m_extProviders.push_back(&VrInstance::s_instance);
     m_extProviders.push_back(&DxvkXrProvider::s_instance);
 #endif
 
