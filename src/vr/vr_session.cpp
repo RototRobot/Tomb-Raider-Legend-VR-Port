@@ -1567,6 +1567,45 @@ namespace trlvr
         float g_theatre_drag_hand[3]{};     // tracking metres at the grab
         float g_theatre_drag_offset[3]{};
         bool g_theatre_handle_hover[2] = { false, false };
+        // The corner size handle (a backward L at the theatre window's
+        // bottom-right, a mirrored one at the diorama opening's top-right;
+        // user 2026-10-12): width and height separately, any aspect.
+        int g_resize_drag = -1;
+        bool g_resize_board = false;
+        float g_resize_hand[3]{};
+        float g_resize_start[3]{};          // half width, height, below
+        int g_resize_corner = 0;            // 0 lower, 1 upper
+        bool g_resize_hover[2] = { false, false };
+        // Nearest hand to each handle (metres), for the fade: the handles
+        // show only as a hand comes near (user 2026-10-12).
+        float g_move_handle_near = 9.0f;
+        float g_resize_handle_near = 9.0f;
+
+        float theatre_hw() { return 0.5f * config().cutscene_screen_width; }
+        float theatre_hh()
+        {
+            return config().cutscene_screen_height > 0.0f
+                ? 0.5f * config().cutscene_screen_height
+                : theatre_hw() * 9.0f / 16.0f;
+        }
+
+        // Handle colour faded toward the dark room by the nearest hand:
+        // unseen beyond 0.45 m, full within 0.2 m, lit while held.
+        unsigned handle_colour(float near_m, bool hot)
+        {
+            const unsigned lit = hot ? 0xFFE25Au : 0xC8C8C8u;
+            const unsigned dark = config().theatre_backdrop & 0xFFFFFFu;
+            float a = (0.45f - near_m) / 0.25f;
+            a = hot ? 1.0f : a < 0.0f ? 0.0f : a > 1.0f ? 1.0f : a;
+            unsigned out = 0;
+            for (int shift = 0; shift <= 16; shift += 8)
+            {
+                const float l = (float)((lit >> shift) & 0xFF);
+                const float d = (float)((dark >> shift) & 0xFF);
+                out |= ((unsigned)(d + (l - d) * a + 0.5f) & 0xFF) << shift;
+            }
+            return out;
+        }
         // A portal, not a room (user 2026-10-10: leaning through the window
         // and looking back showed the black box all round). Once the head
         // goes through the window rectangle it is in the world, and the
@@ -1741,8 +1780,8 @@ namespace trlvr
             if (!theatre_head_in_frame(h))
                 return;
             const float plane = config().cutscene_screen_distance;
-            const float hw = 0.5f * config().cutscene_screen_width;
-            const float hh = hw * 9.0f / 16.0f;
+            const float hw = theatre_hw();
+            const float hh = theatre_hh();
             if (g_theatre_side_valid)
             {
                 const bool was_in = g_theatre_last_forward > plane;
@@ -2422,6 +2461,35 @@ namespace trlvr
         return true;
     }
 
+    bool vr_hand_fingertip_head_position(bool left, float out[3])
+    {
+        Mat4 grip;
+        float palm[3];
+        if (!out || !vr_hand_palm_head_position(left, palm) ||
+            !vr_controller_grip_head_pose(left, &grip))
+            return false;
+        float f[3] = { grip.m[2][0], grip.m[2][1], grip.m[2][2] };
+        const float len = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+        if (!(len > 1.0e-4f))
+            return false;
+        const float reach = 0.09f * tune_world_scale() / len;
+        for (int k = 0; k < 3; ++k)
+        {
+            out[k] = palm[k] + f[k] * reach;
+            if (!std::isfinite(out[k]))
+                return false;
+        }
+        return true;
+    }
+
+    bool vr_hand_fingertip_body_position(bool left, float* right, float* up,
+                                         float* forward)
+    {
+        float head[3];
+        return vr_hand_fingertip_head_position(left, head) &&
+               vr_head_point_body_position(head, right, up, forward);
+    }
+
     bool vr_head_point_body_position(const float head[3], float* right,
                                      float* up, float* forward)
     {
@@ -2474,8 +2542,8 @@ namespace trlvr
         // In the anchor's frame (metres): right, up, forward. The window
         // is 16:9, centred at eye height; the box is 30 m each way and
         // its front wall is the window's plane.
-        const float hw = 0.5f * config().cutscene_screen_width;
-        const float hh = hw * 9.0f / 16.0f;
+        const float hw = theatre_hw();
+        const float hh = theatre_hh();
         const float d = config().cutscene_screen_distance;
         const float L = 30.0f;
         const DWORD backdrop = config().theatre_backdrop & 0xFFFFFFu;
@@ -2533,15 +2601,44 @@ namespace trlvr
                 if (!quad(face[0], face[1], face[2], face[3]))
                     return 0;
         // The move handle: a bar under the window, just in front of it;
-        // yellow while a hand is on it.
+        // yellow while a hand is on it, faded out with no hand near.
         {
-            colour = (g_theatre_drag >= 0 || g_theatre_handle_hover[0] ||
-                      g_theatre_handle_hover[1]) ? 0xFFE25Au : 0xC8C8C8u;
+            colour = handle_colour(g_move_handle_near,
+                g_theatre_drag >= 0 || g_theatre_handle_hover[0] ||
+                g_theatre_handle_hover[1]);
             const float y = -hh - 0.07f, f = d - 0.01f;
             const float h[4][3] = {
                 { -0.09f, y - 0.018f, f }, { 0.09f, y - 0.018f, f },
                 { 0.09f, y + 0.018f, f }, { -0.09f, y + 0.018f, f } };
             if (!quad(h[0], h[1], h[2], h[3]))
+                return 0;
+        }
+        // The size handle: a backward L round the bottom-right corner.
+        {
+            colour = handle_colour(g_resize_handle_near,
+                g_resize_drag >= 0 || g_resize_hover[0] ||
+                g_resize_hover[1]);
+            const float cx = hw + 0.03f, cy = -hh - 0.03f, f = d - 0.01f;
+            const float t = 0.011f, len = 0.14f;
+            const float a[4][3] = {
+                { cx - len, cy - t, f }, { cx + t, cy - t, f },
+                { cx + t, cy + t, f }, { cx - len, cy + t, f } };
+            const float b[4][3] = {
+                { cx - t, cy + t, f }, { cx + t, cy + t, f },
+                { cx + t, cy + len, f }, { cx - t, cy + len, f } };
+            if (!quad(a[0], a[1], a[2], a[3]) ||
+                !quad(b[0], b[1], b[2], b[3]))
+                return 0;
+            // And round the top-right corner (user 2026-10-12).
+            const float ty = hh + 0.03f;
+            const float c[4][3] = {
+                { cx - len, ty - t, f }, { cx + t, ty - t, f },
+                { cx + t, ty + t, f }, { cx - len, ty + t, f } };
+            const float e[4][3] = {
+                { cx - t, ty - len, f }, { cx + t, ty - len, f },
+                { cx + t, ty - t, f }, { cx - t, ty - t, f } };
+            if (!quad(c[0], c[1], c[2], c[3]) ||
+                !quad(e[0], e[1], e[2], e[3]))
                 return 0;
         }
         if (alpha)
@@ -2626,19 +2723,52 @@ namespace trlvr
     }
 
     unsigned vr_diorama_handle(float (*out)[3], unsigned max,
-                               unsigned* colour)
+                               unsigned* colours)
     {
-        if (!out || !colour || !g_diorama_active || max < 6)
+        if (!out || !colours || !g_diorama_active || max < 30)
             return 0;
-        *colour = (g_theatre_drag >= 0 || g_theatre_handle_hover[0] ||
-                   g_theatre_handle_hover[1]) ? 0xFFE25Au : 0xC8C8C8u;
+        const unsigned bar = handle_colour(g_move_handle_near,
+            g_theatre_drag >= 0 || g_theatre_handle_hover[0] ||
+            g_theatre_handle_hover[1]);
+        const unsigned size = handle_colour(g_resize_handle_near,
+            g_resize_drag >= 0 || g_resize_hover[0] || g_resize_hover[1]);
+        // Bar (handle frame: right, up), then the size handle as a
+        // mirrored L round the opening's top-right corner (box frame).
         const float corners[6][2] = { { -0.12f, -0.02f }, { 0.12f, -0.02f },
                                       { 0.12f, 0.02f }, { -0.12f, -0.02f },
                                       { 0.12f, 0.02f }, { -0.12f, 0.02f } };
-        for (unsigned i = 0; i < 6; ++i)
+        const float hw = 0.5f * config().board_diorama_width;
+        const float hd = 0.5f * config().board_diorama_depth;
+        const float top = -config().board_diorama_below +
+                          config().board_diorama_height;
+        const float cx = hw + 0.03f, cy = top + 0.03f, t = 0.011f,
+                    len = 0.14f;
+        // Lower corner too (user 2026-10-12): a backward L.
+        const float by = -config().board_diorama_below - 0.03f;
+        const float l[24][2] = {
+            { cx - len, cy - t }, { cx + t, cy - t }, { cx + t, cy + t },
+            { cx - len, cy - t }, { cx + t, cy + t }, { cx - len, cy + t },
+            { cx - t, cy - len }, { cx + t, cy - len }, { cx + t, cy + t },
+            { cx - t, cy - len }, { cx + t, cy + t }, { cx - t, cy + t },
+            { cx - len, by - t }, { cx + t, by - t }, { cx + t, by + t },
+            { cx - len, by - t }, { cx + t, by + t }, { cx - len, by + t },
+            { cx - t, by - t }, { cx + t, by - t }, { cx + t, by + len },
+            { cx - t, by - t }, { cx + t, by + len }, { cx - t, by + len } };
+        // Faded all the way: not drawn at all (user 2026-10-12: a faded
+        // handle showed as a black shape over the world).
+        const unsigned dark = config().theatre_backdrop & 0xFFFFFFu;
+        const bool show_bar = bar != dark;
+        const bool show_size = size != dark;
+        if (!show_bar && !show_size)
+            return 0;
+        for (unsigned i = 0; i < 30; ++i)
         {
             float at[3];
-            diorama_handle_point(corners[i][0], corners[i][1], at);
+            if (i < 6)
+                diorama_handle_point(corners[i][0], corners[i][1], at);
+            else
+                diorama_point(l[i - 6][0], l[i - 6][1], -hd - 0.01f, at);
+            colours[i] = i < 6 ? bar : size;
             vr::HmdMatrix34_t pose{};
             pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
             pose.m[0][3] = at[0];
@@ -2650,7 +2780,18 @@ namespace trlvr
             for (int k = 0; k < 3; ++k)
                 out[i][k] = head.m[3][k];
         }
-        return 6;
+        if (!show_bar)
+        {
+            // Only the size handles: move them to the front.
+            for (unsigned i = 0; i < 24; ++i)
+            {
+                for (int k = 0; k < 3; ++k)
+                    out[i][k] = out[i + 6][k];
+                colours[i] = colours[i + 6];
+            }
+            return 24;
+        }
+        return show_size ? 30 : 6;
     }
 
     void vr_theatre_handle_update(bool left_grip, bool right_grip,
@@ -2684,13 +2825,82 @@ namespace trlvr
             !g_system)
         {
             end_drag();
+            if (g_resize_drag >= 0)
+            {
+                if (g_resize_board)
+                    config_set_diorama_size(config().board_diorama_width,
+                                            config().board_diorama_height,
+                                            config().board_diorama_below,
+                                            true);
+                else
+                    config_set_theatre_size(config().cutscene_screen_width,
+                                            2.0f * theatre_hh(), true);
+                g_resize_drag = -1;
+            }
+            g_resize_hover[0] = g_resize_hover[1] = false;
             g_theatre_handle_hover[0] = g_theatre_handle_hover[1] = false;
             grip_was[0] = grips[0];
             grip_was[1] = grips[1];
             return;
         }
         const float s = tune_world_scale() * tune_move_scale();
-        const float hh = 0.5f * config().cutscene_screen_width * 9.0f / 16.0f;
+        const float hh = theatre_hh();
+        // The size handles' corners (0 lower, 1 upper), tracking space.
+        Mat4 resize_heads[2];
+        bool have_resizes[2] = { false, false };
+        for (int c = 0; c < 2; ++c)
+        {
+            float resize_tracking[3];
+            if (board)
+                diorama_point(0.5f * config().board_diorama_width + 0.03f,
+                              c ? -config().board_diorama_below +
+                                      config().board_diorama_height + 0.03f
+                                : -config().board_diorama_below - 0.03f,
+                              -0.5f * config().board_diorama_depth - 0.01f,
+                              resize_tracking);
+            else
+                theatre_point(theatre_hw() + 0.03f,
+                              c ? hh + 0.03f : -hh - 0.03f,
+                              config().cutscene_screen_distance,
+                              resize_tracking);
+            vr::HmdMatrix34_t resize_pose{};
+            resize_pose.m[0][0] = resize_pose.m[1][1] =
+                resize_pose.m[2][2] = 1.0f;
+            resize_pose.m[0][3] = resize_tracking[0];
+            resize_pose.m[1][3] = resize_tracking[1];
+            resize_pose.m[2][3] = resize_tracking[2];
+            have_resizes[c] = s > 0.0f &&
+                tracking_pose_to_head(resize_pose, &resize_heads[c]);
+        }
+        g_move_handle_near = 9.0f;
+        g_resize_handle_near = 9.0f;
+        const auto end_resize = [&]()
+        {
+            if (g_resize_drag >= 0)
+            {
+                if (g_resize_board)
+                {
+                    config_set_diorama_size(config().board_diorama_width,
+                                            config().board_diorama_height,
+                                            config().board_diorama_below,
+                                            true);
+                    log("diorama: size %.2f x %.2f m, %.2f m below (saved)",
+                        config().board_diorama_width,
+                        config().board_diorama_height,
+                        config().board_diorama_below);
+                }
+                else
+                {
+                    config_set_theatre_size(config().cutscene_screen_width,
+                        2.0f * theatre_hh(), true);
+                    log("theatre: window %.2f x %.2f m (saved)",
+                        config().cutscene_screen_width, 2.0f * theatre_hh());
+                }
+            }
+            g_resize_drag = -1;
+        };
+        if (g_resize_drag >= 0 && g_resize_board != board)
+            end_resize();
         float handle_tracking[3];
         if (board)
             diorama_handle_point(0.0f, 0.0f, handle_tracking);
@@ -2724,7 +2934,25 @@ namespace trlvr
                     have_palm = true;
                 }
             }
+            // The index fingertip reaches a handle as well as the palm.
+            float tip[3];
+            const bool have_tip = vr_hand_fingertip_head_position(left, tip);
+            const auto tip_d2 = [&](const Mat4& target) {
+                float d2 = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float d = (tip[k] - target.m[3][k]) / s;
+                    d2 += d * d;
+                }
+                return d2;
+            };
             bool near_handle = false;
+            if (have_handle && have_tip)
+            {
+                const float d2 = tip_d2(handle_head);
+                near_handle = d2 < 0.10f * 0.10f;
+                g_move_handle_near = fminf(g_move_handle_near, sqrtf(d2));
+            }
             if (have_handle && have_palm)
             {
                 float d2 = 0.0f;
@@ -2733,8 +2961,42 @@ namespace trlvr
                     const float d = (palm[k] - handle_head.m[3][k]) / s;
                     d2 += d * d;
                 }
-                near_handle = d2 < 0.10f * 0.10f;
+                near_handle = near_handle || d2 < 0.10f * 0.10f;
+                g_move_handle_near = fminf(g_move_handle_near, sqrtf(d2));
             }
+            bool near_resize = false;
+            int near_corner = 0;
+            float corner_best = 0.10f * 0.10f;
+            for (int c = 0; c < 2; ++c)
+            {
+                if (!have_resizes[c])
+                    continue;
+                float best = 1.0e9f;
+                if (have_tip)
+                    best = tip_d2(resize_heads[c]);
+                if (have_palm)
+                {
+                    float d2 = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const float d =
+                            (palm[k] - resize_heads[c].m[3][k]) / s;
+                        d2 += d * d;
+                    }
+                    best = fminf(best, d2);
+                }
+                g_resize_handle_near = fminf(g_resize_handle_near,
+                                             sqrtf(best));
+                if (best < corner_best)
+                {
+                    corner_best = best;
+                    near_resize = true;
+                    near_corner = c;
+                }
+            }
+            if (near_resize && !g_resize_hover[hand])
+                entered[hand] = true;
+            g_resize_hover[hand] = near_resize;
             if (near_handle && !g_theatre_handle_hover[hand])
                 entered[hand] = true;
             g_theatre_handle_hover[hand] = near_handle;
@@ -2754,6 +3016,81 @@ namespace trlvr
             const vr::HmdMatrix34_t& cm =
                 g_tracked_poses[index].mDeviceToAbsoluteTracking;
             const float at[3] = { cm.m[0][3], cm.m[1][3], cm.m[2][3] };
+            // The size handle (before the move bar: the nearer one wins
+            // only if both are in reach, which they are not).
+            if (pressed && near_resize && g_resize_drag < 0 &&
+                g_theatre_drag < 0)
+            {
+                g_resize_drag = hand;
+                g_resize_board = board;
+                g_resize_corner = near_corner;
+                memcpy(g_resize_hand, at, sizeof(at));
+                if (board)
+                {
+                    g_resize_start[0] = 0.5f * config().board_diorama_width;
+                    g_resize_start[1] = config().board_diorama_height;
+                    g_resize_start[2] = config().board_diorama_below;
+                }
+                else
+                {
+                    g_resize_start[0] = theatre_hw();
+                    g_resize_start[1] = hh;
+                }
+                log("%s: %s hand took the size handle", board ? "diorama"
+                    : "theatre", left ? "left" : "right");
+            }
+            if (g_resize_drag == hand)
+            {
+                if (!grips[hand])
+                {
+                    end_resize();
+                    continue;
+                }
+                claim[hand] = true;
+                const float dx = at[0] - g_resize_hand[0];
+                const float dy = at[1] - g_resize_hand[1];
+                const float dz = at[2] - g_resize_hand[2];
+                const float fx = frame[0], fz = frame[1];
+                const float dr = dx * -fz + dz * fx;
+                const auto clampf = [](float v, float lo, float hi) {
+                    return v < lo ? lo : v > hi ? hi : v;
+                };
+                if (board)
+                {
+                    // Width both ways from the middle; the grabbed corner's
+                    // edge follows the hand (top: the floor stays; bottom:
+                    // the top stays and the box reaches further down).
+                    const float hw = clampf(g_resize_start[0] + dr,
+                                            0.1f, 1.0f);
+                    if (g_resize_corner == 1)
+                    {
+                        const float height = clampf(g_resize_start[1] + dy,
+                                                    0.15f, 1.5f);
+                        config_set_diorama_size(2.0f * hw, height,
+                            config().board_diorama_below, false);
+                    }
+                    else
+                    {
+                        const float grow = clampf(-dy,
+                            0.15f - g_resize_start[1],
+                            1.5f - g_resize_start[1]);
+                        config_set_diorama_size(2.0f * hw,
+                            g_resize_start[1] + grow,
+                            g_resize_start[2] + grow, false);
+                    }
+                }
+                else
+                {
+                    // Centred: the grabbed corner follows the hand.
+                    const float hw = clampf(g_resize_start[0] + dr,
+                                            0.25f, 5.0f);
+                    const float h2 = clampf(g_resize_start[1] +
+                                            (g_resize_corner ? dy : -dy),
+                                            0.15f, 4.0f);
+                    config_set_theatre_size(2.0f * hw, 2.0f * h2, false);
+                }
+                continue;
+            }
             if (pressed && near_handle && g_theatre_drag < 0)
             {
                 g_theatre_drag = hand;
@@ -2780,9 +3117,10 @@ namespace trlvr
             offset[1] = g_theatre_drag_offset[1] + dy;
             offset[2] = g_theatre_drag_offset[2] + dx * fx + dz * fz;
         }
-        // A hand on the handle keeps its grip from the game.
+        // A hand on a handle keeps its grip from the game.
         for (int hand = 0; hand < 2; ++hand)
-            if (g_theatre_handle_hover[hand] && grips[hand])
+            if ((g_theatre_handle_hover[hand] || g_resize_hover[hand]) &&
+                grips[hand])
                 claim[hand] = true;
     }
 

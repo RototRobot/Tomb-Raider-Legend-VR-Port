@@ -1,5 +1,5 @@
 ================================================================
-  Tomb Raider: Legend  --  VR mod          PREVIEW 4 (testers)
+  Tomb Raider: Legend  --  VR mod          PREVIEW 5 (testers)
 ================================================================
 
 This is an early preview for testers. Expect rough edges. Please report what
@@ -16,41 +16,34 @@ The original game files are not modified. The mod adds files beside trl.exe,
 and its launcher writes a separate patched copy named trl_vr.exe.
 
 
-NEW IN PREVIEW 4
+NEW IN PREVIEW 5
 ----------------
-  * Pause menu > VR Settings now changes VR options on the spot: Theatre,
-    Third Person camera, Hand Collision, Body (hands / full), Left Handed and
-    Hardcore Mode, besides Holster Setup and Hand Calibration. Press an entry
-    to step through its choices; it is saved to trlvr.ini. In all five of the
-    game's languages.
-  * Quest (Oculus Touch) controllers get their own tuned defaults for hands,
-    aim and holsters; other controllers keep the Reverb G2 defaults.
-  * Theatre mode: cutscenes (and optionally third-person play) on a big
-    window fixed in the room, still in 3D.
-  * Radial gear menu with the classic layout: hold the left stick and push
-    it towards an item.
-  * Roomscale: walk around your room in first person and Lara follows,
-    stopping at walls.
-  * Finger tracking on Quest and Index (finger_tracking = 1).
-  * Full body: the torso gives a little as she moves; hands stop at her body.
-  * Third person: palm-up off hand shows scale and zoom sliders; Lara runs
-    her hand along walls she walks beside.
-  * Board mode: optional tabletop diorama you can grab and move.
-  * Hardcore mode (off by default): the view turns with Lara through flips
-    and rolls.
-  * First person: the chest pouches show the game's own medipack and grenade
-    models; the light's glow and the grapple rope follow your hands; vine
-    climbing fixed (each grip climbs one way -- let go and grip again to
-    change direction).
-  * The game's rumble reaches the VR controllers.
-  * The sky no longer slides with the look stick or precision aim.
-  * Sharper distance: Depth of Field and Fullscreen Effects are switched off
-    by the mod, and anti-aliasing switched on (see PREPARE THE GAME).
-  * Faster pause menu, and many smaller fixes.
-
-  If you placed your holsters before (Preview 3 or earlier), run
-  VR Holster Setup once more: positions are now measured from Lara's palm.
-
+  * New defaults for a fresh trlvr.ini: immersive controls on, the radial
+    gear menu, and the right-stick long press stepping through classic,
+    shoulder and board third person and first person. Your existing
+    trlvr.ini keeps its settings.
+  * Left stick: a click opens the radial gear menu, a hold pauses.
+  * Motorbike (first person): grip a handlebar to hold it.
+    bike_handlebars = 2 lets your hands steer; 3 adds a twist throttle on
+    the bar. Pistols on the bike stay in your main hand.
+  * Guns sit properly in Lara's hands everywhere, including on the bike and
+    after loading any checkpoint. The shotgun is lined up out of the box,
+    and left-handed play mirrors every gun's grip automatically.
+  * Reaching for a holster with gear in your hand puts the gear away and
+    draws the gun.
+  * Binoculars, grapple, grenades and medipacks are held while the grip is
+    held; let go and they go back. In the binocular view only zoom (left
+    stick), the triggers and a grip press (to leave) do anything.
+  * Theatre window and board diorama: corner handles resize them to any
+    shape; the handles fade in only as a hand comes near.
+  * Gear cross, sliders and handles also answer to your index fingertip.
+  * First person without immersive controls shows Lara's own animated hands
+    / body and guns, and a gamepad's right stick turns the view.
+  * smooth_turn_speed (degrees per second) for smooth turning;
+    first_person_eye_height can now go lower if your view sits too high.
+  * The board-mode god hand only works at board scale.
+  * Fixes: a warped copy of the crosshair and outlines in the other eye up
+    close; the long gun being drawn when reaching for the chest.
 
 ------------------------------------------------------------
 1. PREPARE THE GAME
@@ -113,8 +106,11 @@ the game. Settings are read at start-up: quit the game, edit, start again.
 ------------------------------------------------------------
 4. MODES -- THIRD PERSON BY DEFAULT, FIRST PERSON OPTIONAL
 ------------------------------------------------------------
-A fresh install plays in THIRD PERSON with the classic VR gamepad layout
-(below). That is the safest mode and the place to start.
+A fresh install plays in THIRD PERSON with immersive controls on and the
+radial gear menu (click the left stick, push towards an item). Long-press
+the right stick to step through the camera styles -- classic, shoulder,
+board -- and first person. For the plain button layout of the game instead,
+set immersive_controls = 0 (the table below).
 
 FIRST PERSON IMMERSIVE (recommended for testers once you are settled):
 open trlvr.ini and set
@@ -183,11 +179,12 @@ wall with nothing drawn, Lara runs her hand along it (wall_touch).
 VR CONTROLLERS (classic layout)
 ------------------------------------------------------------
     Left stick                 move
-    Left stick click           pause / back (Esc)
-    Left stick double click    recenter the VR view
-    Left stick long press      gear menu: keep holding and push the stick
+    Left stick click           gear menu: push the stick towards an item --
                                up health pack, right binoculars,
                                down switch weapon, left personal light
+                               (in menus: back)
+    Left stick double click    recenter the VR view
+    Left stick long press      pause (Esc)
     Right stick                turn
     Right stick click          switch weapons
     Right stick double click   open the PDA

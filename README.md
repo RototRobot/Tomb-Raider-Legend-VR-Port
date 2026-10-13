@@ -240,14 +240,17 @@ and starts that. The original `trl.exe` is never modified.
 
 ## Controls
 
-A fresh install uses the **classic layout**: the VR controllers send the game's
-own keyboard and mouse controls, so everything the game can do has a button.
-Defaults for Oculus Touch-style controllers (Reverb G2, Quest, Rift):
+A fresh install starts in third person with **immersive controls** on (see
+below) and the radial gear menu. Every button below still works there except
+where a gesture replaces it. With `immersive_controls = 0` you get the
+**classic layout**: the VR controllers send the game's own keyboard and mouse
+controls, so everything the game can do has a button. Defaults for Oculus
+Touch-style controllers (Reverb G2, Quest, Rift):
 
 | Control | Action |
 |---|---|
 | Left stick | Move |
-| Left stick click / double click / hold | Pause / recentre the view / gear menu |
+| Left stick click / double click / hold | Gear menu / recentre the view / pause |
 | Right stick | Turn |
 | Right stick click / double click / hold | Switch weapons / PDA / binoculars |
 | Left trigger | Action, interact, pull the grapple |
@@ -259,8 +262,9 @@ Defaults for Oculus Touch-style controllers (Reverb G2, Quest, Rift):
 | X | Accurate aim |
 | Y tap / hold | Grenade or flare / personal light |
 
-The gear menu: hold the left stick, then push it towards an item (up health
-pack, right binoculars, down switch weapon, left personal light).
+The gear menu: click the left stick, then push it towards an item (up health
+pack, right binoculars, down switch weapon, left personal light). In menus a
+click goes back.
 
 Index, WMR and per-controller details are in
 [`release/VR CONTROLLER BINDINGS.txt`](release/VR%20CONTROLLER%20BINDINGS.txt).
@@ -303,8 +307,9 @@ Settings live in **`trlvr.ini`** beside the game, written on first run. Every
 key is explained in the file itself. Missing settings are added on start-up;
 values you chose are never replaced. Edit the file with the game closed.
 
-**Third person with the classic layout is the default**, because it is the
-safest place to start. To try first person:
+**Third person with immersive controls is the default**, and the right-stick
+long press steps through classic, shoulder, board and first person
+(`third_person_mode = all`). To start in first person:
 
 ```ini
 [vr]
@@ -324,10 +329,10 @@ first and third person at any time in gameplay.
 | Setting | Default | What it does |
 |---|---|---|
 | `first_person` | `0` | First-person view through Lara's eyes |
-| `first_person_tracked_hands` | `0` | Lara's hands follow your controllers (first person) |
-| `immersive_controls` | `0` | Hand gestures: holsters, belt gear, pouches, hand climbing, gear cross |
+| `first_person_tracked_hands` | `1` | Lara's hands follow your controllers (first person) |
+| `immersive_controls` | `1` | Hand gestures: holsters, belt gear, pouches, hand climbing, gear menu; `0` = the classic button layout |
 | `first_person_body` | `hands` | `full` draws Lara's whole body below the view |
-| `third_person_mode` | `classic` | `classic`, `shoulder` or `board`; `all` makes the right-stick long press cycle classic → shoulder → board → first person |
+| `third_person_mode` | `all` | `classic`, `shoulder` or `board`; `all` makes the right-stick long press cycle classic → shoulder → board → first person |
 | `left_handed` | `0` | Main hand on the left; swaps the triggers' roles |
 | `cutscene_mode` | `normal` | `theatre` shows cutscenes through a window fixed in the room |
 | `gameplay_theatre` | `0` | Third-person play through the same window (`board` excluded) |
@@ -355,7 +360,7 @@ first and third person at any time in gameplay.
 | `first_person_no_spread` | `1` | Shots go exactly where the gun points |
 | `camera_collision` | `1` | Third-person view stops short of walls |
 | `wall_touch` | `1` | Third person: Lara runs her hand along walls she walks beside |
-| `gear_menu` | `cross` | Immersive third person: `radial` uses the hold-and-push gear menu instead of the 3D cross |
+| `gear_menu` | `radial` | Immersive third person: `radial` = click the left stick and push towards an item; `cross` = the 3D gear cross |
 | `ui_scale` | `0.6` | Size of the HUD and menus |
 | `hud_follow` | `0.85` | How closely the HUD follows your head (1 = locked) |
 | `fsaa` | `on` | The game's anti-aliasing: `on`, `off` or `game` (the Setup dialog's choice) |

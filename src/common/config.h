@@ -90,7 +90,7 @@ namespace trlvr
         // path remains untouched unless this is enabled.
         bool first_person = false;
         // Experimental source-mesh hand-only rendering.
-        bool first_person_tracked_hands = false;
+        bool first_person_tracked_hands = true;
         // First-person body: false = hands only, true = Lara's full body
         // (head removed) with her arms bent to reach the tracked hands.
         bool first_person_full_body = false;
@@ -136,7 +136,7 @@ namespace trlvr
         int third_person_mode = 0;
         // third_person_mode = all: start in classic, and the view switch
         // cycles classic -> shoulder -> board -> first person (2026-10-06).
-        bool view_cycle_all = false;
+        bool view_cycle_all = true;
         float third_person_smoothing = 0.12f;   // seconds
         float shoulder_distance = 1.3f;         // metres behind the focus
         float shoulder_height = 0.0f;           // metres above it
@@ -171,7 +171,9 @@ namespace trlvr
         // a window fixed in the room, in a black space, still 3D (leaning
         // looks round into the scene). [vr] cutscene_mode = normal/theatre.
         bool cutscene_theatre = false;
-        float cutscene_screen_width = 3.0f;      // metres, 16:9
+        float cutscene_screen_width = 3.0f;      // metres
+        // metres; 0 = 16:9 from the width. The corner handle sets both.
+        float cutscene_screen_height = 0.0f;
         float cutscene_screen_distance = 2.5f;   // metres ahead
         // Scene scale in the theatre: 0 = auto (each shot scaled so Lara
         // sits at the screen), else a fixed factor (1 = life size).
@@ -220,13 +222,13 @@ namespace trlvr
         bool controllers = true;
         // Opt-in body-relative gestures layered over the normal SteamVR
         // bindings. The standard bindings remain the default and fallback.
-        bool immersive_controls = false;
+        bool immersive_controls = true;
         // Gear (medipack, binoculars, weapon switch, light) in immersive
         // third person: false = the 3D gear cross, true = the radial menu
         // (left stick long press, then a stick direction, with the game's
         // own flat cross shown). Immersive off always uses the radial menu.
         // [controls] gear_menu = cross / radial (2026-10-09).
-        bool gear_menu_radial = false;
+        bool gear_menu_radial = true;
         // Analog walk (2026-10-10): the game only gets keys, so the stick
         // was run-or-nothing. A light push also holds the game's Walk key
         // (input slot 20 Left Shift or 21 Left Ctrl, whichever is Walk).
@@ -294,6 +296,11 @@ namespace trlvr
     // The other VR Settings toggles (pause menu, 2026-10-10): each sets the
     // live value and saves it to trlvr.ini.
     void config_set_left_handed(bool on);
+    // Theatre window / board diorama size from their corner handles
+    // (metres); `save` writes trlvr.ini (at the end of a drag).
+    void config_set_theatre_size(float width, float height, bool save);
+    void config_set_diorama_size(float width, float height, float below,
+                                 bool save);
     // 0 off, 1 cutscenes, 2 cutscenes and gameplay.
     void config_set_theatre(int mode);
     // 0 classic, 1 shoulder, 2 board, 3 all (the view switch cycles them).

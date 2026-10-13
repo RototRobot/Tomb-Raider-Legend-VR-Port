@@ -272,6 +272,11 @@ namespace trlvr
         {
             if (!config().immersive_controls)
                 return true;
+            // First person: the gear buttons give way to the gestures, and
+            // the stick click is the radial menu, the hold the pause (user
+            // 2026-10-12: "worked in third person but not first person").
+            if (camera_first_person_active())
+                return true;
             return config().gear_menu_radial && !camera_first_person_active();
         }
 
@@ -469,6 +474,7 @@ namespace trlvr
         int      g_binocular_hand = -1;
         bool     g_binocular_view = false;
         bool     g_binocular_key_pulse = false;
+        ULONGLONG g_binocular_cancel_until = 0;
         int      g_grapple_hand = -1;
         // Pouches (immersive): a grenade/flare taken from the front of the
         // belt (between binoculars and grapple; first build had it on the
@@ -629,10 +635,23 @@ namespace trlvr
                 }
                 float centre[3];
                 gear_cross_to_body(kGearCross, centre);
-                const float cx = r - centre[0];
-                const float cy = u - centre[1];
-                const float cz = fw - centre[2];
-                const float to_centre = sqrtf(cx * cx + cy * cy + cz * cz);
+                // The index fingertip counts as well as the palm (user
+                // 2026-10-12): whichever is nearer.
+                float tip[3];
+                const bool have_tip = vr_hand_fingertip_body_position(
+                    hand == 0, &tip[0], &tip[1], &tip[2]);
+                const auto dist2 = [&](const float p[3]) {
+                    const float dx = r - p[0], dy = u - p[1], dz = fw - p[2];
+                    float d = dx * dx + dy * dy + dz * dz;
+                    if (have_tip)
+                    {
+                        const float tx = tip[0] - p[0], ty = tip[1] - p[1],
+                                    tz = tip[2] - p[2];
+                        d = fminf(d, tx * tx + ty * ty + tz * tz);
+                    }
+                    return d;
+                };
+                const float to_centre = sqrtf(dist2(centre));
                 nearest = to_centre < nearest ? to_centre : nearest;
                 int hover = -1;
                 float best = kGearRadius * kGearRadius;
@@ -640,8 +659,7 @@ namespace trlvr
                 {
                     float p[3];
                     gear_item_position(item, p);
-                    const float dx = r - p[0], dy = u - p[1], dz = fw - p[2];
-                    const float d = dx * dx + dy * dy + dz * dz;
+                    const float d = dist2(p);
                     if (d <= best)
                     {
                         best = d;
@@ -888,9 +906,11 @@ namespace trlvr
         // Over either shoulder: the hand behind the head's plane and no
         // lower than the chest, within reach of the body's centreline
         // (metres, HMD-yaw body frame as vr_controller_body_position).
+        // Lower edge raised from -0.35 m (user 2026-10-12: reaching for the
+        // medipack or the chest light drew the long gun).
         bool in_shoulder_zone(float right, float up, float forward)
         {
-            return forward <= 0.0f && up >= -0.35f && up <= 0.25f &&
+            return forward <= 0.0f && up >= -0.20f && up <= 0.25f &&
                    fabsf(right) <= 0.45f;
         }
 
@@ -945,6 +965,27 @@ namespace trlvr
         // the game was paused; if retail did not act on it, Lara came back
         // with pistols out that the mod thought were holstered (open hands,
         // retail-placed guns). Now a pause leaves everything as it was.
+        bool binocular_view_now()
+        {
+            return g_binocular_view || hud_binocular_view_active();
+        }
+
+        // Binoculars back on the belt, closing the view if it is open.
+        void binoculars_put_back(const char* why)
+        {
+            if (g_binocular_view)
+            {
+                g_binocular_view = false;
+                g_binocular_key_pulse = true;
+            }
+            if (g_binocular_hand >= 0)
+            {
+                g_binocular_hand = -1;
+                camera_first_person_gear_release(0);
+            }
+            log("controls: binoculars put back on the belt (%s)", why);
+        }
+
         void update_holster_gesture(bool active, bool suspended = false)
         {
             if (!active && suspended)
@@ -962,6 +1003,40 @@ namespace trlvr
             }
             bool toggled_this_frame = false;
             const ULONGLONG now = GetTickCount64();
+            // The guns come first (user 2026-10-12): reaching for a holster
+            // with gear still in a hand puts the gear away -- binoculars and
+            // grapple back on the belt, a pouch item back in its pouch --
+            // and the draw goes ahead.
+            const auto put_away_gear = [&](const char* why) {
+                if (g_binocular_hand >= 0)
+                {
+                    if (g_binocular_view)
+                    {
+                        g_binocular_view = false;
+                        g_binocular_key_pulse = true;
+                    }
+                    g_binocular_hand = -1;
+                    camera_first_person_gear_release(0);
+                    log("controls: binoculars put back on the belt (%s)", why);
+                }
+                if (g_grapple_hand >= 0)
+                {
+                    g_grapple_hand = -1;
+                    g_grapple_throw_armed = false;
+                    camera_first_person_gear_release(1);
+                    log("controls: grapple put back on the belt (%s)", why);
+                }
+                if (g_grenade_hand >= 0)
+                {
+                    g_grenade_hand = -1;
+                    log("controls: grenade/flare put back (%s)", why);
+                }
+                if (g_medipack_hand >= 0)
+                {
+                    g_medipack_hand = -1;
+                    log("controls: medipack put back (%s)", why);
+                }
+            };
             for (int hand = 0; hand < 2; ++hand)
             {
                 const VrHolsterZone& zone = tune_holster_zone();
@@ -996,6 +1071,34 @@ namespace trlvr
                     continue;
                 }
 
+                // Gear in this hand and a grip at a holster or the
+                // shoulder: put the gear away and let the draw below run.
+                // (A held pouch item keeps its grip down, so for those the
+                // hand arriving in the zone counts.)
+                {
+                    const bool holding = hand == g_binocular_hand ||
+                        hand == g_grapple_hand || hand == g_grenade_hand ||
+                        hand == g_medipack_hand;
+                    const bool pouch = hand == g_grenade_hand ||
+                                       hand == g_medipack_hand;
+                    // Pouch items: the hips only (the shoulder zone is
+                    // close to the mouth, where a medipack is used).
+                    if (holding && (grip_pressed || pouch) &&
+                        ((!pouch && in_shoulder_zone(right, up, forward)) ||
+                         vr_gesture_in_holster_zone(left, right, up, forward,
+                                                    &zone)))
+                    {
+                        put_away_gear("reaching for a gun");
+                        if (pouch)
+                        {
+                            // The grip is still down: treat it as a fresh
+                            // press at the holster.
+                            g_holster_grip_was[hand] = false;
+                            g_holster_inside[hand] = false;
+                            continue;
+                        }
+                    }
+                }
                 // Chest pouches: an item in hand first, then a new pickup.
                 if (hand == g_grenade_hand)
                 {
@@ -1095,6 +1198,16 @@ namespace trlvr
                         camera_first_person_gear_belt_distance(
                             0, left, &belt_distance) &&
                         belt_distance <= 0.14f;
+                    // Held, not a toggle (user 2026-10-12): let go before
+                    // they reach the face and they go back on the belt. In
+                    // the view the hands are free; any grip press leaves
+                    // it (binocular_grip_cancel).
+                    if (grip_released && !g_binocular_view)
+                    {
+                        binoculars_put_back("grip released");
+                        g_holster_grip_consumed[hand] = true;
+                        continue;
+                    }
                     if (at_belt ||
                         (grip_pressed && at_face && g_binocular_view))
                     {
@@ -1167,15 +1280,15 @@ namespace trlvr
                         g_grapple_throw_pulse = vr_gesture_grapple_throw(
                             travel, forward, recent_speed);
                         g_grapple_throw_armed = false;
-                        if (g_grapple_throw_pulse)
-                        {
-                            g_grapple_hand = -1;
-                            camera_first_person_gear_release(1);
-                        }
+                        // Thrown, or -- held, not a toggle (user
+                        // 2026-10-12) -- back on the belt.
+                        g_grapple_hand = -1;
+                        camera_first_person_gear_release(1);
                         log("controls: grapple %s on release "
                             "(forward %.2f m, travel %.2f m, "
                             "recent speed %.2f m/s)",
-                            g_grapple_throw_pulse ? "thrown" : "retained",
+                            g_grapple_throw_pulse ? "thrown"
+                                                  : "put back on the belt",
                             forward, travel, recent_speed);
                     }
                     else if (grip)
@@ -1250,6 +1363,7 @@ namespace trlvr
                 {
                     g_holster_grip_consumed[hand] = true;
                     toggled_this_frame = true;
+                    put_away_gear("drawing the long gun");
                     const bool drawn = g_holster_drawn[0] ||
                                        g_holster_drawn[1];
                     log("controls: %s shoulder reach (right %+.2f, up %+.2f, "
@@ -1308,7 +1422,7 @@ namespace trlvr
                     continue;
                 }
                 // Near-misses, to tune the shoulder zone from the log.
-                if (grip_pressed && up >= -0.35f && forward < 0.12f &&
+                if (grip_pressed && up >= -0.30f && forward < 0.12f &&
                     fabsf(right) <= 0.5f)
                 {
                     static unsigned near_reports = 0;
@@ -1333,6 +1447,7 @@ namespace trlvr
                 if (toggled_this_frame)
                     continue;
                 toggled_this_frame = true;
+                put_away_gear("drawing a pistol");
                 // Hip with the long gun out: swap to the pistols instead of
                 // putting everything away.
                 if ((g_holster_drawn[0] || g_holster_drawn[1]) &&
@@ -1867,6 +1982,76 @@ namespace trlvr
                                                  vr::k_ulInvalidInputValueHandle)
                        == vr::VRInputError_None
                 && d.bActive && d.bState;
+        }
+
+        // A real gamepad's right stick, for first-person turning when the
+        // VR look stick is idle (user 2026-10-12: playing with a gamepad
+        // and immersive controls off, the view would not turn -- the game
+        // reads the pad itself, but in first person the mod owns the view's
+        // turn). XInput is loaded on first use; 0 when there is no pad.
+        float gamepad_right_stick_x()
+        {
+            struct Pad
+            {
+                WORD buttons;
+                BYTE lt, rt;
+                SHORT lx, ly, rx, ry;
+            };
+            struct PadState { DWORD packet; Pad pad; };
+            typedef DWORD(WINAPI* PFN_XInputGetState)(DWORD, PadState*);
+            static PFN_XInputGetState get = nullptr;
+            static bool tried = false;
+            if (!tried)
+            {
+                tried = true;
+                const wchar_t* dlls[3] = { L"xinput1_4.dll", L"xinput1_3.dll",
+                                           L"xinput9_1_0.dll" };
+                for (const wchar_t* dll : dlls)
+                {
+                    HMODULE m = LoadLibraryW(dll);
+                    if (m && (get = reinterpret_cast<PFN_XInputGetState>(
+                                  GetProcAddress(m, "XInputGetState"))))
+                        break;
+                }
+            }
+            if (!get)
+                return 0.0f;
+            // Polling absent pads is slow: with none found, look again
+            // only every 2 s.
+            static ULONGLONG retry_at = 0;
+            static int found = -1;
+            const ULONGLONG now = GetTickCount64();
+            if (found < 0 && now < retry_at)
+                return 0.0f;
+            static bool reported = false;
+            for (DWORD pad = found >= 0 ? (DWORD)found : 0; pad < 4; ++pad)
+            {
+                PadState state{};
+                if (get(pad, &state) != ERROR_SUCCESS)
+                {
+                    if ((int)pad == found)
+                    {
+                        found = -1;
+                        break;
+                    }
+                    continue;
+                }
+                found = (int)pad;
+                const float x = state.pad.rx / 32767.0f;
+                if (!reported)
+                {
+                    reported = true;
+                    log("controls: gamepad %u found -- its right stick turns "
+                        "the first-person view when the VR stick is idle",
+                        pad);
+                }
+                // The pad's usual dead zone (8689 / 32767).
+                return fabsf(x) < 0.265f ? 0.0f
+                    : (x - (x > 0.0f ? 0.265f : -0.265f)) / 0.735f;
+            }
+            found = -1;
+            retry_at = now + 2000;
+            return 0.0f;
         }
 
         void analog(vr::VRActionHandle_t h, float* x, float* y)
@@ -2613,6 +2798,9 @@ namespace trlvr
             const bool have_hand = vr_hand_palm_body_position(
                 other == 0, &hand[0], &hand[1], &hand[2]);
             int knob_near = -1;
+            float tip[3]{};
+            const bool have_tip = vr_hand_fingertip_body_position(
+                other == 0, &tip[0], &tip[1], &tip[2]);
             if (have_hand)
             {
                 float best = 0.045f * 0.045f;
@@ -2622,6 +2810,15 @@ namespace trlvr
                     for (int k = 0; k < 3; ++k)
                         d += (hand[k] - s.draw.knob[i][k]) *
                              (hand[k] - s.draw.knob[i][k]);
+                    // The index fingertip on the knob counts too.
+                    if (have_tip)
+                    {
+                        float t = 0.0f;
+                        for (int k = 0; k < 3; ++k)
+                            t += (tip[k] - s.draw.knob[i][k]) *
+                                 (tip[k] - s.draw.knob[i][k]);
+                        d = fminf(d, t);
+                    }
                     if (d < best)
                     {
                         best = d;
@@ -3435,6 +3632,30 @@ namespace trlvr
             // The palm scale / zoom sliders claim a grip on a knob too.
             update_tp_sliders(left_grip, right_grip, menu, theatre_claim);
         }
+        // Binocular view: a grip press with either hand, anywhere, leaves
+        // it (user 2026-10-12). Immersive binoculars go back on the belt;
+        // a view opened by button / radial menu is closed with its key.
+        {
+            static bool cancel_was[2] = { false, false };
+            const bool grips_now[2] = { left_grip, right_grip };
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                const bool pressed = grips_now[hand] && !cancel_was[hand];
+                cancel_was[hand] = grips_now[hand];
+                if (!pressed || menu || !binocular_view_now())
+                    continue;
+                if (g_binocular_view || g_binocular_hand >= 0)
+                    binoculars_put_back("grip pressed in the view");
+                else
+                {
+                    g_binocular_cancel_until = GetTickCount64() + 120;
+                    log("controls: binocular view closed by a grip");
+                }
+                // This press is spent: the holsters and belt do not see it.
+                g_holster_grip_was[hand] = true;
+                g_holster_grip_consumed[hand] = true;
+            }
+        }
         camera_first_person_ledge_grip_input(
             true, left_grip, handhold_active);
         camera_first_person_ledge_grip_input(
@@ -3518,6 +3739,19 @@ namespace trlvr
                 if (immersive_first_person &&
                     (i == GameGrapple || i == GameBinoculars))
                     continue;
+                // The holsters, belt and pouches do these in first person
+                // (user 2026-10-12: Y still threw grenades): grenade / flare
+                // (Y) and weapon switch (right stick click).
+                if (immersive_first_person &&
+                    (i == GameGrenade || i == GameWeapon))
+                    continue;
+                // Binocular view: only the triggers (the view's own mode
+                // keys), pause and recentre; the left stick zooms and a
+                // grip leaves (handled above).
+                if (binocular_view_now() &&
+                    i != GameInteract && i != GameFire &&
+                    i != GamePause && i != GameRecentre && i != GameMedkit)
+                    continue;
                 // The left grip that just toggled the chest light.
                 if (i == GameGrapple && g_light_grip_claim)
                     continue;
@@ -3529,8 +3763,10 @@ namespace trlvr
                     (i == GameWeapon || i == GameBinoculars ||
                      i == GameMedkit || i == GameLight))
                     continue;
-                // Radial gear menu: the medipack button opens it (the
-                // medipack is its up item).
+                // Radial gear menu: the medipack (long press) action is the
+                // pause and the pause (click) action opens the menu (user
+                // 2026-10-12: "hold is pause, single click is the radial
+                // menu"); see the radial block below.
                 if (i == GameMedkit && radial_gear_menu_enabled())
                     continue;
                 if (i == GamePause && g_pause_hold)
@@ -3585,6 +3821,8 @@ namespace trlvr
                         ? g_game[GameInteract].handle
                     : swap_triggers && i == GameInteract
                         ? g_game[GameFire].handle
+                    : i == GamePause && radial_gear_menu_enabled()
+                        ? g_game[GameMedkit].handle
                         : b.handle);
                 // Single pistols: each drawn pistol's own trigger fires.
                 if (single_pistols_out && i == GameFire)
@@ -3662,6 +3900,9 @@ namespace trlvr
                     }
                 }
             }
+            if (g_binocular_cancel_until &&
+                GetTickCount64() < g_binocular_cancel_until)
+                want[VK_NEXT] = true;
             if (immersive_first_person)
             {
                 if (g_binocular_key_pulse)
@@ -4159,8 +4400,8 @@ namespace trlvr
             }
             {
                 const bool enabled = radial_gear_menu_enabled();
-                const bool button = enabled &&
-                    digital(g_game[GameMedkit].handle);
+                const bool button = enabled && !g_pause_hold &&
+                    digital(g_game[GamePause].handle);
                 const ULONGLONG t = GetTickCount64();
                 const float mx = g_move_raw[0], my = g_move_raw[1];
                 const float reach = mx * mx + my * my;
@@ -4298,7 +4539,31 @@ namespace trlvr
             // deflection, integrated with the remainder carried so slow
             // movements are not lost to rounding.
             analog(g_look, &x, &y);
+            if (camera_first_person_active() && fabsf(x) < 0.05f)
+            {
+                const float pad = gamepad_right_stick_x();
+                if (pad != 0.0f)
+                    x = fmaxf(-1.0f, fminf(1.0f, pad));
+            }
             const float speed = tune_look_speed();
+            // Turn diagnostic (user 2026-10-12: no turning in first person
+            // without immersive controls): what the stick reads and where
+            // the first-person turn goes, every 2 s while it is pushed.
+            {
+                static ULONGLONG at = 0;
+                static unsigned reports = 0;
+                const ULONGLONG t = GetTickCount64();
+                if (fabsf(x) > 0.3f && t - at > 2000 && reports < 30)
+                {
+                    at = t;
+                    ++reports;
+                    log("controls: look stick x %+.2f y %+.2f -> %s, first-"
+                        "person turn %.1f deg", x, y,
+                        camera_first_person_active() ? "first-person turn"
+                                                     : "mouse",
+                        g_first_person_turn * 57.2957795f);
+                }
+            }
             if (camera_first_person_active())
             {
                 // Independent first-person heading. Letting the third-person

@@ -51,7 +51,7 @@ namespace trlvr
             { L"vr", L"camera_auto_center", L"0" },
             { L"vr", L"camera_shake", L"0" },
             { L"vr", L"first_person", L"0" },
-            { L"vr", L"first_person_tracked_hands", L"0" },
+            { L"vr", L"first_person_tracked_hands", L"1" },
             { L"vr", L"first_person_body", L"hands" },
             { L"vr", L"hand_model", L"2" },
             { L"vr", L"first_person_mantle_smoothing", L"1" },
@@ -64,7 +64,7 @@ namespace trlvr
             { L"vr", L"fullscreen_effects", L"off" },
             { L"vr", L"fsaa", L"on" },
             { L"vr", L"comfort_vignette", L"off" },
-            { L"vr", L"third_person_mode", L"classic" },
+            { L"vr", L"third_person_mode", L"all" },
             { L"vr", L"third_person_smoothing", L"0.12" },
             { L"vr", L"shoulder_distance", L"1.3" },
             { L"vr", L"shoulder_height", L"0.0" },
@@ -97,6 +97,7 @@ namespace trlvr
             { L"vr", L"body_soft_angle", L"12" },
             { L"vr", L"cutscene_mode", L"normal" },
             { L"vr", L"cutscene_screen_width", L"3.0" },
+            { L"vr", L"cutscene_screen_height", L"0" },
             { L"vr", L"cutscene_screen_distance", L"2.5" },
             { L"vr", L"cutscene_scale", L"auto" },
             { L"vr", L"gameplay_theatre", L"0" },
@@ -107,7 +108,7 @@ namespace trlvr
             { L"vr", L"board_diorama_height", L"0.45" },
             { L"vr", L"board_diorama_below", L"0.15" },
             { L"controls", L"gear_cross_x_rate", L"1.0" },
-            { L"controls", L"gear_menu", L"cross" },
+            { L"controls", L"gear_menu", L"radial" },
             { L"controls", L"stick_walk", L"1" },
             { L"controls", L"finger_tracking", L"0" },
             { L"controls", L"finger_rest_curl", L"0" },
@@ -123,7 +124,7 @@ namespace trlvr
             { L"vr", L"cull_fov_degrees", L"120" },
 
             { L"controls", L"controllers", L"1" },
-            { L"controls", L"immersive_controls", L"0" },
+            { L"controls", L"immersive_controls", L"1" },
             { L"controls", L"left_handed", L"0" },
             { L"controls", L"two_handed_guns", L"1" },
             { L"controls", L"pistol_mode", L"akimbo" },
@@ -210,7 +211,7 @@ namespace trlvr
             L"; 0 preserves the normal third-person game exactly.\r\n"
             L"first_person = 0\r\n"
             L"; Experimental hands cut from Lara's source mesh at controller poses.\r\n"
-            L"first_person_tracked_hands = 0\r\n"
+            L"first_person_tracked_hands = 1\r\n"
             L"; hands = only Lara's hands are drawn in first person; full = her\r\n"
             L"; whole body (head removed), arms bent to reach the controllers.\r\n"
             L"first_person_body = hands\r\n"
@@ -255,7 +256,7 @@ namespace trlvr
             L"; shoulder (close behind Lara, life size) or board (Lara a few\r\n"
             L"; inches tall on a tabletop world); all = start in classic and let\r\n"
             L"; the view switch cycle classic, shoulder, board, first person.\r\n"
-            L"third_person_mode = classic\r\n"
+            L"third_person_mode = all\r\n"
             L"; Seconds the third-person camera position takes to catch up.\r\n"
             L"third_person_smoothing = 0.12\r\n"
             L"; Shoulder camera, metres: behind, above and to the right.\r\n"
@@ -332,6 +333,9 @@ namespace trlvr
             L"; round into the scene). Screen width and distance in metres.\r\n"
             L"cutscene_mode = normal\r\n"
             L"cutscene_screen_width = 3.0\r\n"
+            L"; Window height in metres; 0 = 16:9 from the width. Drag the\r\n"
+            L"; corner handle in game to set width and height.\r\n"
+            L"cutscene_screen_height = 0\r\n"
             L"cutscene_screen_distance = 2.5\r\n"
             L"; Theatre scene scale: auto (every shot scaled so Lara sits at\r\n"
             L"; the screen, like a 3D film) or a number (1 = life size).\r\n"
@@ -351,7 +355,9 @@ namespace trlvr
             L"board_diorama_depth = 0.6\r\n"
             L"board_diorama_height = 0.45\r\n"
             L"board_diorama_below = 0.15\r\n"
-            L"; Eye height above Lara's HeadSegment joint, in game units.\r\n"
+            L"; First person: eye height above Lara's HeadSegment joint, in\r\n"
+            L"; game units (about 3 per cm). Lower it if your view sits too\r\n"
+            L"; high on her body (e.g. 55 = 5 cm lower); -100 to 180.\r\n"
             L"first_person_eye_height = 70\r\n"
             L"; Legacy setting: the eye anchor now stays fixed relative to Lara's root.\r\n"
             L"first_person_smoothing = 0.08\r\n"
@@ -372,12 +378,12 @@ namespace trlvr
             L"[controls]\r\n"
             L"controllers = 1\r\n"
             L"; 1 enables body-relative gestures. Chest + left grip toggles the personal light.\r\n"
-            L"immersive_controls = 0\r\n"
+            L"immersive_controls = 1\r\n"
             L"; Gear in immersive third person: cross (the 3D gear cross by your\r\n"
             L"; hip) or radial (hold the left stick in, then push it toward the\r\n"
             L"; item: up medipack, right binoculars, down weapon, left light).\r\n"
             L"; With immersive_controls = 0 the radial menu is always used.\r\n"
-            L"gear_menu = cross\r\n"
+            L"gear_menu = radial\r\n"
             L"; 1 = a light push of the move stick walks (holds the game's Walk\r\n"
             L"; key), a full push runs. walk_key = shift or ctrl.\r\n"
             L"stick_walk = 1\r\n"
@@ -546,6 +552,36 @@ namespace trlvr
         }
     }
 
+    void config_set_theatre_size(float width, float height, bool save)
+    {
+        g_config.cutscene_screen_width = width;
+        g_config.cutscene_screen_height = height;
+        if (!save)
+            return;
+        wchar_t w[32]{}, h[32]{};
+        swprintf_s(w, L"%.2f", width);
+        swprintf_s(h, L"%.2f", height);
+        save_setting(L"vr", L"cutscene_screen_width", w);
+        save_setting(L"vr", L"cutscene_screen_height", h);
+    }
+
+    void config_set_diorama_size(float width, float height, float below,
+                                 bool save)
+    {
+        g_config.board_diorama_width = width;
+        g_config.board_diorama_height = height;
+        g_config.board_diorama_below = below;
+        if (!save)
+            return;
+        wchar_t w[32]{}, h[32]{}, b[32]{};
+        swprintf_s(w, L"%.2f", width);
+        swprintf_s(h, L"%.2f", height);
+        swprintf_s(b, L"%.2f", below);
+        save_setting(L"vr", L"board_diorama_width", w);
+        save_setting(L"vr", L"board_diorama_height", h);
+        save_setting(L"vr", L"board_diorama_below", b);
+    }
+
     void config_set_left_handed(bool on)
     {
         g_config.left_handed = on;
@@ -648,7 +684,7 @@ namespace trlvr
         g_config.camera_shake = read_bool(L"vr", L"camera_shake", false, path);
         g_config.first_person = read_bool(L"vr", L"first_person", false, path);
         g_config.first_person_tracked_hands = read_bool(
-            L"vr", L"first_person_tracked_hands", false, path);
+            L"vr", L"first_person_tracked_hands", true, path);
         {
             wchar_t body[32] = {};
             GetPrivateProfileStringW(L"vr", L"first_person_body", L"hands",
@@ -721,7 +757,7 @@ namespace trlvr
         }
         {
             wchar_t mode[32] = {};
-            GetPrivateProfileStringW(L"vr", L"third_person_mode", L"classic",
+            GetPrivateProfileStringW(L"vr", L"third_person_mode", L"all",
                                      mode, 32, path);
             g_config.third_person_mode =
                 _wcsicmp(mode, L"shoulder") == 0 ? 1
@@ -802,6 +838,10 @@ namespace trlvr
                                         _wcsicmp(mode, L"theater") == 0 ||
                                         _wcsicmp(mode, L"1") == 0;
         }
+        value = read_float(L"vr", L"cutscene_screen_height", L"0", path);
+        g_config.cutscene_screen_height =
+            std::isfinite(value) && value >= 0.1f && value <= 10.0f
+                ? value : 0.0f;
         value = read_float(L"vr", L"cutscene_screen_width", L"3.0", path);
         g_config.cutscene_screen_width = std::isfinite(value)
             ? (value < 0.5f ? 0.5f : value > 20.0f ? 20.0f : value) : 3.0f;
@@ -853,7 +893,7 @@ namespace trlvr
         }
         value = read_float(L"vr", L"first_person_eye_height", L"70", path);
         g_config.first_person_eye_height =
-            value >= 0.0f && value <= 180.0f ? value : 70.0f;
+            value >= -100.0f && value <= 180.0f ? value : 70.0f;
         value = read_float(L"vr", L"first_person_smoothing", L"0.08", path);
         g_config.first_person_smoothing =
             value >= 0.0f && value <= 1.0f ? value : 0.08f;
@@ -871,10 +911,10 @@ namespace trlvr
 
         g_config.controllers = read_bool(L"controls", L"controllers", true, path);
         g_config.immersive_controls =
-            read_bool(L"controls", L"immersive_controls", false, path);
+            read_bool(L"controls", L"immersive_controls", true, path);
         {
             wchar_t menu[32] = {};
-            GetPrivateProfileStringW(L"controls", L"gear_menu", L"cross",
+            GetPrivateProfileStringW(L"controls", L"gear_menu", L"radial",
                                      menu, 32, path);
             g_config.gear_menu_radial = _wcsicmp(menu, L"radial") == 0;
         }

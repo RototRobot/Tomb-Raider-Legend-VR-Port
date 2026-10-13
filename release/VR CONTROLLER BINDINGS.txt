@@ -9,11 +9,12 @@ The keyboard and mouse continue to work at the same time.
 HP REVERB G2 / OCULUS TOUCH
 ----------------------------
 Left stick                  Move Lara (W / A / S / D)
-Left stick short click      Pause; menu back (Escape)
+Left stick short click      Gear menu: push the stick towards an item
+                            (up health pack, right binoculars,
+                            down switch weapon, left personal light);
+                            in menus: back (Escape)
 Left stick double click     Recenter the VR view
-Left stick long click       Gear menu: keep holding, push the stick towards
-                            an item (up health pack, right binoculars,
-                            down switch weapon, left personal light)
+Left stick long click       Pause (Escape)
 
 Right stick                 Turn the camera (mouse movement)
 Right stick short click     Switch weapons (End)
@@ -36,7 +37,8 @@ Left Y held                 Board mode: flick Lara over (board_god_hand)
 VALVE INDEX CONTROLLERS
 -----------------------
 Left joystick               Move Lara (W / A / S / D)
-Left joystick short click   Pause; menu back (Escape)
+Left joystick short click   Gear menu (push the joystick towards an
+                            item, as above); in menus: back (Escape)
 Left joystick double click  Recenter the VR view
 Right joystick              Turn the camera (mouse movement)
 Right joystick click        Switch weapons (End)
@@ -53,17 +55,17 @@ Left A                      Accurate/free aim (Z)
 Left B short press          Grenade / flare (K)
 Left B long press           Personal light / flashlight (Delete)
 Left B held                 Board mode: flick Lara over (board_god_hand)
-Left trackpad click         Gear menu (then push the left joystick
-                            towards an item, as above)
+Left trackpad click         Pause (Escape)
 Right trackpad click        Use binoculars (Page Down)
 
 
 ORIGINAL WINDOWS MIXED REALITY CONTROLLERS
 ------------------------------------------
 Left joystick               Move Lara (W / A / S / D)
-Left joystick short click   Pause; menu back (Escape)
+Left joystick short click   Gear menu (push the stick towards an item);
+                            in menus: back (Escape)
 Left joystick double click  Recenter the VR view
-Left joystick long click    Gear menu (push the stick towards an item)
+Left joystick long click    Pause (Escape)
 
 Right joystick              Turn the camera (mouse movement)
 Right joystick short click  Switch weapons (End)

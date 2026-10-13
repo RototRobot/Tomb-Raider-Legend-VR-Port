@@ -965,7 +965,9 @@ namespace trlvr
             if (config().immersive_controls)
                 return vr_input_holster_hand_drawn(true) &&
                        vr_input_holster_hand_drawn(false);
-            return retail_combat_state() != 0;
+            // The combat state is never zero (0x23/0x24/0x2D walking,
+            // log 2026-10-12); the guns-out flag is the real test.
+            return retail_weapons_out();
         }
 
         // The hand the aim ray (and crosshair) follows: the handedness
@@ -5551,6 +5553,9 @@ namespace trlvr
         Mat4 first_person_hand_delta(int hand, const Mat4& original_wrist,
                                      const Mat4& controller)
         {
+            // Immersive controls off: her animated hands, untracked.
+            if (!config().immersive_controls)
+                return Mat4::identity();
             // On the handlebar: her hand on the bar (the bar pose learned
             // while she was not shooting).
             if (camera_bike_hand_on_bar(hand))
@@ -5791,7 +5796,7 @@ namespace trlvr
             }
             if (config().immersive_controls)
                 return vr_input_holster_hand_drawn(hand == 0);
-            return retail_combat_state() != 0;
+            return retail_weapons_out();
         }
 
         // Lara's long gun is out (moved onto a controller this frame). The
@@ -6420,6 +6425,10 @@ namespace trlvr
         void __cdecl detour_build_transforms(void* instance)
         {
             g_build_transforms(instance);
+            // Immersive controls off: guns stay where her animation holds
+            // them (the drawn copy is the gameplay copy).
+            if (!config().immersive_controls)
+                return;
             if (!g_first_person_active || !g_first_person_instance ||
                 !instance || instance == g_first_person_instance ||
                 g_first_person_wrist_segment[1] < 0)
@@ -6688,6 +6697,11 @@ namespace trlvr
                     instance, a2, a3, a4, a5, model, a7, colour,
                     transform, object, name, link_marker))
                 return true;
+            // Immersive controls off: her hands are her animated ones, so
+            // her guns are drawn where the game holds them (user
+            // 2026-10-12: they did not show in her hands).
+            if (!config().immersive_controls)
+                return false;
             // Evidence for how each weapon is attached, once per name and
             // drawn state: parent (Lara or not), link bone/marker, and its
             // distance from each animated wrist.
@@ -12241,14 +12255,39 @@ namespace trlvr
             }
             // Other Lara model variants can share the same instance. They
             // must not bring a second animated head into the headset view.
+            static int diag[4] = {};
             if (model && model != g_first_person_model)
+            {
+                if (!diag[0]++)
+                    log("first-person: Lara drawn with another model %p (hers "
+                        "%p); skipped", model, g_first_person_model);
                 return;
+            }
             pouch_items_draw(a2, a3, a4, a5);
 
+            // Without immersive controls the hands are not tracked (user
+            // 2026-10-12: hands / body did not show): her own animated
+            // hands and body are drawn (first_person_hand_delta is the
+            // identity), and lost controller tracking does not hide them.
+            const bool animated_hands = !config().immersive_controls;
             Mat4 controllers[2];
-            if (!first_person_controller_world_pose(true, &controllers[0]) ||
+            if (animated_hands)
+            {
+                for (int hand = 0; hand < 2; ++hand)
+                    if (!first_person_controller_world_pose(hand == 0,
+                                                            &controllers[hand]))
+                        controllers[hand] = Mat4::identity();
+                if (!diag[3]++)
+                    log("first-person: immersive controls off -- Lara's own "
+                        "animated hands%s are drawn", config().first_person_full_body
+                        ? " and body" : "");
+            }
+            else if (!first_person_controller_world_pose(true, &controllers[0]) ||
                 !first_person_controller_world_pose(false, &controllers[1]))
             {
+                if (!diag[1]++)
+                    log("first-person: hands not drawn -- controller tracking "
+                        "unavailable");
                 for (LedgeHandGrip& grip : g_ledge_hand_grip)
                     grip.in_grab_zone = false;
                 g_grab_zone_debug.valid = false;
@@ -12292,7 +12331,14 @@ namespace trlvr
                 valid = false;
             }
             if (!valid)
+            {
+                if (!diag[2]++)
+                    log("first-person: hands not drawn -- model data or wrist "
+                        "segments unavailable (wrists %d/%d of %d)",
+                        g_first_person_wrist_segment[0],
+                        g_first_person_wrist_segment[1], count);
                 return;
+            }
             bike_frame_update(matrices);
 
             bool hand_bone[2][512]{};
@@ -12945,6 +12991,11 @@ namespace trlvr
         // aim ray is ours -- so combat is left entirely to retail.
         bool first_person_combat_locomotion()
         {
+            // (Both modes: the combat state never reads zero, so first
+            // person always uses retail combat locomotion -- strafing and
+            // walking back. Gating it on the guns-out flag without
+            // immersive controls stopped Lara walking backwards, user
+            // 2026-10-12.)
             return vr_input_holster_combat_held() ||
                    retail_combat_state() != 0;
         }
@@ -16285,13 +16336,26 @@ namespace trlvr
         }
     }
 
+    // God hand (pick-up, palm platform, flick) only at board size or
+    // smaller (user 2026-10-12: it worked in shoulder mode once the palm
+    // sliders had scaled the world up at all). Board's default shows Lara
+    // board_lara_height_cm tall, a factor of about 175 / 15; a little
+    // under that still counts.
+    bool god_hand_scale()
+    {
+        const float board = 175.0f /
+            fmaxf(1.0f, config().board_lara_height_cm);
+        return camera_world_scale_factor() >= 0.9f * board;
+    }
+
     void camera_board_pluck_update(bool active, const bool grip[2],
                                    bool claimed[2])
     {
         claimed[0] = claimed[1] = false;
         const float factor = camera_world_scale_factor();
         void* lara = nullptr;
-        bool ok = active && factor > 1.001f && !g_first_person_active &&
+        bool ok = active && factor > 1.001f && god_hand_scale() &&
+                  !g_first_person_active &&
                   config().immersive_controls && config().board_god_hand;
         __try
         {
@@ -16747,7 +16811,7 @@ namespace trlvr
             {
             }
         }
-        const bool board = active && camera_world_scale_factor() > 1.001f &&
+        const bool board = active && god_hand_scale() &&
             !g_first_person_active && config().immersive_controls &&
             config().board_god_hand && g_pluck.hand != 0;
         if (!board)

@@ -45,6 +45,41 @@ namespace trlvr
             DWORD colour;
         };
 
+        // Clip a segment (eye texture u, v) to its own eye's half of the
+        // side-by-side target, u in 0..1. Overlay lines accept points a
+        // little outside the view so edges stay drawn; a point close to the
+        // eye projects far outside, and the line then reached into the
+        // other eye's half as a warped mirror copy (user 2026-10-12: the
+        // crosshair and the medipack outline near the face).
+        bool clip_eye_segment(float a[2], float b[2])
+        {
+            float t0 = 0.0f, t1 = 1.0f;
+            const float du = b[0] - a[0];
+            const float p[2] = { -du, du };
+            const float q[2] = { a[0] - 0.0f, 1.0f - a[0] };
+            for (int i = 0; i < 2; ++i)
+            {
+                if (fabsf(p[i]) < 1.0e-9f)
+                {
+                    if (q[i] < 0.0f)
+                        return false;
+                    continue;
+                }
+                const float r = q[i] / p[i];
+                if (p[i] < 0.0f)
+                    t0 = fmaxf(t0, r);
+                else
+                    t1 = fminf(t1, r);
+                if (t0 > t1)
+                    return false;
+            }
+            const float a0 = a[0], a1 = a[1];
+            const float dv = b[1] - a[1];
+            a[0] = a0 + du * t0;  a[1] = a1 + dv * t0;
+            b[0] = a0 + du * t1;  b[1] = a1 + dv * t1;
+            return true;
+        }
+
         void draw_hand_lines(IDirect3DSurface9* back,
                              const D3DSURFACE_DESC& desc,
                              const DebugLineVertex* lines, unsigned used)
@@ -976,10 +1011,10 @@ namespace trlvr
         {
             if (g_theatre_drawn || !g_device || !stereo_same_frame_active())
                 return;
-            static float points[64][3];
-            static unsigned colours[64];
+            static float points[96][3];
+            static unsigned colours[96];
             float alpha = 1.0f;
-            const unsigned count = vr_theatre_surround(points, colours, 64,
+            const unsigned count = vr_theatre_surround(points, colours, 96,
                                                        &alpha);
             if (!count)
                 return;
@@ -1349,30 +1384,41 @@ namespace trlvr
             // eye here: drawn as a 3D triangle list it never showed (user
             // 2026-10-10, three builds, though the log saw it drawn mid-view).
             {
-                static float bar[6][3];
-                unsigned bar_colour = 0;
-                const unsigned bar_count = vr_diorama_handle(bar, 6,
-                                                             &bar_colour);
-                if (bar_count == 6)
+                static float bar[30][3];
+                static unsigned bar_colours[30];
+                const unsigned bar_count = vr_diorama_handle(bar, 30,
+                                                             bar_colours);
+                if (bar_count >= 6)
                 {
-                    const DWORD colour = 0xFF000000u |
-                                         (bar_colour & 0xFFFFFFu);
                     const float eye_w = 0.5f * w;
                     unsigned drawn = 0;
                     for (int eye_index = 0; eye_index < 2; ++eye_index)
                     {
-                        FlatVertex flat[6];
-                        bool seen = true;
-                        for (unsigned i = 0; i < 6 && seen; ++i)
+                        FlatVertex flat[30];
+                        unsigned kept = 0;
+                        // Whole triangles that project in this eye.
+                        for (unsigned tri = 0; tri + 3 <= bar_count; tri += 3)
                         {
-                            float u = 0.0f, v = 0.0f;
-                            seen = vr_project_head_point(
-                                eye_index ? EyeRight : EyeLeft, bar[i][0],
-                                bar[i][1], bar[i][2], &u, &v);
-                            flat[i] = { eye_w * eye_index + u * eye_w - 0.5f,
-                                        v * h - 0.5f, 0.0f, 1.0f, colour };
+                            FlatVertex v3[3];
+                            bool corner_ok = true;
+                            for (unsigned c = 0; c < 3 && corner_ok; ++c)
+                            {
+                                const unsigned i = tri + c;
+                                float u = 0.0f, v = 0.0f;
+                                corner_ok = vr_project_head_point(
+                                    eye_index ? EyeRight : EyeLeft, bar[i][0],
+                                    bar[i][1], bar[i][2], &u, &v);
+                                v3[c] = { eye_w * eye_index + u * eye_w - 0.5f,
+                                          v * h - 0.5f, 0.0f, 1.0f,
+                                          0xFF000000u |
+                                              (bar_colours[i] & 0xFFFFFFu) };
+                            }
+                            if (!corner_ok)
+                                continue;
+                            for (unsigned c = 0; c < 3; ++c)
+                                flat[kept++] = v3[c];
                         }
-                        if (!seen)
+                        if (!kept)
                             continue;
                         // Everywhere but the hands' mark, so a hand on the
                         // bar shows over it as in the theatre (user
@@ -1383,8 +1429,20 @@ namespace trlvr
                         g_device->SetRenderState(D3DRS_STENCILREF,
                                                  kTheatreHandStencil);
                         g_device->SetRenderState(D3DRS_STENCILMASK, 0xFF);
-                        g_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, 2,
-                                                  flat, sizeof(FlatVertex));
+                        // Its own eye's half only (user 2026-10-12: a
+                        // handle near one eye drew a warped copy into the
+                        // other, as the crosshair had).
+                        const RECT half = {
+                            (LONG)(eye_w * eye_index), 0,
+                            (LONG)(eye_w * (eye_index + 1)), (LONG)h };
+                        g_device->SetScissorRect(&half);
+                        g_device->SetRenderState(D3DRS_SCISSORTESTENABLE,
+                                                 TRUE);
+                        g_device->DrawPrimitiveUP(D3DPT_TRIANGLELIST,
+                                                  kept / 3, flat,
+                                                  sizeof(FlatVertex));
+                        g_device->SetRenderState(D3DRS_SCISSORTESTENABLE,
+                                                 FALSE);
                         ++drawn;
                     }
                     static bool bar_reported = false;
@@ -2270,10 +2328,14 @@ namespace trlvr
                     const int j = (i + 1) % 24;
                     if (!ok[i] || !ok[j])
                         continue;
-                    lines[used++] = { eye_w * (eye_index + uv[i][0]),
-                        desc.Height * uv[i][1], 0.0f, 1.0f, colour };
-                    lines[used++] = { eye_w * (eye_index + uv[j][0]),
-                        desc.Height * uv[j][1], 0.0f, 1.0f, colour };
+                    float ca[2] = { uv[i][0], uv[i][1] };
+                    float cb[2] = { uv[j][0], uv[j][1] };
+                    if (!clip_eye_segment(ca, cb))
+                        continue;
+                    lines[used++] = { eye_w * (eye_index + ca[0]),
+                        desc.Height * ca[1], 0.0f, 1.0f, colour };
+                    lines[used++] = { eye_w * (eye_index + cb[0]),
+                        desc.Height * cb[1], 0.0f, 1.0f, colour };
                 }
             }
             draw_hand_lines(back, desc, lines, used);
@@ -3175,7 +3237,8 @@ namespace trlvr
                                      uv[e][0] > -0.5f && uv[e][0] < 1.5f &&
                                      uv[e][1] > -0.5f && uv[e][1] < 1.5f;
                             if (!ok ||
-                                used + 2 > sizeof(lines) / sizeof(lines[0]))
+                                used + 2 > sizeof(lines) / sizeof(lines[0]) ||
+                                !clip_eye_segment(uv[0], uv[1]))
                                 continue;
                             lines[used++] = { eye_width * (eye_index + uv[0][0]),
                                               desc.Height * uv[0][1], 0.0f,
@@ -3308,7 +3371,8 @@ namespace trlvr
                                  uv[e][0] > -0.5f && uv[e][0] < 1.5f &&
                                  uv[e][1] > -0.5f && uv[e][1] < 1.5f;
                         }
-                        if (!ok || used + 2 > sizeof(lines) / sizeof(lines[0]))
+                        if (!ok || used + 2 > sizeof(lines) / sizeof(lines[0]) ||
+                            !clip_eye_segment(uv[0], uv[1]))
                             continue;
                         lines[used++] = { eye_width * (eye_index + uv[0][0]),
                                           desc.Height * uv[0][1], 0.0f, 1.0f,
@@ -3381,8 +3445,12 @@ namespace trlvr
                            uv[0] > -0.5f && uv[0] < 1.5f &&
                            uv[1] > -0.5f && uv[1] < 1.5f;
                 };
-                auto emit = [&](const float* from, const float* to)
+                auto emit = [&](const float* from_in, const float* to_in)
                 {
+                    float from[2] = { from_in[0], from_in[1] };
+                    float to[2] = { to_in[0], to_in[1] };
+                    if (!clip_eye_segment(from, to))
+                        return;
                     lines[used++] = { eye_width * (eye_index + from[0]),
                                       desc.Height * from[1], 0.0f, 1.0f,
                                       colour };
@@ -3453,16 +3521,18 @@ namespace trlvr
                         &uv[0], &uv[1]) &&
                         uv[0] > -0.5f && uv[0] < 1.5f &&
                         uv[1] > -0.5f && uv[1] < 1.5f;
-                    if (ok && have_previous)
+                    float ca[2] = { previous[0], previous[1] };
+                    float cb[2] = { uv[0], uv[1] };
+                    if (ok && have_previous && clip_eye_segment(ca, cb))
                         for (int offset = 0; offset < 2; ++offset)
                         {
                             lines[used++] = {
-                                eye_width * (eye_index + previous[0]) +
-                                    offset, desc.Height * previous[1],
+                                eye_width * (eye_index + ca[0]) +
+                                    offset, desc.Height * ca[1],
                                 0.0f, 1.0f, colour };
                             lines[used++] = {
-                                eye_width * (eye_index + uv[0]) + offset,
-                                desc.Height * uv[1], 0.0f, 1.0f, colour };
+                                eye_width * (eye_index + cb[0]) + offset,
+                                desc.Height * cb[1], 0.0f, 1.0f, colour };
                         }
                     have_previous = ok;
                     previous[0] = uv[0];

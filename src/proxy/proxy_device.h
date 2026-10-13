@@ -261,6 +261,8 @@ namespace trlvr
                 D3DRS_TWOSIDEDSTENCILMODE };
             DWORD saved_stencil[8]{};
             bool restore_stencil = false;
+            DWORD saved_zfunc = 0;
+            bool restore_zfunc = false;
             if (vr_dark_room_active() && !camera_first_person_active())
             {
                 const int gpu_hand = camera_first_person_current_gpu_hand();
@@ -294,6 +296,18 @@ namespace trlvr
                                             D3DSTENCILOP_KEEP);
                     _device->SetRenderState(D3DRS_TWOSIDEDSTENCILMODE, FALSE);
                     restore_stencil = true;
+                    // Diorama (user 2026-10-12: hands vanished in the dark
+                    // before reaching the handle): the board world outside
+                    // the box still holds depth under the dark room, and a
+                    // hand behind it was neither drawn nor marked. There the
+                    // hands are drawn over everything.
+                    if (vr_diorama_active() &&
+                        SUCCEEDED(_device->GetRenderState(D3DRS_ZFUNC,
+                                                          &saved_zfunc)))
+                    {
+                        _device->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
+                        restore_zfunc = true;
+                    }
                 }
             }
 
@@ -303,6 +317,8 @@ namespace trlvr
                     for (int s = 0; s < 8; ++s)
                         _device->SetRenderState(kStencilStates[s],
                                                 saved_stencil[s]);
+                if (restore_zfunc)
+                    _device->SetRenderState(D3DRS_ZFUNC, saved_zfunc);
                 if (restore_clip_planes)
                     _device->SetRenderState(D3DRS_CLIPPLANEENABLE,
                                             saved_clip_planes);

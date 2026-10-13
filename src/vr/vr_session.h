@@ -240,6 +240,13 @@ namespace trlvr
     // in the head frame, game units -- the same for every controller,
     // since calibration fits the model to the real hand.
     bool vr_hand_palm_head_position(bool left, float out[3]);
+    // Lara's index fingertip, estimated: 9 cm from the palm along the
+    // grip's forward. Head frame (game units) / body frame (metres).
+    // Interaction zones (gear cross, sliders, theatre handles) accept it
+    // as well as the palm (user 2026-10-12).
+    bool vr_hand_fingertip_head_position(bool left, float out[3]);
+    bool vr_hand_fingertip_body_position(bool left, float* right, float* up,
+                                         float* forward);
     // A head-frame point (game units) in the body frame of
     // vr_controller_body_position (metres: right, up, forward).
     bool vr_head_point_body_position(const float head[3], float* right,
@@ -275,9 +282,10 @@ namespace trlvr
     // forward) in the recentred frame. camera_head places the board seat
     // by it, so the world moves with the box.
     void vr_board_offset(float out[3]);
-    // The diorama's handle bar as head-frame triangles, and its colour.
+    // The diorama's handle bar and size handle as head-frame triangles,
+    // with a colour per vertex (0xRRGGBB); 18 vertices.
     unsigned vr_diorama_handle(float (*out)[3], unsigned max,
-                               unsigned* colour);
+                               unsigned* colours);
     unsigned vr_diorama_openings(float (*out)[3], unsigned max,
                                  bool* eye_inside);
     // The dark room (theatre or diorama) is being drawn this frame.
