@@ -84,6 +84,17 @@ namespace trlvr
         // body_soft_angle degrees.
         bool body_soft = true;
         float body_soft_angle = 12.0f;
+        // Third person (2026-10-14): how loose the soft parts are sideways
+        // -- their side-to-side frequency in Hz (lower swings wider and
+        // slower; up and down stays at 2.2) -- and how quickly a swing
+        // dies away (damping ratio; lower rings longer).
+        float body_soft_sway_hz = 1.8f;
+        float body_soft_damping = 0.14f;
+        // Soft parts' shape (2026-10-14): squash and stretch along the bone
+        // (0 none .. 1 strong, volume kept) and how much of a lighter second
+        // mass's overrun -- the ripple on top of the swing -- is shown.
+        float body_soft_stretch = 0.5f;
+        float body_soft_ripple = 0.4f;
         bool hmd_aim = true;
         float world_scale = 291.0f;
         float head_rotation_scale = 1.0f;
@@ -144,6 +155,16 @@ namespace trlvr
         // cycles classic -> shoulder -> board -> first person (2026-10-06).
         bool view_cycle_all = true;
         float third_person_smoothing = 0.12f;   // seconds
+        // Seconds a view switch takes to glide from one view to the next
+        // (position and world scale); 0 cuts.
+        float view_transition_seconds = 0.3f;
+        // Picture (2026-10-14): brightness (-0.5 .. 0.5, added) and contrast
+        // (0.5 .. 2, about mid grey) on the frame sent to the headset, and
+        // whether the game's own brightness / contrast sliders (its gamma
+        // ramp, ignored by Windows in a window) are applied too.
+        float picture_brightness = 0.0f;
+        float picture_contrast = 1.0f;
+        bool picture_follow_game = true;
         float shoulder_distance = 1.3f;         // metres behind the focus
         float shoulder_height = 0.0f;           // metres above it
         float shoulder_side = 0.35f;            // metres to the right
@@ -297,6 +318,11 @@ namespace trlvr
     };
 
     const Config& config();
+    // For the in-game settings overlay: the live values, and one key
+    // written to trlvr.ini. Everything else reads config().
+    Config& config_edit();
+    void config_save_setting(const wchar_t* section, const wchar_t* key,
+                             const wchar_t* value);
     // Hardcore first person from the pause menu: set and saved.
     void config_set_first_person_hardcore(bool on);
     // The other VR Settings toggles (pause menu, 2026-10-10): each sets the

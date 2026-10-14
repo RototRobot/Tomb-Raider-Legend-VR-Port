@@ -120,6 +120,9 @@ namespace trlvr
         XrButtonSecondary,  // B / Y (Index: B)
         XrButtonTrackpad,   // Index and WMR
         XrButtonMenu,       // WMR menu, left Touch menu
+        // Capacitive sensors (Touch, Index): a finger resting on them.
+        XrTouchTrigger,     // index finger on the trigger
+        XrTouchThumb,       // thumb on the stick, a face button or the rest
         XrButtonCount
     };
 

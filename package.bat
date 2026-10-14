@@ -53,6 +53,7 @@ copy /y "!ROOT!NOTICE"                         "!DEST!\Licences\NOTICE.txt" >nul
 copy /y "!ROOT!THIRD_PARTY_NOTICES.md"         "!DEST!\Licences\THIRD_PARTY_NOTICES.txt" >nul
 copy /y "!ROOT!dxvk-trlvr\LICENSE"             "!DEST!\Licences\DXVK-LICENSE.txt" >nul
 copy /y "!ROOT!third_party\openxr\LICENSE"     "!DEST!\Licences\OpenXR-SDK-LICENSE.txt" >nul
+copy /y "!ROOT!third_party\imgui\LICENSE.txt"  "!DEST!\Licences\DearImGui-LICENSE.txt" >nul
 
 rem Retired from the package. The XInput proxy stopped shipping when the
 rem controllers moved to keyboard and mouse -- see src/vr/vr_input.cpp. OpenVR

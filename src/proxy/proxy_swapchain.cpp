@@ -2,6 +2,7 @@
 #include "gpu_profile.h"
 #include "../vr/perf_cpu.h"
 #include "window.h"
+#include "overlay.h"
 #include "../vr/vr_session.h"
 #include "../vr/vr_submit.h"
 #include "../vr/tune.h"
@@ -75,6 +76,10 @@ namespace trlvr
 
         else
             gpu_profile_frame_end();
+
+        // After the frame has gone to the headset, so the settings overlay
+        // is on the desktop window only.
+        overlay_frame(_chain);
 
         const HRESULT hr = _chain->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
         perf_cpu_present_end();

@@ -37,6 +37,14 @@ namespace trlvr
             { L"vr", L"submit", L"1" },
             { L"vr", L"xr_runtime_json", L"" },
             { L"vr", L"xr_copy_wait", L"1" },
+            { L"vr", L"view_transition_seconds", L"0.3" },
+            { L"vr", L"picture_brightness", L"0" },
+            { L"vr", L"picture_contrast", L"1" },
+            { L"vr", L"picture_follow_game", L"1" },
+            { L"vr", L"body_soft_sway_hz", L"1.8" },
+            { L"vr", L"body_soft_damping", L"0.14" },
+            { L"vr", L"body_soft_stretch", L"0.5" },
+            { L"vr", L"body_soft_ripple", L"0.4" },
             { L"vr", L"stereo", L"1" },
             { L"vr", L"stereo_same_frame", L"1" },
             { L"vr", L"stereo_lock_pose", L"1" },
@@ -558,6 +566,17 @@ namespace trlvr
         }
     }
 
+    Config& config_edit()
+    {
+        return g_config;
+    }
+
+    void config_save_setting(const wchar_t* section, const wchar_t* key,
+                             const wchar_t* value)
+    {
+        save_setting(section, key, value);
+    }
+
     void config_set_theatre_size(float width, float height, bool save)
     {
         g_config.cutscene_screen_width = width;
@@ -817,6 +836,29 @@ namespace trlvr
         value = read_float(L"vr", L"body_soft_angle", L"12", path);
         g_config.body_soft_angle = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 30.0f ? 30.0f : value) : 12.0f;
+        value = read_float(L"vr", L"body_soft_sway_hz", L"1.8", path);
+        g_config.body_soft_sway_hz = std::isfinite(value)
+            ? (value < 0.8f ? 0.8f : value > 4.0f ? 4.0f : value) : 1.8f;
+        value = read_float(L"vr", L"body_soft_damping", L"0.14", path);
+        g_config.body_soft_damping = std::isfinite(value)
+            ? (value < 0.03f ? 0.03f : value > 0.6f ? 0.6f : value) : 0.14f;
+        value = read_float(L"vr", L"picture_brightness", L"0", path);
+        g_config.picture_brightness = std::isfinite(value)
+            ? (value < -0.5f ? -0.5f : value > 0.5f ? 0.5f : value) : 0.0f;
+        value = read_float(L"vr", L"picture_contrast", L"1", path);
+        g_config.picture_contrast = std::isfinite(value)
+            ? (value < 0.5f ? 0.5f : value > 2.0f ? 2.0f : value) : 1.0f;
+        g_config.picture_follow_game =
+            read_bool(L"vr", L"picture_follow_game", true, path);
+        value = read_float(L"vr", L"body_soft_stretch", L"0.5", path);
+        g_config.body_soft_stretch = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.5f;
+        value = read_float(L"vr", L"body_soft_ripple", L"0.4", path);
+        g_config.body_soft_ripple = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.4f;
+        value = read_float(L"vr", L"view_transition_seconds", L"0.3", path);
+        g_config.view_transition_seconds = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 2.0f ? 2.0f : value) : 0.3f;
         value = read_float(L"vr", L"body_spring_angle", L"4", path);
         g_config.body_spring_angle = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 15.0f ? 15.0f : value) : 4.0f;

@@ -304,6 +304,8 @@ namespace trlvr
             g_act_button[XrButtonSecondary] = make_action("secondary", "B / Y button", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_act_button[XrButtonTrackpad] = make_action("trackpad", "Trackpad press", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_act_button[XrButtonMenu] = make_action("menu", "Menu button", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_act_button[XrTouchTrigger] = make_action("trigger_touch", "Finger on the trigger", XR_ACTION_TYPE_BOOLEAN_INPUT);
+            g_act_button[XrTouchThumb] = make_action("thumb_touch", "Thumb on the controller", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_act_grip = make_action("grip_pose", "Hand grip pose", XR_ACTION_TYPE_POSE_INPUT);
             g_act_haptic = make_action("haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT);
 
@@ -319,6 +321,13 @@ namespace trlvr
                 {&g_act_button[XrButtonMenu], 0, "/input/menu/click"},
                 {&g_act_button[XrButtonPrimary], 1, "/input/a/click"},
                 {&g_act_button[XrButtonSecondary], 1, "/input/b/click"},
+                {&g_act_button[XrTouchTrigger], -1, "/input/trigger/touch"},
+                {&g_act_button[XrTouchThumb], -1, "/input/thumbstick/touch"},
+                {&g_act_button[XrTouchThumb], -1, "/input/thumbrest/touch"},
+                {&g_act_button[XrTouchThumb], 0, "/input/x/touch"},
+                {&g_act_button[XrTouchThumb], 0, "/input/y/touch"},
+                {&g_act_button[XrTouchThumb], 1, "/input/a/touch"},
+                {&g_act_button[XrTouchThumb], 1, "/input/b/touch"},
                 {&g_act_grip, -1, "/input/grip/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
@@ -333,6 +342,11 @@ namespace trlvr
                 {&g_act_button[XrButtonPrimary], -1, "/input/a/click"},
                 {&g_act_button[XrButtonSecondary], -1, "/input/b/click"},
                 {&g_act_button[XrButtonTrackpad], -1, "/input/trackpad/force"},
+                {&g_act_button[XrTouchTrigger], -1, "/input/trigger/touch"},
+                {&g_act_button[XrTouchThumb], -1, "/input/thumbstick/touch"},
+                {&g_act_button[XrTouchThumb], -1, "/input/a/touch"},
+                {&g_act_button[XrTouchThumb], -1, "/input/b/touch"},
+                {&g_act_button[XrTouchThumb], -1, "/input/trackpad/touch"},
                 {&g_act_grip, -1, "/input/grip/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };

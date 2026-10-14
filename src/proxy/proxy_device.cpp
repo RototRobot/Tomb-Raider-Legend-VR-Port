@@ -156,6 +156,7 @@ namespace trlvr
 
         vr_submit_release_targets();
         reflection_stereo_release();
+        overlay_before_reset();
         const HRESULT hr = _device->Reset(pPresentationParameters);
         gpu_profile_set_device(_device);
 

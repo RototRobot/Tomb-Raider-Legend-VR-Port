@@ -109,7 +109,10 @@ namespace trlvr
         // Logical actions: one per g_game entry, then the held flick. A
         // handle is the id plus one, so zero still means "none".
         const int kLogicalFlick = kGameButtons;
-        const int kLogicalCount = kGameButtons + 1;
+        // The left stick held in, as it is: the radial gear menu is open
+        // for as long as it is.
+        const int kLogicalStickHeld = kGameButtons + 1;
+        const int kLogicalCount = kGameButtons + 2;
         const int kMoveHandle = kLogicalCount + 1;
         const int kLookHandle = kLogicalCount + 2;
         bool g_logical[kLogicalCount]{};
@@ -763,8 +766,8 @@ namespace trlvr
         ULONGLONG g_profile_next_check = 0;
         // The A press that skipped the last calibration step is not a jump.
         bool     g_cal_jump_hold = false;
-        // View switch: right stick long press (the binoculars action, free
-        // in both immersive views) and the \ key.
+        // View switch: right stick click (the weapon-switch action, free in
+        // both immersive views) and the \ key.
         bool     g_view_button_was = false;
         // A recentre a moment after the view switch (user 2026-10-06), once
         // the new camera has settled.
@@ -2175,11 +2178,30 @@ namespace trlvr
             const bool index = left == XrControllerIndex ||
                                right == XrControllerIndex;
 
-            // Stick clicks. The Index has trackpads for the long-press
-            // actions, so its sticks only click and double-click.
-            complex_update(g_complex_stick[0],
-                xr_input_button(0, XrButtonStick), now, GamePause,
-                GameRecentre, index ? -1 : GameMedkit);
+            // Left stick (user 2026-10-14): a single click does nothing,
+            // a double click recentres, and holding it in opens the radial
+            // gear menu, picked by pushing the stick while it is held. A
+            // hold that pushed the stick is not a click afterwards. Pause
+            // is the menu button where the controller has one (Touch,
+            // Reverb G2); where it has none it stays the long press, unless
+            // the stick was pushed for the radial menu meanwhile.
+            const bool left_menu = left == XrControllerTouch ||
+                                   left == XrControllerHpReverb;
+            const bool left_stick = xr_input_button(0, XrButtonStick);
+            {
+                float sx = 0.0f, sy = 0.0f;
+                xr_input_stick(0, &sx, &sy);
+                if (g_complex_stick[0].down && sx * sx + sy * sy > 0.25f)
+                    g_complex_stick[0].long_fired = true;
+            }
+            complex_update(g_complex_stick[0], left_stick, now, -1,
+                           GameRecentre, left_menu ? -1 : GamePause);
+            held[kLogicalStickHeld] = left_stick;
+            if (left_menu)
+                held[GamePause] = xr_input_button(0, XrButtonMenu);
+            // Right stick: click (weapon switch; the view switch in
+            // immersive play), double click PDA, long press binoculars. The
+            // Index has trackpads for the long-press actions.
             complex_update(g_complex_stick[1],
                 xr_input_button(1, XrButtonStick), now, GameWeapon, GamePda,
                 index ? -1 : GameBinoculars);
@@ -2418,25 +2440,74 @@ namespace trlvr
         // controllers, full with hand tracking.
         void read_fingers()
         {
-            // OpenXR has no skeletal input in its core. Until
-            // XR_EXT_hand_tracking is wired up there are no finger poses,
-            // and the game's own hand pose is kept.
+            // Finger poses from the controller's own sensors (user
+            // 2026-10-14), as SteamVR's estimated skeleton made them for
+            // Touch and Index: OpenXR has no skeleton in its core, but it
+            // does report the trigger and grip values and whether a finger
+            // rests on the trigger or the thumb on the stick, a face button
+            // or the thumb rest. Index: off the trigger it points, resting
+            // on it it is part curled, and the trigger's pull curls it the
+            // rest of the way. Middle, ring and pinky: the grip. Thumb: down
+            // on the controller while it touches anything, up otherwise.
+            // Controllers without touch sensors use the pulls alone. Eased
+            // over 50 ms so a sensor flicking does not snap a finger.
+            static ULONGLONG last_ms = 0;
+            const ULONGLONG now_ms = GetTickCount64();
+            const float step = last_ms && now_ms - last_ms < 250
+                ? (float)(now_ms - last_ms) / 1000.0f : 1.0f;
+            last_ms = now_ms;
+            const float follow = 1.0f - expf(-step / 0.05f);
             for (int hand = 0; hand < 2; ++hand)
             {
-                g_fingers[hand].valid = false;
-                g_fingers[hand].spread_valid = false;
-                g_fingers[hand].thumb_valid = false;
+                FingerState& f = g_fingers[hand];
+                f.spread_valid = false;
+                f.thumb_valid = false;
                 g_finger_bones_valid[hand] = false;
-            }
-            if (config().finger_tracking)
-            {
-                static bool reported = false;
-                if (!reported)
+                if (!config().finger_tracking || !xr_input_active() ||
+                    xr_input_controller(hand) == XrControllerNone)
                 {
-                    reported = true;
-                    log("fingers: finger_tracking = 1, but finger tracking "
-                        "is not available under OpenXR yet -- the game's own "
-                        "hand pose is kept");
+                    f.valid = false;
+                    continue;
+                }
+                const XrControllerKind kind = xr_input_controller(hand);
+                const bool sensors = kind == XrControllerTouch ||
+                                     kind == XrControllerIndex;
+                const float trigger = xr_input_trigger(hand);
+                const float grip = xr_input_squeeze(hand);
+                const bool on_trigger = sensors
+                    ? xr_input_button(hand, XrTouchTrigger)
+                    : trigger > 0.05f;
+                const bool thumb_down = sensors
+                    ? xr_input_button(hand, XrTouchThumb)
+                    : xr_input_button(hand, XrButtonPrimary) ||
+                      xr_input_button(hand, XrButtonSecondary) ||
+                      xr_input_button(hand, XrButtonStick);
+                // 0.9 is a full curl (a real fist, see pose_fingers).
+                const float want[5] = {
+                    thumb_down ? 0.55f + 0.1f * grip : 0.05f,
+                    on_trigger ? 0.35f + 0.55f * trigger : 0.0f,
+                    0.9f * grip,
+                    0.9f * grip,
+                    0.9f * grip,
+                };
+                if (!f.valid)
+                    for (int i = 0; i < 5; ++i)
+                        f.curl[i] = want[i];
+                for (int i = 0; i < 5; ++i)
+                    f.curl[i] += (want[i] - f.curl[i]) * follow;
+                // An open hand spreads its fingers a little.
+                const float splay = 0.4f + 0.15f * (1.0f - grip);
+                for (int i = 0; i < 4; ++i)
+                    f.splay[i] = splay;
+                f.valid = true;
+                f.level = 1;
+                if (!f.reported_on)
+                {
+                    f.reported_on = true;
+                    log("fingers: %s hand follows the controller's %s",
+                        hand == 0 ? "left" : "right",
+                        sensors ? "touch sensors, trigger and grip"
+                                : "trigger and grip (no touch sensors)");
                 }
             }
             // finger_record: numpad / starts and stops a recording of both
@@ -3323,7 +3394,7 @@ namespace trlvr
         // first so neither view inherits the other's hand state.
         {
             const bool view_down = config().immersive_controls &&
-                digital(g_game[GameBinoculars].handle);
+                digital(g_game[GameWeapon].handle);
             const bool view_key = (GetAsyncKeyState(VK_OEM_5) & 1) != 0;
             const bool pressed = (view_down && !g_view_button_was) ||
                                  view_key;
@@ -3335,10 +3406,13 @@ namespace trlvr
                 reset_holster_gesture();
                 release_all();
                 camera_toggle_view(view_key ? "\\ key"
-                                            : "right stick long press");
+                                            : "right stick click");
                 g_view_recenter_at = GetTickCount64() + 250;
             }
-            if (g_view_recenter_at && GetTickCount64() >= g_view_recenter_at)
+            // Once the glide has landed: a recentre in mid-flight would
+            // jerk the heading.
+            if (g_view_recenter_at && GetTickCount64() >= g_view_recenter_at &&
+                !camera_view_tween_active())
             {
                 g_view_recenter_at = 0;
                 if (!menu)
@@ -3584,6 +3658,7 @@ namespace trlvr
         // Board mode: a grip around the tiny Lara picks her up (after the
         // gear cross, which keeps any grip on or hovering it).
         bool pluck_claim[2] = { false, false };
+        camera_set_hand_grips(left_grip, right_grip);
         {
             const bool pluck_grip[2] = {
                 left_grip && !g_gear_grip_claim[0] && g_gear_hover[0] < 0 &&
@@ -3652,10 +3727,7 @@ namespace trlvr
                     (i == GameWeapon || i == GameBinoculars ||
                      i == GameMedkit || i == GameLight))
                     continue;
-                // Radial gear menu: the medipack (long press) action is the
-                // pause and the pause (click) action opens the menu (user
-                // 2026-10-12: "hold is pause, single click is the radial
-                // menu"); see the radial block below.
+                // Radial gear menu: it picks the medipack itself.
                 if (i == GameMedkit && radial_gear_menu_enabled())
                     continue;
                 if (i == GamePause && g_pause_hold)
@@ -3676,6 +3748,40 @@ namespace trlvr
                                          pluck_claim[1] ||
                                          theatre_claim[1])))
                     continue;
+                // A hand on Lara's body (third person): its trigger and grip
+                // are not game buttons while it is (user 2026-10-14). The
+                // god hand's pick-up reads the grips itself and still works.
+                // A press that began (or was held) on her stays hers after
+                // the hand leaves her body: the action waits for a new
+                // press, not the moment the hand comes out (user
+                // 2026-10-14).
+                {
+                    static bool held_back[kGameButtons] = {};
+                    const bool touch_button = i == GameGrapple ||
+                        i == GameLockOn || i == GameInteract || i == GameFire;
+                    if (touch_button)
+                    {
+                        const bool touching =
+                            (i == GameGrapple && camera_hand_touching_lara(true)) ||
+                            (i == GameLockOn && camera_hand_touching_lara(false)) ||
+                            (i == GameInteract &&
+                             camera_hand_touching_lara(!swap_triggers)) ||
+                            (i == GameFire &&
+                             camera_hand_touching_lara(swap_triggers));
+                        const bool pressed = digital(
+                            swap_triggers && i == GameFire
+                                ? g_game[GameInteract].handle
+                            : swap_triggers && i == GameInteract
+                                ? g_game[GameFire].handle
+                                : b.handle);
+                        if (touching && pressed)
+                            held_back[i] = true;
+                        else if (!pressed)
+                            held_back[i] = false;
+                        if (touching || held_back[i])
+                            continue;
+                    }
+                }
                 // While Lara is held she neither jumps nor rolls.
                 // On a palm she may jump and crouch (2026-10-04).
                 if (camera_board_pluck_carried() &&
@@ -3710,8 +3816,6 @@ namespace trlvr
                         ? g_game[GameInteract].handle
                     : swap_triggers && i == GameInteract
                         ? g_game[GameFire].handle
-                    : i == GamePause && radial_gear_menu_enabled()
-                        ? g_game[GameMedkit].handle
                         : b.handle);
                 // Single pistols: each drawn pistol's own trigger fires.
                 if (single_pistols_out && i == GameFire)
@@ -4288,12 +4392,18 @@ namespace trlvr
                 }
             }
             {
+                // Open while the left stick is held in (after 150 ms, so a
+                // click or the recentre double click does not flash it);
+                // pushing the stick picks; letting go closes. One pick per
+                // hold.
                 const bool enabled = radial_gear_menu_enabled();
-                const bool button = enabled && !g_pause_hold &&
-                    digital(g_game[GamePause].handle);
+                const bool button = enabled &&
+                    digital(kLogicalStickHeld + 1);
                 const ULONGLONG t = GetTickCount64();
                 const float mx = g_move_raw[0], my = g_move_raw[1];
                 const float reach = mx * mx + my * my;
+                static ULONGLONG held_since = 0;
+                static bool picked = false;
                 const auto close_menu = [&](const char* why)
                 {
                     g_radial_open = false;
@@ -4302,28 +4412,27 @@ namespace trlvr
                 };
                 if (button && !g_radial_button_was)
                 {
-                    if (g_radial_open)
-                        close_menu("button again");
-                    else
-                    {
-                        g_radial_open = true;
-                        g_radial_open_at = t;
-                        vr_input_handhold_haptic(true);
-                        log("controls: radial gear menu open -- left stick "
-                            "up medipack, right binoculars, down weapon, "
-                            "left light");
-                    }
+                    held_since = t;
+                    picked = false;
                 }
                 g_radial_button_was = button;
-                if (g_radial_open && (!enabled || t - g_radial_open_at > 4000))
-                    close_menu(enabled ? "4 s without a pick"
+                if (button && !g_radial_open && !picked &&
+                    t - held_since >= 150)
+                {
+                    g_radial_open = true;
+                    g_radial_open_at = t;
+                    vr_input_handhold_haptic(true);
+                    log("controls: radial gear menu open -- hold the left "
+                        "stick in and push it: up medipack, right "
+                        "binoculars, down weapon, left light");
+                }
+                if (g_radial_open && !button)
+                    close_menu(enabled ? "stick released"
                                        : "gear menu off here");
                 if (g_radial_open)
                 {
                     camera_show_retail_gear_cross();
-                    // The stick that pressed the button may still be off
-                    // centre: a pick needs it pushed well out.
-                    if (reach >= 0.7f * 0.7f && t - g_radial_open_at > 150)
+                    if (reach >= 0.7f * 0.7f)
                     {
                         // Order as kGearKeys: up, right, down, left.
                         const int item = fabsf(mx) > fabsf(my)
@@ -4333,9 +4442,15 @@ namespace trlvr
                         vr_input_handhold_haptic(true);
                         log("controls: radial gear menu -- %s",
                             kGearNames[item]);
+                        picked = true;
                         close_menu("picked");
                     }
                 }
+                // Held in, the stick is for the menu, not for walking --
+                // from the press, not only once the menu shows.
+                if (button)
+                    for (bool& d : g_move_dir)
+                        d = false;
                 if (g_radial_wait_centre && !g_radial_open &&
                     reach < 0.3f * 0.3f)
                     g_radial_wait_centre = false;

@@ -223,6 +223,13 @@ namespace trlvr
             void* hierarchy;
         };
 
+        // Bones plus blended joints a Lara model may have for the mod to work
+        // on her. Retail Lara has 221 (109 + 112); a model with finer skinning
+        // (texture / body mods, user 2026-10-14) can have many more -- the one
+        // tested has the same 109 bones and 1080 blended joints -- and at the
+        // old 512 every hand, body and physics pass quietly left her alone.
+        const int kMaxSegments = 2048;
+
         // Retail VirtSegment: blends matrices `index` and `weight_index`.
         struct ModelVirtualSegment
         {
@@ -2336,7 +2343,7 @@ namespace trlvr
                     m + kOffModelSegments);
                 ShortVector* centres = *reinterpret_cast<ShortVector**>(
                     m + kOffModelDrawgroupCenters);
-                if (!segments || !centres || count <= 0 || count > 512 ||
+                if (!segments || !centres || count <= 0 || count > kMaxSegments ||
                     head_segment < 0 || head_segment >= count)
                     return 0;
 
@@ -2430,9 +2437,9 @@ namespace trlvr
                 unsigned in_head[kLaraDrawGroups]{};
                 unsigned in_arm[2][kLaraDrawGroups]{};
                 unsigned in_hand[2][kLaraDrawGroups]{};
-                bool head_bone[512]{};
-                bool arm_bone[2][512]{};
-                bool hand_bone[2][512]{};
+                bool head_bone[kMaxSegments]{};
+                bool arm_bone[2][kMaxSegments]{};
+                bool hand_bone[2][kMaxSegments]{};
                 for (int bone = 0; bone < count; ++bone)
                 {
                     head_bone[bone] = segment_is_in_head_subtree(
@@ -3413,7 +3420,7 @@ namespace trlvr
                 float* matrices = *reinterpret_cast<float**>(
                     instance + kOffInstanceMatrices);
                 if (!matrices || head_segment < 0 ||
-                    head_segment >= segment_count || segment_count > 512)
+                    head_segment >= segment_count || segment_count > kMaxSegments)
                 {
                     first_person_leave();
                     return false;
@@ -3802,7 +3809,7 @@ namespace trlvr
                         : nullptr;
                     const int wrist = g_first_person_wrist_segment[hand];
                     if (!segments || !matrices || count <= 0 ||
-                        count > 512 || wrist < 0 || wrist >= count)
+                        count > kMaxSegments || wrist < 0 || wrist >= count)
                         return false;
                     const Mat4 w = matrix_from_floats(matrices + wrist * 16);
                     float sum[3]{};
@@ -4761,6 +4768,14 @@ namespace trlvr
             DWORD press_time[2] = { 0, 0 };
             float kick[3]{};
             bool kick_pending = false;
+            // Third person: when each hand last held it with the grip, and
+            // how far the touch has loosened its limits (0 .. 1).
+            DWORD grab_time[2] = { 0, 0 };
+            float boost = 0.0f;
+            // A second, lighter mass hung on the first (root-relative, like
+            // p): the outer tissue catching up with the base and overrunning
+            // it -- the ripple on top of the swing.
+            float q[3]{}, qv[3]{};
         };
         SoftSpring g_soft[4];
         int g_soft_count = 0;
@@ -6142,7 +6157,7 @@ namespace trlvr
                 return 0;
             const int count = *reinterpret_cast<int*>(
                 static_cast<unsigned char*>(model) + kOffModelNumSegments);
-            return count > 0 && count <= 512 ? count : 0;
+            return count > 0 && count <= kMaxSegments ? count : 0;
         }
 
         // Transform of Lara's held long gun, retail pose -> controller:
@@ -6870,7 +6885,7 @@ namespace trlvr
             ModelSegment* parent_segments =
                 *reinterpret_cast<ModelSegment**>(
                     parent_model + kOffModelSegments);
-            if (parent_count <= 0 || parent_count > 512 ||
+            if (parent_count <= 0 || parent_count > kMaxSegments ||
                 !parent_segments)
                 return false;
             float* parent_matrices = *reinterpret_cast<float**>(
@@ -7100,7 +7115,7 @@ namespace trlvr
                 kOffModelNumSegments);
             float* child_matrices = *reinterpret_cast<float**>(
                 child + kOffInstanceMatrices);
-            if (!child_matrices || child_count <= 0 || child_count > 512)
+            if (!child_matrices || child_count <= 0 || child_count > kMaxSegments)
                 return false;
 
             ++g_pistol_draws[hand];
@@ -7135,7 +7150,7 @@ namespace trlvr
             const Mat4 gun_turn = long_gun
                 ? gun_tilt_world(name, controller, left_controller)
                 : Mat4::identity();
-            float saved[512][16]{};
+            static float saved[kMaxSegments][16];
             for (int segment = 0; segment < child_count; ++segment)
             {
                 memcpy(saved[segment], child_matrices + segment * 16,
@@ -7395,7 +7410,7 @@ namespace trlvr
             const int head = g_first_person_head_segment;
             if (head < 0 || head >= count)
                 return false;
-            static bool body_bone[512];
+            static bool body_bone[kMaxSegments];
             const int total = count + virtual_count;
             for (int bone = 0; bone < count; ++bone)
                 body_bone[bone] = !segment_is_in_head_subtree(
@@ -7482,8 +7497,8 @@ namespace trlvr
             g_chest_box.model = segments;
             g_chest_box.chest = chest;
             g_chest_box.boxes = 0;
-            if (count <= 0 || count > 512 || virtual_count < 0 ||
-                count + virtual_count > 512 || chest < 0 || chest >= count)
+            if (count <= 0 || count > kMaxSegments || virtual_count < 0 ||
+                count + virtual_count > kMaxSegments || chest < 0 || chest >= count)
                 return;
             const float metre = config().world_scale;
             const ModelVirtualSegment* virtuals =
@@ -7503,8 +7518,8 @@ namespace trlvr
                 return top >= 0 && top < count &&
                        segment_is_in_head_subtree(segments, count, s, top);
             };
-            static bool torso[512];
-            static bool spine[512];
+            static bool torso[kMaxSegments];
+            static bool spine[kMaxSegments];
             for (int s = 0; s < count; ++s)
                 torso[s] = spine[s] = false;
             for (int s = chest, guard = 0; s >= 0 && s < count &&
@@ -7780,9 +7795,15 @@ namespace trlvr
         // point in (at most 4 cm) and a tap kicks it. The bone turns about
         // its joint toward the mass, at most body_soft_angle -- from a
         // joint on the chest's front, that is mostly up and down.
+        //
+        // push: an acceleration on every mass, world units per second
+        // squared (null = none). The springs live relative to her root, so
+        // on their own they feel her animation but not her whole body
+        // speeding up, stopping or turning a corner; third person passes
+        // the opposite of her root's acceleration here to give them that.
         void soft_springs(const ModelSegment* segments, int count,
                           const float (*saved)[16], Mat4* xform,
-                          void* instance)
+                          void* instance, const float* push = nullptr)
         {
             const bool on = config().body_soft &&
                 config().body_soft_angle > 0.0f &&
@@ -7845,6 +7866,15 @@ namespace trlvr
                 float target[3];
                 for (int k = 0; k < 3; ++k)
                     target[k] = tip[k] - root[k];
+                // Third person: a hand on the part (boost, eased in and
+                // out) loosens it toward the Max preset's limits for as
+                // long as it is there, so slow handling is not held back by
+                // a tame setting; a grip on it makes it follow the hand
+                // directly (user 2026-10-14).
+                bool grabbed = false;
+                for (int hand = 0; hand < 2; ++hand)
+                    grabbed = grabbed ||
+                        (push && GetTickCount() - soft.grab_time[hand] < 100);
                 {
                     float press[3] = { 0.0f, 0.0f, 0.0f };
                     for (int hand = 0; hand < 2; ++hand)
@@ -7852,7 +7882,12 @@ namespace trlvr
                             for (int k = 0; k < 3; ++k)
                                 press[k] += soft.press[hand][k];
                     const float len = sqrtf(dot3(press, press));
-                    const float cap = 0.04f * metre;
+                    // Third person: the part follows the hand that has hold
+                    // of it, further than a first-person press pushes it,
+                    // and further again while gripped.
+                    const float cap = (!push ? 0.04f
+                                       : 0.08f + 0.04f * soft.boost +
+                                         (grabbed ? 0.04f : 0.0f)) * metre;
                     const float s = len > cap ? cap / len : 1.0f;
                     for (int k = 0; k < 3; ++k)
                         target[k] += press[k] * s;
@@ -7861,6 +7896,19 @@ namespace trlvr
                     ? (float)((double)(now.QuadPart - soft.last.QuadPart) /
                               (double)frequency.QuadPart) : 0.0f;
                 soft.last = now;
+                {
+                    bool touched = grabbed;
+                    for (int hand = 0; hand < 2; ++hand)
+                        touched = touched || (push &&
+                            GetTickCount() - soft.press_time[hand] < 100);
+                    const float want = touched ? 1.0f : 0.0f;
+                    const float tau = want > soft.boost ? 0.08f : 0.5f;
+                    if (dt > 0.0f && dt < 0.25f)
+                        soft.boost += (want - soft.boost) *
+                                      (1.0f - expf(-dt / tau));
+                    else
+                        soft.boost = want;
+                }
                 float gap[3];
                 for (int k = 0; k < 3; ++k)
                     gap[k] = soft.p[k] - target[k];
@@ -7869,6 +7917,8 @@ namespace trlvr
                 {
                     memcpy(soft.p, target, sizeof(target));
                     soft.v[0] = soft.v[1] = soft.v[2] = 0.0f;
+                    memcpy(soft.q, target, sizeof(target));
+                    soft.qv[0] = soft.qv[1] = soft.qv[2] = 0.0f;
                     soft.valid = true;
                     soft.kick_pending = false;
                     continue;
@@ -7882,26 +7932,100 @@ namespace trlvr
                     }
                     soft.kick_pending = false;
                 }
-                const float omega[3] = { 6.2831853f * 3.0f,
-                                         6.2831853f * 3.0f,
-                                         6.2831853f * 2.2f };   // z is up
-                const float zeta = 0.22f;
+                // Third person (push given) is looser sideways: at 3 Hz
+                // the masses were stiffer than her stride, so they
+                // followed it without swinging, and a start or stop rang
+                // once and was gone (user 2026-10-14: "a single
+                // oscillation"). Nearer the stride's own side-to-side
+                // rhythm they are carried along by it, as up and down
+                // already is by the step.
+                const float side = push ? config().body_soft_sway_hz : 3.0f;
+                // Gripped: stiffer and near critically damped, so it goes
+                // where the hand takes it without lagging or ringing.
+                const float stiff = grabbed ? 2.0f : 1.0f;
+                const float omega[3] = { 6.2831853f * side * stiff,
+                                         6.2831853f * side * stiff,
+                                         6.2831853f * 2.2f * stiff }; // z up
+                const float zeta = grabbed ? 0.85f
+                                 : push ? config().body_soft_damping : 0.22f;
+                // The angle limit used to be a hard stop on the drawn bone
+                // only: the mass swung on past it, so the bone sat frozen
+                // at the limit until the mass came back, then crossed and
+                // froze at the other side (user 2026-10-14). The mass now
+                // feels the limit itself: past half of its reach from her
+                // animated pose the spring stiffens (to three times at the
+                // limit), so a hard swing turns round near the limit, and
+                // sooner the harder it arrives, instead of overshooting.
+                // What still gets past is eased in below, not clipped.
+                const float set_limit = config().body_soft_angle;
+                const float limit = (set_limit + (fmaxf(set_limit, 30.0f) -
+                    set_limit) * soft.boost) * 0.017453293f;
+                float rest[3], bone2 = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    rest[k] = tip[k] - root[k];
+                    bone2 += (tip[k] - joint[k]) * (tip[k] - joint[k]);
+                }
+                const float reach = sqrtf(bone2) * tanf(fminf(limit, 1.2f));
                 const int steps = (int)ceilf(dt / (1.0f / 240.0f));
                 const float h = dt / (float)(steps > 0 ? steps : 1);
                 for (int s = 0; s < steps && s < 64; ++s)
+                {
+                    float away[3], dist2 = 0.0f;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        away[k] = soft.p[k] - rest[k];
+                        dist2 += away[k] * away[k];
+                    }
+                    const float dist = sqrtf(dist2);
+                    const float harden = reach > 1.0e-3f && dist > 0.5f * reach
+                        ? 4.0f * (dist - 0.5f * reach) / dist : 0.0f;
                     for (int k = 0; k < 3; ++k)
                     {
                         const float a = omega[k] * omega[k] *
                             (target[k] - soft.p[k]) -
-                            2.0f * zeta * omega[k] * soft.v[k];
+                            2.0f * zeta * omega[k] * soft.v[k] +
+                            (push ? push[k] : 0.0f) -
+                            omega[k] * omega[k] * harden * away[k];
                         soft.v[k] += a * h;
                         soft.p[k] += soft.v[k] * h;
                     }
+                    // The ripple: faster and looser than the swing, pulled
+                    // after the main mass. Held, it is the main mass.
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        if (grabbed)
+                        {
+                            soft.q[k] = soft.p[k];
+                            soft.qv[k] = soft.v[k];
+                            continue;
+                        }
+                        // Gentle (user 2026-10-14: the first version, at
+                        // 1.8x and damping 0.12, rang on long enough to be
+                        // distracting even turned down): a little faster
+                        // than the swing and settled within a cycle or two.
+                        const float w2 = 1.5f * omega[k];
+                        const float a2 = w2 * w2 * (soft.p[k] - soft.q[k]) -
+                                         2.0f * 0.35f * w2 * soft.qv[k];
+                        soft.qv[k] += a2 * h;
+                        soft.q[k] += soft.qv[k] * h;
+                    }
+                }
+                // What is drawn: the main mass, plus as much of the ripple's
+                // overrun as [vr] body_soft_ripple asks for.
+                float mass[3];
+                const float ripple = config().body_soft_ripple;
+                for (int k = 0; k < 3; ++k)
+                {
+                    const float extra = soft.q[k] - soft.p[k];
+                    mass[k] = soft.p[k] + (std::isfinite(extra)
+                        ? ripple * extra : 0.0f);
+                }
                 float from[3], to[3];
                 for (int k = 0; k < 3; ++k)
                 {
                     from[k] = tip[k] - joint[k];
-                    to[k] = soft.p[k] + root[k] - joint[k];
+                    to[k] = mass[k] + root[k] - joint[k];
                 }
                 const float lf = sqrtf(dot3(from, from));
                 const float lt = sqrtf(dot3(to, to));
@@ -7911,12 +8035,44 @@ namespace trlvr
                     dot3(from, to) / (lf * lt))));
                 if (!(angle > 1e-4f))
                     continue;
-                const float limit = config().body_soft_angle * 0.017453293f;
+                // Eased toward the limit (tanh), never clipped at it: the
+                // bone keeps moving, ever less, as the mass goes further.
                 Mat4 rotation = rotation_between(from, to);
-                if (angle > limit)
-                    rotation = rotation_fraction(rotation, limit / angle);
+                if (limit > 1.0e-4f)
+                    rotation = rotation_fraction(rotation,
+                        limit * tanhf(angle / limit) / angle);
+                // Squash and stretch (2026-10-14): soft tissue changes shape
+                // as well as swinging. Pulled out along the bone it
+                // lengthens and narrows, pushed in (inertia or a hand) it
+                // shortens and widens, keeping its volume. A finely skinned
+                // model (many joints blending chest into breast) carries this
+                // smoothly into the chest; on the retail model, with few,
+                // it is kept small by [vr] body_soft_stretch.
+                Mat4 shape = Mat4::identity();
+                {
+                    float axis[3] = { to[0], to[1], to[2] };
+                    const float stretch_k = config().body_soft_stretch;
+                    if (stretch_k > 0.001f && normalise3(axis) > 1.0e-4f)
+                    {
+                        float along = 0.0f;
+                        for (int k = 0; k < 3; ++k)
+                            along += (to[k] - from[k]) * axis[k];
+                        // A hint of shape, not a show: at most 10% either
+                        // way, and half the first version's response.
+                        float s = 1.0f + 0.5f * stretch_k * along / lf;
+                        s = s < 0.9f ? 0.9f : s > 1.1f ? 1.1f : s;
+                        if (std::isfinite(s) && fabsf(s - 1.0f) > 1.0e-3f)
+                        {
+                            const float across = 1.0f / sqrtf(s);
+                            for (int r = 0; r < 3; ++r)
+                                for (int c = 0; c < 3; ++c)
+                                    shape.m[r][c] = (r == c ? across : 0.0f) +
+                                        (s - across) * axis[r] * axis[c];
+                        }
+                    }
+                }
                 const Mat4 about = translation(-joint[0], -joint[1],
-                                               -joint[2]) * rotation *
+                                               -joint[2]) * rotation * shape *
                                    translation(joint[0], joint[1], joint[2]);
                 for (int s = 0; s < count; ++s)
                     if (segment_is_in_head_subtree(segments, count, s,
@@ -8072,11 +8228,11 @@ namespace trlvr
             int virtual_count, float* matrices, const Mat4 hand_delta[2])
         {
             const int total = count + virtual_count;
-            static float saved[512][16];
+            static float saved[kMaxSegments][16];
             memcpy(saved, matrices, sizeof(float) * 16 * total);
             // Per real segment: the world post-transform applied to it
             // (moved = saved * xform), identity when untouched.
-            static Mat4 xform[512];
+            static Mat4 xform[kMaxSegments];
             for (int seg = 0; seg < count; ++seg)
                 xform[seg] = Mat4::identity();
 
@@ -8706,9 +8862,9 @@ namespace trlvr
             const ModelSegment* segments = nullptr;
             int count = 0;
             int virtual_count = 0;
-            float saved[512][16];
-            Mat4 xform[512];
-            bool changed[512];
+            float saved[kMaxSegments][16];
+            Mat4 xform[kMaxSegments];
+            bool changed[kMaxSegments];
         };
         PoseWork g_pose_work;
 
@@ -8716,7 +8872,7 @@ namespace trlvr
                         int virtual_count, const float* matrices)
         {
             if (!segments || !matrices || count <= 0 || virtual_count < 0 ||
-                count + virtual_count > 512)
+                count + virtual_count > kMaxSegments)
                 return false;
             w.segments = segments;
             w.count = count;
@@ -9394,6 +9550,13 @@ namespace trlvr
             // Curl: per joint, the flick's full-curl shape.
             // From the animated hand (no bind pose) the old 0.15 rest curl
             // still applies.
+            //
+            // From the bind pose, finger_rest_curl was taken as "how curled
+            // her straight hand already is" and subtracted -- but her bind
+            // hand is flat, so a straight real finger bent hers backwards
+            // past flat (user 2026-10-14: "curls the wrong way"). It is now
+            // the relaxed hand's own curl: an open real hand shows that
+            // much curl, and the real curl takes it on from there to a fist.
             const float rest_curl = from_base ? config().finger_rest_curl
                                               : 0.15f;
             // A real fist reads about 0.9, so 0.9 is a full curl, and the
@@ -9404,15 +9567,27 @@ namespace trlvr
             const float bend[5] = { 1.6f, 1.8f, 1.2f, 0.8f, 0.8f };
             for (int i = 0; i < 4; ++i)
             {
-                float amount = (curl[i + 1] - rest_curl) /
-                               (fist_curl - rest_curl > 0.1f
-                                    ? fist_curl - rest_curl : 0.1f);
+                float amount;
+                if (from_base)
+                {
+                    const float real = curl[i + 1] < 0.0f ? 0.0f
+                                     : curl[i + 1] > fist_curl ? fist_curl
+                                     : curl[i + 1];
+                    const float relaxed = rest_curl < 0.0f ? 0.0f
+                        : rest_curl > 0.6f ? 0.6f : rest_curl;
+                    amount = (relaxed + (fist_curl - relaxed) * real /
+                              fist_curl) / fist_curl;
+                }
+                else
+                {
+                    amount = (curl[i + 1] - rest_curl) /
+                             (fist_curl - rest_curl > 0.1f
+                                  ? fist_curl - rest_curl : 0.1f);
+                    if (amount < -0.35f)
+                        amount = -0.35f;
+                }
                 if (amount > 1.0f)
-                    amount = 1.0f;
-                const float floor_amount = from_base ? -rest_curl : -0.35f;
-                if (amount < floor_amount)
-                    amount = floor_amount;
-                const int c = finger[i];
+                    amount = 1.0f;                const int c = finger[i];
                 for (int j = 0; j < depth[c]; ++j)
                 {
                     float pivot[3];
@@ -9637,7 +9812,7 @@ namespace trlvr
                        const float (*saved)[16])
         {
             g_hip[0] = g_hip[1] = -1;
-            bool has_child[512] = {};
+            bool has_child[kMaxSegments] = {};
             for (int s = 0; s < count; ++s)
                 if (segments[s].parent >= 0 && segments[s].parent < count)
                     has_child[segments[s].parent] = true;
@@ -10468,9 +10643,31 @@ namespace trlvr
             {
                 return;
             }
+            // Each Lara model once: its size, and whether the mod can work
+            // on it (a model mod that the limits below turn away should say
+            // so, not leave her hands and physics silently missing).
+            {
+                static void* reported_model = nullptr;
+                if (draw_model != reported_model)
+                {
+                    reported_model = draw_model;
+                    const bool fits = segments && vertices && strips &&
+                        matrices && count > 0 && virtual_count >= 0 &&
+                        count + virtual_count <= kMaxSegments &&
+                        vertex_count > 0 && vertex_count <= 65535 &&
+                        wrist[0] >= 0 && wrist[0] < count &&
+                        wrist[1] >= 0 && wrist[1] < count;
+                    log("lara model %p: %d bones + %d blended joints (limit "
+                        "%d), %d vertices (limit 65535), wrists %d/%d -- %s",
+                        draw_model, count, virtual_count, kMaxSegments,
+                        vertex_count, wrist[0], wrist[1],
+                        fits ? "ok" : "TOO BIG OR INCOMPLETE for the VR "
+                                      "hands and body; they are skipped");
+                }
+            }
             if (!segments || !vertices || !strips || !matrices ||
                 count <= 0 || virtual_count < 0 ||
-                count + virtual_count > 512 || vertex_count <= 0 ||
+                count + virtual_count > kMaxSegments || vertex_count <= 0 ||
                 vertex_count > 65535 || wrist[0] < 0 || wrist[0] >= count ||
                 wrist[1] < 0 || wrist[1] >= count)
                 return;
@@ -10528,7 +10725,7 @@ namespace trlvr
             }
 
             const int total = count + virtual_count;
-            bool hand_bone[2][512]{};
+            bool hand_bone[2][kMaxSegments]{};
             int hand_vertices[2] = { 0, 0 };
             __try
             {
@@ -10621,8 +10818,8 @@ namespace trlvr
                 // offset fixed the same day, and with the hand ruler it was
                 // the whole 8 cm difference from classic. One hand tuning
                 // now fits every view.)
-                static short touched[512];
-                static float saved[512][16];
+                static short touched[kMaxSegments];
+                static float saved[kMaxSegments][16];
                 int touched_count = 0;
                 __try
                 {
@@ -10754,8 +10951,15 @@ namespace trlvr
                         }
                         const float* W = matrices + wrist[hand] * 16;
                         float n[3] = { W[8], W[9], W[10] };
-                        // Sign confirmed in the headset 2026-10-03.
-                        const float sign = (hand == 0 ? 1.0f : -1.0f) *
+                        // Sign confirmed in the headset 2026-10-03, on the
+                        // original hand placement. On the grip-pose model
+                        // (hand_model 2) the left hand is the right one
+                        // mirrored, and its palm faces the other way along
+                        // that axis (user 2026-10-14: Lara stood on the
+                        // back of the left hand).
+                        const float left_sign =
+                            config().hand_model == 2 ? -1.0f : 1.0f;
+                        const float sign = (hand == 0 ? left_sign : -1.0f) *
                                            (g_palm_flip ? -1.0f : 1.0f);
                         if (normalise3(n) > 1e-4f)
                         {
@@ -10822,7 +11026,7 @@ namespace trlvr
         {
             float* matrices = nullptr;
             int total = 0;
-            float full[512][16];
+            float full[kMaxSegments][16];
         };
 
         bool carry_apply(void* instance, void* model, CarrySave* save)
@@ -10857,7 +11061,7 @@ namespace trlvr
                 const int total =
                     *reinterpret_cast<const int*>(m + kOffModelNumSegments) +
                     *reinterpret_cast<const int*>(m + kOffModelNumVirtSegments);
-                if (total <= 0 || total > 512)
+                if (total <= 0 || total > kMaxSegments)
                     return false;
                 memcpy(save->full, matrices, sizeof(float) * 16 * total);
                 save->matrices = matrices;
@@ -11120,7 +11324,7 @@ namespace trlvr
         {
             float* matrices = nullptr;
             int total = 0;
-            float full[512][16];
+            float full[kMaxSegments][16];
         };
 
         // The palm point in wrist space, as first_person_palm_local, for any
@@ -11532,7 +11736,7 @@ namespace trlvr
                 return false;
             }
             if (!segments || !matrices || count <= 0 || virtual_count < 0 ||
-                count + virtual_count > 512)
+                count + virtual_count > kMaxSegments)
                 return false;
             for (int h = 0; h < 2; ++h)
                 if (shoulder[h] < 0 || shoulder[h] >= count || elbow[h] < 0 ||
@@ -11691,7 +11895,7 @@ namespace trlvr
             const Mat4 hand_delta = translation(-W[0], -W[1], -W[2]) *
                 delta_rot * translation(solved_w[0], solved_w[1], solved_w[2]);
 
-            static Mat4 xform[512];
+            static Mat4 xform[kMaxSegments];
             for (int seg = 0; seg < count; ++seg)
             {
                 xform[seg] = Mat4::identity();
@@ -11796,7 +12000,7 @@ namespace trlvr
             int total = 0;
             unsigned frame = 0xFFFFFFFFu;
             bool active = false;
-            float written[512][16];
+            float written[kMaxSegments][16];
         };
         WallTouchSave g_wall_base;
         WallTouchKeep g_wall_keep;
@@ -11868,6 +12072,537 @@ namespace trlvr
             __except(EXCEPTION_EXECUTE_HANDLER)
             {
                 k.active = false;
+            }
+        }
+
+        // Soft parts in third person. The bones are Lara's own and are in
+        // every one of her models; first person only happened to be where
+        // the springs were driven from. Here the same springs (soft_springs)
+        // run once a frame at her first draw, on the game's animation, and
+        // the result is left in her matrices for the rest of the frame, as
+        // wall touch does, so her wet-skin layer is drawn from it too. If
+        // the game has not animated her by the next frame (paused) the
+        // sprung bones are put back first, so it never builds on itself
+        // (when wall touch holds a pose it has already put them back, to
+        // the sprung values, which this then recognises as its own).
+        // Only the soft parts: the torso spring turns the whole chest about
+        // the neck, which first person can do because the head is not
+        // drawn; here it would nod her head and pull her hands off holds.
+        struct ThirdPersonSoftKeep
+        {
+            float* matrices = nullptr;
+            unsigned frame = 0xFFFFFFFFu;
+            bool active = false;
+            bool reported = false;
+            int touched_count = 0;
+            short touched[256];
+            float base[256][16];
+            float written[256][16];
+        };
+        ThirdPersonSoftKeep g_tp_soft;
+        // When each controller hand last touched her body in third person,
+        // and last had hold of a soft part; the grips as vr_input sampled
+        // them.
+        DWORD g_tp_touch_time[2] = { 0, 0 };
+        DWORD g_tp_part_time[2] = { 0, 0 };
+        bool g_tp_grip[2] = { false, false };
+
+        void third_person_soft_frame(void* instance, void* model)
+        {
+            ThirdPersonSoftKeep& k = g_tp_soft;
+            if (g_first_person_active || g_first_person_instance || !instance)
+                return;
+            void* draw_model = nullptr;
+            ModelSegment* segments = nullptr;
+            float* matrices = nullptr;
+            int count = 0, virtual_count = 0;
+            int head = -1, shoulder[2] = { -1, -1 }, wrist[2] = { -1, -1 };
+            __try
+            {
+                if (!lara_is_drawn_lara(instance, model, &draw_model))
+                    return;
+                unsigned char* m = static_cast<unsigned char*>(draw_model);
+                count = *reinterpret_cast<int*>(m + kOffModelNumSegments);
+                virtual_count = *reinterpret_cast<int*>(
+                    m + kOffModelNumVirtSegments);
+                segments = *reinterpret_cast<ModelSegment**>(
+                    m + kOffModelSegments);
+                matrices = *reinterpret_cast<float**>(
+                    static_cast<unsigned char*>(instance) +
+                    kOffInstanceMatrices);
+                const unsigned char* prop =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerProp);
+                if (!prop)
+                    return;
+                head = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropHeadSegment);
+                shoulder[0] = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropLeftShoulder);
+                shoulder[1] = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropRightShoulder);
+                wrist[0] = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropLeftWrist);
+                wrist[1] = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropRightWrist);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return;
+            }
+            if (!segments || !matrices || count <= 0 || virtual_count < 0 ||
+                count + virtual_count > kMaxSegments || head < 0 || head >= count)
+                return;
+            for (int h = 0; h < 2; ++h)
+                if (shoulder[h] < 0 || shoulder[h] >= count || wrist[h] < 0 ||
+                    wrist[h] >= count)
+                    return;
+            const int total = count + virtual_count;
+
+            if (k.frame == g_present_count)
+                return;
+            k.frame = g_present_count;
+            if (k.active)
+            {
+                k.active = false;
+                __try
+                {
+                    bool unchanged = k.matrices == matrices;
+                    for (int i = 0; unchanged && i < k.touched_count; ++i)
+                        unchanged = k.touched[i] < total &&
+                            memcmp(matrices + k.touched[i] * 16, k.written[i],
+                                   sizeof(float) * 16) == 0;
+                    if (unchanged)
+                        for (int i = 0; i < k.touched_count; ++i)
+                            memcpy(matrices + k.touched[i] * 16, k.base[i],
+                                   sizeof(float) * 16);
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+            }
+            if (!config().body_soft || config().body_soft_angle <= 0.0f)
+                return;
+
+            // The chest and its soft parts are found through the same
+            // first-person model globals, borrowed for the call.
+            const int old_head = g_first_person_head_segment;
+            const int old_shoulder[2] = { g_first_person_shoulder_segment[0],
+                                          g_first_person_shoulder_segment[1] };
+            const int old_wrist[2] = { g_first_person_wrist_segment[0],
+                                       g_first_person_wrist_segment[1] };
+            g_first_person_head_segment = head;
+            for (int h = 0; h < 2; ++h)
+            {
+                g_first_person_shoulder_segment[h] = shoulder[h];
+                g_first_person_wrist_segment[h] = wrist[h];
+            }
+            static float saved[kMaxSegments][16];
+            static Mat4 xform[kMaxSegments];
+            bool ok = true;
+            __try
+            {
+                if (g_chest_box.model != segments)
+                {
+                    const int chest = find_chest(segments, count);
+                    if (chest >= 0)
+                        chest_box_measure(segments, count, virtual_count,
+                                          chest);
+                    else
+                        g_chest_box.model = segments;
+                }
+                memcpy(saved, matrices, sizeof(float) * 16 * total);
+                for (int seg = 0; seg < count; ++seg)
+                    xform[seg] = Mat4::identity();
+
+                // Her whole body's acceleration, from her root's position
+                // frame to frame. The game changes her speed in a frame or
+                // two, so it is smoothed over 60 ms and capped at 1.5 g; a
+                // jump of more than half a metre in one frame is a
+                // teleport (a cut, a load, being put down), not a move.
+                static float last_root[3], last_velocity[3], smoothed[3];
+                static LARGE_INTEGER last_time{};
+                static bool have_root = false, have_velocity = false;
+                float push[3] = { 0.0f, 0.0f, 0.0f };
+                float root[3];
+                memcpy(root, static_cast<const unsigned char*>(instance) +
+                       0x10, sizeof(root));
+                LARGE_INTEGER now{}, frequency{};
+                QueryPerformanceCounter(&now);
+                QueryPerformanceFrequency(&frequency);
+                const float dt = have_root && frequency.QuadPart
+                    ? (float)((double)(now.QuadPart - last_time.QuadPart) /
+                              (double)frequency.QuadPart) : 0.0f;
+                const float metre = config().world_scale;
+                float step2 = 0.0f;
+                for (int a = 0; a < 3; ++a)
+                    step2 += (root[a] - last_root[a]) *
+                             (root[a] - last_root[a]);
+                const bool steady = have_root && dt > 0.001f && dt < 0.1f &&
+                    std::isfinite(step2) &&
+                    step2 < 0.25f * metre * metre;
+                if (steady)
+                {
+                    float velocity[3];
+                    for (int a = 0; a < 3; ++a)
+                        velocity[a] = (root[a] - last_root[a]) / dt;
+                    if (have_velocity)
+                    {
+                        const float follow = dt / (dt + 0.06f);
+                        float size2 = 0.0f;
+                        for (int a = 0; a < 3; ++a)
+                        {
+                            const float accel =
+                                (velocity[a] - last_velocity[a]) / dt;
+                            smoothed[a] += (accel - smoothed[a]) * follow;
+                            size2 += smoothed[a] * smoothed[a];
+                        }
+                        const float cap = 1.5f * 9.81f * metre;
+                        const float scale = size2 > cap * cap
+                            ? cap / sqrtf(size2) : 1.0f;
+                        for (int a = 0; a < 3; ++a)
+                            push[a] = -smoothed[a] * scale;
+                    }
+                    memcpy(last_velocity, velocity, sizeof(velocity));
+                    have_velocity = true;
+                }
+                else
+                {
+                    have_velocity = false;
+                    smoothed[0] = smoothed[1] = smoothed[2] = 0.0f;
+                }
+                memcpy(last_root, root, sizeof(root));
+                last_time = now;
+                have_root = true;
+
+                // The controller hands on her body, as in first person: a
+                // hand point inside one of her torso's boxes (as posed last
+                // frame) presses that part in, and arriving fast kicks its
+                // spring. The points are the index fingertip and the palm
+                // as last drawn, at their apparent place in her world (in
+                // board mode that is a giant's finger). The hand itself is
+                // not moved: in first person it is her own hand and must
+                // stay outside her, here it is yours and goes where your
+                // controller is. Not the hand that is holding her.
+                if (config().hand_body_collision && g_chest_box.boxes > 0 &&
+                    GetTickCount() - g_chest_box.time < 200)
+                {
+                    const DWORD tick = GetTickCount();
+                    for (int hand = 0; hand < 2; ++hand)
+                    {
+                        float points[3][3];
+                        int n = 0;
+                        const PalmSeen* seen[2] = { &g_index_seen[hand],
+                                                    &g_palm_seen[hand] };
+                        for (const PalmSeen* s : seen)
+                            if (s->time && tick - s->time < 250)
+                            {
+                                memcpy(points[n], s->point, sizeof(points[n]));
+                                ++n;
+                            }
+                        // The finger point is its last joint, which is 3 cm
+                        // short of where the finger ends: the fingertip was
+                        // already inside her before anything happened (user
+                        // 2026-10-14). The tip leads, out along the line
+                        // from the palm through that joint.
+                        if (n == 2)
+                        {
+                            float along[3];
+                            for (int axis = 0; axis < 3; ++axis)
+                                along[axis] = points[0][axis] - points[1][axis];
+                            if (normalise3(along) > 1.0e-4f)
+                            {
+                                const float tip_out = 0.03f * metre *
+                                    camera_world_scale_factor();
+                                memcpy(points[2], points[1], sizeof(points[2]));
+                                memcpy(points[1], points[0], sizeof(points[1]));
+                                for (int axis = 0; axis < 3; ++axis)
+                                    points[0][axis] = points[1][axis] +
+                                        along[axis] * tip_out;
+                                n = 3;
+                            }
+                        }
+                        float out[3], normal[3], depth = 0.0f;
+                        int box_index = -1;
+                        const bool touching = n > 0 &&
+                            g_pluck.hand != hand && g_pluck.palm != hand &&
+                            chest_box_push(points, n, out, normal, &depth,
+                                           &box_index);
+                        // In first person the hand is stopped at her
+                        // surface, so "how deep, along the surface's
+                        // normal" is a steady push. Here the hand goes on
+                        // through, and that measure flips to the far side
+                        // as it passes the middle -- the part twitched at
+                        // random (user 2026-10-14). So the part is taken
+                        // hold of instead: from where the hand first met
+                        // it, it goes where the hand goes -- in, up, down,
+                        // across -- until the hand leaves her body. Up to
+                        // 8 cm at her size; the spring carries it there, so
+                        // a slow hand moves it directly and a fast one
+                        // overshoots and rings. Measured from her root, so
+                        // her own movement is not a push.
+                        //
+                        // Which part: the one the hand is in, or else the
+                        // nearest within 8 cm (user 2026-10-14: a palm
+                        // pushing up from under it lands in the chest's
+                        // box, and nothing moved). It is dragged by the
+                        // hand point nearest it, the one doing the pushing.
+                        // With the grip held the hold lasts until the grip
+                        // is let go, out of her body too, so the part can
+                        // be pulled as well as pushed.
+                        static int held_soft[2] = { -1, -1 };
+                        static int held_point[2] = { 0, 0 };
+                        static bool grabbing[2] = { false, false };
+                        static float entry[2][3];
+                        const bool gripping = g_tp_grip[hand];
+                        if (!gripping)
+                            grabbing[hand] = false;
+                        if (!touching && !grabbing[hand])
+                            held_soft[hand] = -1;
+                        else if (touching && held_soft[hand] < 0)
+                        {
+                            int pick = box_index >= 0
+                                ? g_chest_box.box[box_index].soft : -1;
+                            float best = powf(0.08f * metre, 2.0f);
+                            int best_point = 0;
+                            for (int b = 0; b < g_chest_box.boxes; ++b)
+                            {
+                                const BodyBox& box = g_chest_box.box[b];
+                                if (box.soft < 0)
+                                    continue;
+                                float c[3], w[3];
+                                for (int axis = 0; axis < 3; ++axis)
+                                    c[axis] = 0.5f * (box.lo[axis] +
+                                                      box.hi[axis]);
+                                for (int axis = 0; axis < 3; ++axis)
+                                    w[axis] = c[0] * box.world.m[0][axis] +
+                                              c[1] * box.world.m[1][axis] +
+                                              c[2] * box.world.m[2][axis] +
+                                              box.world.m[3][axis];
+                                for (int p = 0; p < n; ++p)
+                                {
+                                    float d2 = 0.0f;
+                                    for (int axis = 0; axis < 3; ++axis)
+                                        d2 += (points[p][axis] - w[axis]) *
+                                              (points[p][axis] - w[axis]);
+                                    if (d2 < best)
+                                    {
+                                        best = d2;
+                                        best_point = p;
+                                        if (pick < 0 || box.soft == pick)
+                                            pick = box.soft;
+                                    }
+                                }
+                            }
+                            if (pick >= 0 && pick < g_soft_count)
+                            {
+                                held_soft[hand] = pick;
+                                held_point[hand] = best_point;
+                                for (int axis = 0; axis < 3; ++axis)
+                                    entry[hand][axis] =
+                                        points[best_point][axis] - root[axis];
+                                // Arriving: the hand's own velocity
+                                // (relative to her) goes into the spring,
+                                // at most 2.5 m/s worth.
+                                const DWORD gap =
+                                    tick - g_chest_box.last_point_time[hand];
+                                if (!g_chest_box.touching[hand] && gap > 0 &&
+                                    gap < 100 && have_velocity)
+                                {
+                                    float v[3], speed2 = 0.0f, into = 0.0f;
+                                    for (int axis = 0; axis < 3; ++axis)
+                                    {
+                                        v[axis] = (points[0][axis] -
+                                            g_chest_box.last_point[hand][axis]) /
+                                            (gap / 1000.0f) -
+                                            last_velocity[axis];
+                                        speed2 += v[axis] * v[axis];
+                                        into -= v[axis] * normal[axis];
+                                    }
+                                    const float cap = 2.5f * metre;
+                                    const float scale = speed2 > cap * cap
+                                        ? cap / sqrtf(speed2) : 1.0f;
+                                    if (into > 0.2f * metre &&
+                                        std::isfinite(speed2))
+                                    {
+                                        SoftSpring& hit = g_soft[pick];
+                                        for (int axis = 0; axis < 3; ++axis)
+                                            hit.kick[axis] +=
+                                                v[axis] * scale * 0.6f;
+                                        hit.kick_pending = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (held_soft[hand] >= 0 && gripping)
+                            grabbing[hand] = true;
+                        if (held_soft[hand] >= 0 &&
+                            held_soft[hand] < g_soft_count && n > 0)
+                        {
+                            SoftSpring& part = g_soft[held_soft[hand]];
+                            const int p = held_point[hand] < n
+                                ? held_point[hand] : n - 1;
+                            for (int axis = 0; axis < 3; ++axis)
+                                part.press[hand][axis] = points[p][axis] -
+                                    root[axis] - entry[hand][axis];
+                            part.press_time[hand] = tick;
+                            if (grabbing[hand])
+                                part.grab_time[hand] = tick;
+                            g_tp_part_time[hand] = tick ? tick : 1;
+                        }                        if (touching && !g_chest_box.touching[hand])
+                        {
+                            vr_input_handhold_haptic(hand == 0);
+                            static bool reported = false;
+                            if (!reported)
+                            {
+                                reported = true;
+                                log("third-person: a controller hand "
+                                    "touched Lara's body -- the pressed "
+                                    "part gives");
+                            }
+                        }
+                        g_chest_box.touching[hand] = touching;
+                        if (touching)
+                            g_tp_touch_time[hand] = tick ? tick : 1;
+                        if (n > 0)
+                        {
+                            memcpy(g_chest_box.last_point[hand], points[0],
+                                   sizeof(points[0]));
+                            g_chest_box.last_point_time[hand] = tick;
+                        }
+                    }
+                }
+
+                soft_springs(segments, count, saved, xform, instance, push);
+                // Where her boxes are posed this frame, for the next one's
+                // touch test, and the pressed part's squash.
+                chest_box_store(count, saved, xform);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                ok = false;
+            }
+            g_first_person_head_segment = old_head;
+            for (int h = 0; h < 2; ++h)
+            {
+                g_first_person_shoulder_segment[h] = old_shoulder[h];
+                g_first_person_wrist_segment[h] = old_wrist[h];
+            }
+            if (!ok || g_soft_count <= 0)
+                return;
+
+            // Which bones the springs own: each soft part and what hangs
+            // off it.
+            static bool soft_bone[kMaxSegments];
+            for (int seg = 0; seg < count; ++seg)
+            {
+                soft_bone[seg] = false;
+                for (int i = 0; i < g_soft_count && !soft_bone[seg]; ++i)
+                    soft_bone[seg] = g_soft[i].seg >= 0 &&
+                        g_soft[i].seg < count &&
+                        segment_is_in_head_subtree(segments, count, seg,
+                                                   g_soft[i].seg);
+            }
+            k.touched_count = 0;
+            k.matrices = matrices;
+            __try
+            {
+                const auto write = [&](int index, const Mat4& moved)
+                {
+                    if (k.touched_count >= 256)
+                        return;
+                    const int i = k.touched_count++;
+                    k.touched[i] = static_cast<short>(index);
+                    memcpy(k.base[i], saved[index], sizeof(float) * 16);
+                    memcpy(k.written[i], &moved.m[0][0], sizeof(float) * 16);
+                    memcpy(matrices + index * 16, &moved.m[0][0],
+                           sizeof(float) * 16);
+                };
+                for (int seg = 0; seg < count; ++seg)
+                    if (soft_bone[seg])
+                        write(seg, matrix_from_floats(saved[seg]) * xform[seg]);
+                // Blended segments are not rebuilt by the renderer; each
+                // moves by the same weighted change as its two bones.
+                const ModelVirtualSegment* virtuals =
+                    reinterpret_cast<const ModelVirtualSegment*>(
+                        segments + count);
+                if (g_virtual_blend_mode < 0)
+                {
+                    double error[2] = { 0.0, 0.0 };
+                    for (int v = 0; v < virtual_count; ++v)
+                    {
+                        const int a = virtuals[v].index;
+                        const int b = virtuals[v].weight_index;
+                        const float wt = virtuals[v].weight;
+                        if (a < 0 || a >= count || b < 0 || b >= count)
+                            continue;
+                        for (int i = 0; i < 16; ++i)
+                        {
+                            const float value = saved[count + v][i];
+                            error[0] += fabs(value -
+                                ((1.0f - wt) * saved[a][i] + wt * saved[b][i]));
+                            error[1] += fabs(value -
+                                (wt * saved[a][i] + (1.0f - wt) * saved[b][i]));
+                        }
+                    }
+                    g_virtual_blend_mode = error[1] < error[0] ? 1 : 0;
+                }
+                for (int v = 0; v < virtual_count; ++v)
+                {
+                    const int a = virtuals[v].index;
+                    const int b = virtuals[v].weight_index;
+                    if (a < 0 || a >= count || b < 0 || b >= count ||
+                        (!soft_bone[a] && !soft_bone[b]))
+                        continue;
+                    const float wt = virtuals[v].weight;
+                    const float wa = g_virtual_blend_mode ? wt : 1.0f - wt;
+                    const float wb = 1.0f - wa;
+                    Mat4 blend;
+                    for (int r = 0; r < 4; ++r)
+                        for (int c = 0; c < 4; ++c)
+                            blend.m[r][c] = wa * xform[a].m[r][c] +
+                                            wb * xform[b].m[r][c];
+                    write(count + v,
+                          matrix_from_floats(saved[count + v]) * blend);
+                }
+                k.active = k.touched_count > 0;
+                // Wall touch swaps her whole pose out and back round the
+                // controller hands, and puts its own base back when the
+                // game is paused. Both copies get the sprung bones, so
+                // neither swap loses them and its check still matches.
+                WallTouchKeep& wall = g_wall_keep;
+                if (wall.active && wall.frame == g_present_count &&
+                    wall.matrices == matrices)
+                    for (int i = 0; i < k.touched_count; ++i)
+                        if (k.touched[i] < wall.total)
+                        {
+                            memcpy(wall.written[k.touched[i]], k.written[i],
+                                   sizeof(float) * 16);
+                            memcpy(g_wall_base.full[k.touched[i]],
+                                   k.written[i], sizeof(float) * 16);
+                        }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                // Put back whatever was written before the fault.
+                __try
+                {
+                    for (int i = 0; i < k.touched_count; ++i)
+                        memcpy(matrices + k.touched[i] * 16, k.base[i],
+                               sizeof(float) * 16);
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+                k.active = false;
+                return;
+            }
+            if (!k.reported && k.active)
+            {
+                k.reported = true;
+                log("third-person: soft parts on (%d spring%s, %d bone "
+                    "matrices driven, at most %.1f degrees)", g_soft_count,
+                    g_soft_count == 1 ? "" : "s", k.touched_count,
+                    config().body_soft_angle);
             }
         }
 
@@ -12240,6 +12975,9 @@ namespace trlvr
                 const bool carried = carry_apply(instance, model, &carry);
                 if (!carried)
                     wall_touch_frame(instance, model);
+                // After wall touch, into whose kept pose it writes itself.
+                if (!g_first_person_active)
+                    third_person_soft_frame(instance, model);
                 g_draw_instance(instance, a2, a3, a4, a5, model, a7,
                                 colour, transform);
                 if (carried)
@@ -12320,7 +13058,7 @@ namespace trlvr
                     kOffInstanceMatrices);
                 valid = segments && vertices && strips && matrices &&
                     count > 0 && virtual_count >= 0 &&
-                    count + virtual_count <= 512 &&
+                    count + virtual_count <= kMaxSegments &&
                     vertex_count > 0 && vertex_count <= 65535;
                 for (int hand = 0; hand < 2 && valid; ++hand)
                     valid = g_first_person_wrist_segment[hand] >= 0 &&
@@ -12341,7 +13079,7 @@ namespace trlvr
             }
             bike_frame_update(matrices);
 
-            bool hand_bone[2][512]{};
+            bool hand_bone[2][kMaxSegments]{};
             for (int bone = 0; bone < count; ++bone)
                 for (int hand = 0; hand < 2; ++hand)
                     hand_bone[hand][bone] = segment_is_in_head_subtree(
@@ -12809,8 +13547,8 @@ namespace trlvr
                     model_bytes + kOffModelTextureStrips) =
                         g_first_person_hand_strips[hand].data;
 
-                short touched[512]{};
-                float saved[512][16]{};
+                static short touched[kMaxSegments];
+                static float saved[kMaxSegments][16];
                 int touched_count = 0;
                 for (int segment = 0; segment < total; ++segment)
                 {
@@ -14274,6 +15012,73 @@ namespace trlvr
             LARGE_INTEGER last{};
         };
         ThirdPersonCamera g_tp_camera;
+
+        // View switches glide instead of cutting (user 2026-10-14): between
+        // the third-person presets it is only the seat and the world scale
+        // that differ, so both are blended over [vr]
+        // view_transition_seconds (0 = cut, as before). First person also
+        // changes what is drawn (her head, her body, the hands), so it
+        // switches at her head: going in, the third-person camera flies to
+        // her eye and the view becomes first person on arrival; coming out,
+        // it becomes third person at once and flies away from her eye.
+        struct ViewTween
+        {
+            bool active = false;
+            bool to_first = false;      // third person, flying to her eye
+            bool from_first = false;    // third person, flying from her eye
+            bool arrived = false;       // to_first done: switch the view now
+            float seconds = 0.0f;
+            float from[3]{};
+            float from_scale = 1.0f;
+            float scale_fraction = 0.0f;    // eased, 0 at from .. 1 there
+            LARGE_INTEGER start{};
+        };
+        ViewTween g_view_tween;
+
+        float view_tween_elapsed()
+        {
+            LARGE_INTEGER now{}, frequency{};
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            return frequency.QuadPart
+                ? (float)((double)(now.QuadPart -
+                                   g_view_tween.start.QuadPart) /
+                          (double)frequency.QuadPart) : 1.0e6f;
+        }
+
+        // Where the first-person eye would be: her head joint and the eye
+        // height above it.
+        bool lara_eye_point(float out[3])
+        {
+            __try
+            {
+                const unsigned char* lara =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerInstance);
+                const unsigned char* prop =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerProp);
+                if (!lara || !prop)
+                    return false;
+                const int head = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropHeadSegment);
+                const float* matrices = *reinterpret_cast<const float* const*>(
+                    lara + kOffInstanceMatrices);
+                if (!matrices || head < 0 || head >= kMaxSegments)
+                    return false;
+                const float* joint = matrices + head * 16 + 12;
+                for (int k = 0; k < 3; ++k)
+                    if (!std::isfinite(joint[k]) || fabsf(joint[k]) > 1.0e7f)
+                        return false;
+                out[0] = joint[0];
+                out[1] = joint[1];
+                out[2] = joint[2] + config().first_person_eye_height;
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
         // True while a third-person preset draws the view (the world factor
         // then comes from g_tp_scale; it was board-only before the sliders).
         bool g_tp_board_scale = false;
@@ -14504,6 +15309,46 @@ namespace trlvr
             LARGE_INTEGER now{}, frequency{};
             QueryPerformanceCounter(&now);
             QueryPerformanceFrequency(&frequency);
+
+            // A view switch in flight: from where the camera was to this
+            // preset's seat (or her eye), eased in and out. The goal is
+            // followed as it moves, so it lands where the camera should
+            // be now, not where it should have been at the switch.
+            if (g_view_tween.active)
+            {
+                ViewTween& tw = g_view_tween;
+                float goal[3] = { target[0], target[1], target[2] };
+                const bool have_goal = !tw.to_first || lara_eye_point(goal);
+                const float t = tw.seconds > 0.001f
+                    ? view_tween_elapsed() / tw.seconds : 1.0f;
+                const float u = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+                const float s = u * u * (3.0f - 2.0f * u);
+                // Inside her head is not a place to be: the flight to it
+                // stops a little short, the flight from it starts a little
+                // way out.
+                const float e = tw.to_first ? 0.92f * s
+                              : tw.from_first ? 0.08f + 0.92f * s : s;
+                tw.scale_fraction = s;
+                for (int k = 0; k < 3; ++k)
+                    g_tp_camera.position[k] = tw.from[k] +
+                        (goal[k] - tw.from[k]) * e;
+                g_tp_camera.valid = true;
+                g_tp_camera.mode = mode;
+                g_tp_camera.last = now;
+                if (!have_goal || u >= 1.0f)
+                {
+                    tw.active = false;
+                    tw.arrived = tw.to_first;
+                }
+                for (int k = 0; k < 3; ++k)
+                    out[k] = g_tp_camera.position[k];
+                const float dx = out[0] - retail_position[0];
+                const float dy = out[1] - retail_position[1];
+                const float dz = out[2] - retail_position[2];
+                g_tp_retail_distance = sqrtf(dx * dx + dy * dy + dz * dz);
+                return true;
+            }
+
             const double dt = g_tp_camera.last.QuadPart && frequency.QuadPart
                 ? (double)(now.QuadPart - g_tp_camera.last.QuadPart) /
                   (double)frequency.QuadPart : 1.0;
@@ -15269,7 +16114,7 @@ namespace trlvr
                     kOffModelNumSegments);
                 const float* matrices = *reinterpret_cast<
                     const float* const*>(inst + kOffInstanceMatrices);
-                if (!matrices || count <= 0 || count > 512)
+                if (!matrices || count <= 0 || count > kMaxSegments)
                     return false;
                 float best = 1.0e30f;
                 for (int s = 0; s < count; ++s)
@@ -15600,7 +16445,8 @@ namespace trlvr
             // the world behind the window with the head (user 2026-10-10,
             // crouching); the scene there stays rigid.
             if (tp_override && drive && !flat_screen &&
-                config().camera_collision && !theatre)
+                config().camera_collision && !theatre &&
+                !g_view_tween.active)
                 third_person_eye_collision(base_camera, tp_position);
 
             // The whole head pose, on the matrices the engine just built. Nothing
@@ -16208,8 +17054,19 @@ namespace trlvr
         // board_lara_height_cm tall); the palm sliders change it.
         tp_view_load();
         const int mode = camera_third_person_mode();
-        const float factor = mode >= 0 && mode < 3 ? g_tp_scale[mode] : 1.0f;
-        return std::isfinite(factor) && factor >= 1.0f ? factor : 1.0f;
+        float factor = mode >= 0 && mode < 3 ? g_tp_scale[mode] : 1.0f;
+        if (!std::isfinite(factor) || factor < 1.0f)
+            factor = 1.0f;
+        // A view switch in flight: the scale goes over as a ratio, so a
+        // change of twenty times looks as even as one of two.
+        if (g_view_tween.active)
+        {
+            const float from = fmaxf(1.0f, g_view_tween.from_scale);
+            const float to = g_view_tween.to_first ? 1.0f : factor;
+            factor = expf(logf(from) + (logf(to) - logf(from)) *
+                          g_view_tween.scale_fraction);
+        }
+        return factor;
     }
 
     bool camera_tp_view_available()
@@ -16341,11 +17198,18 @@ namespace trlvr
     // sliders had scaled the world up at all). Board's default shows Lara
     // board_lara_height_cm tall, a factor of about 175 / 15; a little
     // under that still counts.
+    //
+    // That test was the size itself -- nine tenths of board's default --
+    // so in board mode the god hand cut out as soon as the palm slider made
+    // Lara any bigger than about 17 cm, dropping her mid-carry (user
+    // 2026-10-14, log: picked up, then "left board gameplay" a second
+    // later at x6.58). What it was meant to exclude is the other views,
+    // so ask for the view: board mode, at any size where the world is
+    // noticeably smaller than the player.
     bool god_hand_scale()
     {
-        const float board = 175.0f /
-            fmaxf(1.0f, config().board_lara_height_cm);
-        return camera_world_scale_factor() >= 0.9f * board;
+        return camera_third_person_mode() == 2 &&
+               camera_world_scale_factor() >= 1.25f;
     }
 
     void camera_board_pluck_update(bool active, const bool grip[2],
@@ -16400,8 +17264,11 @@ namespace trlvr
         const float metre = config().world_scale;
         const float table = metre * factor;
         const float radius = 0.30f * metre + 0.04f * table;
-        // Palm platform upkeep: stand on the palm while it faces up
-        // (hysteresis 0.55); turned over, she drops to the floor below.
+        // Palm platform upkeep: stand on the palm while it faces up;
+        // turned over, she drops to the floor below. She gets on at 0.6 and
+        // stays on down to 0.3: at 0.7 / 0.55 a hand could not be lifted
+        // without its natural tilt tipping her off (user 2026-10-14, log:
+        // on the palm, then "turned over (up 0.54)" 0.13 s later).
         if (g_pluck.palm >= 0 && g_pluck.hand < 0)
         {
             const int ph = g_pluck.palm;
@@ -16415,7 +17282,9 @@ namespace trlvr
             g_pluck.palm_offset[1] += g_pluck.root[1] - g_pluck.palm_last_root[1];
             g_pluck.palm_last_root[0] = g_pluck.root[0];
             g_pluck.palm_last_root[1] = g_pluck.root[1];
-            const float edge = 0.055f * table;
+            // The whole hand, fingers included, is the platform (was the
+            // middle of the palm, 5.5 cm).
+            const float edge = 0.10f * table;
             const bool off_edge =
                 g_pluck.palm_offset[0] * g_pluck.palm_offset[0] +
                 g_pluck.palm_offset[1] * g_pluck.palm_offset[1] > edge * edge;
@@ -16429,7 +17298,7 @@ namespace trlvr
             stand[0] = seen.point[0] + g_pluck.palm_offset[0];
             stand[1] = seen.point[1] + g_pluck.palm_offset[1];
             stand[2] = seen.point[2] + 0.004f * table + lift;
-            if (up > 0.55f && !off_edge)
+            if (up > 0.30f && !off_edge)
             {
                 for (int k = 0; k < 3; ++k)
                     g_pluck.carry[k] = stand[k] - g_pluck.root[k];
@@ -16463,12 +17332,12 @@ namespace trlvr
             const bool airborne = lara_airborne(lara);
             for (int h = 0; h < 2; ++h)
             {
-                if (palm_up(h) <= 0.7f)
+                if (palm_up(h) <= 0.6f)
                     continue;
                 const PalmSeen& seen = g_palm_seen[h];
                 const float ox = g_pluck.root[0] - seen.point[0];
                 const float oy = g_pluck.root[1] - seen.point[1];
-                const float reach = 0.05f * table;
+                const float reach = 0.09f * table;
                 if (ox * ox + oy * oy > reach * reach)
                     continue;
                 const float top = seen.point[2] + 0.004f * table;
@@ -16545,7 +17414,11 @@ namespace trlvr
             g_pluck.inside[h] = inside;
             if (inside && g_pluck.hand < 0)
                 g_pluck.hover = true;
-            if (g_pluck.hand < 0 && pressed && inside)
+            // A grip on one of her soft parts holds that part, not her
+            // (user 2026-10-14).
+            const bool on_part = g_tp_part_time[h] &&
+                GetTickCount() - g_tp_part_time[h] < 150;
+            if (g_pluck.hand < 0 && pressed && inside && !on_part)
             {
                 if (g_pluck.palm >= 0)
                     log("board: Lara picked up off the %s palm",
@@ -16691,9 +17564,12 @@ namespace trlvr
                 const float fz = g_pluck.root[2] + g_pluck.carry[2];
                 const float ox = fx - seen.point[0];
                 const float oy = fy - seen.point[1];
-                const float reach = 0.07f * table;
+                // Hand to hand: let go anywhere over the other hand, from
+                // a little under it to a good drop above (was 7 cm across
+                // and 25 cm above, which a held Lara rarely met).
+                const float reach = 0.12f * table;
                 static int reported = 0;
-                if (up > -1.5f && reported < 6)
+                if (up > -1.5f && reported < 20)
                 {
                     ++reported;
                     log("board: release near the %s palm: up %.2f, %.2f "
@@ -16702,16 +17578,16 @@ namespace trlvr
                         sqrtf(ox * ox + oy * oy) / table,
                         (fz - seen.point[2]) / table);
                 }
-                if (up > 0.7f && ox * ox + oy * oy <= reach * reach &&
-                    fz > seen.point[2] - 0.05f * table &&
-                    fz < seen.point[2] + 0.25f * table)
+                if (up > 0.5f && ox * ox + oy * oy <= reach * reach &&
+                    fz > seen.point[2] - 0.08f * table &&
+                    fz < seen.point[2] + 0.35f * table)
                 {
                     g_pluck.palm = other;
                     g_pluck.palm_last_root[0] = g_pluck.root[0];
                     g_pluck.palm_last_root[1] = g_pluck.root[1];
                     g_pluck.palm_base_z = g_pluck.root[2];
                     // Keep her near the middle of the hand.
-                    const float keep = 0.03f * table;
+                    const float keep = 0.05f * table;
                     const float d = sqrtf(ox * ox + oy * oy);
                     const float s = d > keep ? keep / d : 1.0f;
                     g_pluck.palm_offset[0] = ox * s;
@@ -17058,6 +17934,18 @@ namespace trlvr
             animated ? (moved ? "played" : "skipped") : "none");
     }
 
+    void camera_set_hand_grips(bool left, bool right)
+    {
+        g_tp_grip[0] = left;
+        g_tp_grip[1] = right;
+    }
+
+    bool camera_hand_touching_lara(bool left)
+    {
+        const DWORD at = g_tp_touch_time[left ? 0 : 1];
+        return !g_first_person_active && at && GetTickCount() - at < 150;
+    }
+
     bool camera_board_pluck_held()
     {
         return g_pluck.hand >= 0 || g_pluck.palm >= 0;
@@ -17296,11 +18184,40 @@ namespace trlvr
     {
         if (g_view_first_person < 0)
             g_view_first_person = config().first_person ? 1 : 0;
+        // A flight that stopped being drawn (a menu, a cutscene) ends where
+        // it was going.
+        if (g_view_tween.active &&
+            view_tween_elapsed() > g_view_tween.seconds + 0.5f)
+        {
+            g_view_tween.active = false;
+            g_view_tween.arrived = g_view_tween.to_first;
+        }
+        if (g_view_tween.arrived)
+        {
+            g_view_tween.arrived = false;
+            g_view_first_person = 1;
+            log("view: arrived at her head -- first person");
+        }
         return g_view_first_person != 0;
+    }
+
+    bool camera_view_tween_active()
+    {
+        return g_view_tween.active || g_view_tween.arrived;
     }
 
     void camera_toggle_view(const char* why)
     {
+        // A switch asked for during a flight: the flight ends first.
+        if (g_view_tween.active || g_view_tween.arrived)
+        {
+            if (g_view_tween.to_first)
+                g_view_first_person = 1;
+            g_view_tween.active = false;
+            g_view_tween.arrived = false;
+        }
+        const bool was_first = camera_view_first_person();
+        const float was_scale = camera_world_scale_factor();
         // third_person_mode = all: classic -> shoulder -> board -> first
         // person -> classic. Otherwise first person <-> the set preset.
         bool first = !camera_view_first_person();
@@ -17319,6 +18236,41 @@ namespace trlvr
             }
             else
                 first = true;
+        }
+
+        // The glide (see ViewTween). It needs somewhere to start from: the
+        // third-person seat as last drawn, or the first-person eye.
+        const float seconds = config().view_transition_seconds;
+        if (seconds > 0.01f)
+        {
+            ViewTween tween;
+            tween.seconds = seconds;
+            QueryPerformanceCounter(&tween.start);
+            if (!was_first && g_tp_camera.valid)
+            {
+                memcpy(tween.from, g_tp_camera.position, sizeof(tween.from));
+                tween.from_scale = was_scale;
+                tween.to_first = first;
+                tween.active = true;
+            }
+            else if (was_first && !first && g_core_last_write_valid)
+            {
+                memcpy(tween.from, g_core_last_write, sizeof(tween.from));
+                tween.from_scale = 1.0f;
+                tween.from_first = true;
+                tween.active = true;
+            }
+            if (tween.active)
+            {
+                g_view_tween = tween;
+                if (tween.to_first)
+                {
+                    // Still third person until the camera reaches her.
+                    log("view: flying to her head over %.2f s (%s)", seconds,
+                        why ? why : "?");
+                    return;
+                }
+            }
         }
         g_view_first_person = first ? 1 : 0;
         if (!first)
@@ -18322,7 +19274,7 @@ namespace trlvr
         if (config().hmd_aim)
             log("aim: head-directed free-fire target enabled (camera mode 13)");
 
-        log("view: starting in %s (right stick long press or \\ switches "
+        log("view: starting in %s (right stick click or \\ switches "
             "live)", camera_view_first_person() ? "first person"
                                                 : "third person");
         if (camera_view_first_person())

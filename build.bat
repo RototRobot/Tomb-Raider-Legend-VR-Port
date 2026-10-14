@@ -23,6 +23,7 @@ set SRC=%SRC% "%ROOT%src\proxy\proxy_device.cpp"
 set SRC=%SRC% "%ROOT%src\proxy\proxy_swapchain.cpp"
 set SRC=%SRC% "%ROOT%src\proxy\window.cpp"
 set SRC=%SRC% "%ROOT%src\proxy\gpu_profile.cpp"
+set SRC=%SRC% "%ROOT%src\proxy\overlay.cpp"
 set SRC=%SRC% "%ROOT%src\common\log.cpp"
 set SRC=%SRC% "%ROOT%src\common\config.cpp"
 set SRC=%SRC% "%ROOT%src\vr\vr_math.cpp"
@@ -48,6 +49,9 @@ rem OpenXR: headers and a static loader (third_party\openxr). Linking the
 rem loader in means there is no DLL of ours to go missing; a missing or
 rem broken runtime fails xrCreateInstance at run time and the game runs flat.
 set "OPENXR=%ROOT%third_party\openxr\include"
+rem Dear ImGui (third_party\imgui): the in-game settings overlay.
+set "IMGUI=%ROOT%third_party\imgui"
+for %%F in (imgui imgui_draw imgui_tables imgui_widgets imgui_impl_dx9 imgui_impl_win32) do call set SRC=%%SRC%% "%IMGUI%\%%F.cpp"
 set "OPENXRLIB=%ROOT%third_party\openxr\lib\win32\openxr_loader.lib"
 rem The VR interop header lives in our DXVK fork and pulls in Vulkan. The
 rem headers the fork vendors are used unless a Vulkan SDK is installed.
@@ -55,7 +59,7 @@ set "DXVKVR=%ROOT%dxvk-trlvr\src\d3d9"
 set "VKINC=%ROOT%dxvk-trlvr\include\vulkan\include"
 for /d %%D in ("C:\VulkanSDK\*") do set "VKINC=%%D\Include"
 
-set CFLAGS=/nologo /c /EHsc /MT /O2 /W4 /std:c++17 /DWIN32 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /I"%OPENXR%" /I"%DXVKVR%" /I"%VKINC%" /Fo"%OUT%\\"
+set CFLAGS=/nologo /c /EHsc /MT /O2 /W4 /std:c++17 /DWIN32 /DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DIMGUI_IMPL_WIN32_DISABLE_GAMEPAD /I"%OPENXR%" /I"%IMGUI%" /I"%DXVKVR%" /I"%VKINC%" /Fo"%OUT%\\"
 set LFLAGS=/nologo /DLL /MACHINE:X86 /DEF:"%ROOT%src\proxy\d3d9.def" /OUT:"%OUT%\d3d9.dll"
 
 echo Compiling...

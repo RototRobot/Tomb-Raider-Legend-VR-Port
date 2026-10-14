@@ -554,6 +554,162 @@ namespace trlvr
             state->Release();
         }
 
+        // Picture: brightness and contrast on the finished frame (user
+        // 2026-10-14: "a little washed out"). The game's own sliders work
+        // through the device gamma ramp, which Windows only applies to a
+        // fullscreen display -- never to a window, and never to the image
+        // that goes to the headset -- so the ramp it sets is caught
+        // (vr_submit_set_game_ramp) and applied here, with [vr]
+        // picture_brightness / picture_contrast on top.
+        //
+        // No shader: out = c * (in - 0.5) + 0.5 + b is c * in + k, done
+        // with two full-screen quads and fixed-function blending -- a
+        // multiply (src = c/2 and dest*src + src*dest, so up to 2x) and an
+        // add or subtract of k. The order avoids clipping highlights: a
+        // brightening contrast subtracts first and then multiplies.
+        float g_ramp_c = 1.0f, g_ramp_k = 0.0f;
+        bool g_ramp_seen = false;
+
+        void picture_pass(D3DBLENDOP op, D3DBLEND src, D3DBLEND dest,
+                          float value, UINT width, UINT height)
+        {
+            const float v = value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value;
+            const DWORD level = (DWORD)(v * 255.0f + 0.5f);
+            const DWORD colour = 0xFF000000u | (level << 16) | (level << 8) |
+                                 level;
+            const float w = (float)width, h = (float)height;
+            const VignetteVertex quad[4] = {
+                { -0.5f, -0.5f, 0.0f, 1.0f, colour },
+                { w - 0.5f, -0.5f, 0.0f, 1.0f, colour },
+                { -0.5f, h - 0.5f, 0.0f, 1.0f, colour },
+                { w - 0.5f, h - 0.5f, 0.0f, 1.0f, colour } };
+            g_device->SetRenderState(D3DRS_BLENDOP, op);
+            g_device->SetRenderState(D3DRS_SRCBLEND, src);
+            g_device->SetRenderState(D3DRS_DESTBLEND, dest);
+            g_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad,
+                                      sizeof(VignetteVertex));
+        }
+
+        void draw_picture_adjust(IDirect3DSurface9* back)
+        {
+            if (!g_device || !back)
+                return;
+            // The game's ramp first, then the mod's settings.
+            const bool game = config().picture_follow_game && g_ramp_seen;
+            const float cg = game ? g_ramp_c : 1.0f;
+            const float kg = game ? g_ramp_k : 0.0f;
+            const float cu = config().picture_contrast;
+            const float bu = config().picture_brightness;
+            float c = cu * cg;
+            const float k = cu * (kg - 0.5f) + 0.5f + bu;
+            if (!(c > 0.0f) || !std::isfinite(c) || !std::isfinite(k))
+                return;
+            c = fminf(c, 2.0f);
+            if (fabsf(c - 1.0f) < 0.004f && fabsf(k) < 0.002f)
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || !desc.Width || !desc.Height)
+                return;
+            IDirect3DStateBlock9* state = nullptr;
+            IDirect3DSurface9* old_target = nullptr;
+            D3DVIEWPORT9 old_viewport{};
+            if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
+                !state)
+                return;
+            state->Capture();
+            g_device->GetRenderTarget(0, &old_target);
+            g_device->GetViewport(&old_viewport);
+            if (SUCCEEDED(g_device->SetRenderTarget(0, back)))
+            {
+                const D3DVIEWPORT9 viewport = { 0, 0, desc.Width,
+                                                desc.Height, 0.0f, 1.0f };
+                g_device->SetViewport(&viewport);
+                g_device->SetVertexShader(nullptr);
+                g_device->SetPixelShader(nullptr);
+                g_device->SetTexture(0, nullptr);
+                g_device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+                g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,
+                                         FALSE);
+                g_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+                g_device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+                g_device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+                g_device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_FLAT);
+                // Colour only; whatever is in alpha is left alone.
+                g_device->SetRenderState(D3DRS_COLORWRITEENABLE,
+                    D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+                    D3DCOLORWRITEENABLE_BLUE);
+                g_device->SetTextureStageState(0, D3DTSS_COLOROP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_COLORARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAOP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(1, D3DTSS_COLOROP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_ALPHAOP,
+                                               D3DTOP_DISABLE);
+                if (SUCCEEDED(g_device->BeginScene()))
+                {
+                    const auto multiply = [&](float factor)
+                    {
+                        if (fabsf(factor - 1.0f) >= 0.004f)
+                            picture_pass(D3DBLENDOP_ADD, D3DBLEND_DESTCOLOR,
+                                         D3DBLEND_SRCCOLOR, 0.5f * factor,
+                                         desc.Width, desc.Height);
+                    };
+                    const auto offset = [&](float amount)
+                    {
+                        if (amount >= 0.002f)
+                            picture_pass(D3DBLENDOP_ADD, D3DBLEND_ONE,
+                                         D3DBLEND_ONE, amount, desc.Width,
+                                         desc.Height);
+                        else if (amount <= -0.002f)
+                            picture_pass(D3DBLENDOP_REVSUBTRACT,
+                                         D3DBLEND_ONE, D3DBLEND_ONE, -amount,
+                                         desc.Width, desc.Height);
+                    };
+                    if (k < 0.0f)
+                    {
+                        offset(k / c);      // (in + k/c) * c
+                        multiply(c);
+                    }
+                    else
+                    {
+                        multiply(c);
+                        offset(k);
+                    }
+                    g_device->EndScene();
+                }
+                static bool reported = false;
+                if (!reported)
+                {
+                    reported = true;
+                    log("picture: contrast %.2f, offset %+.3f (game ramp %s, "
+                        "trlvr.ini brightness %+.2f contrast %.2f)", c, k,
+                        game ? "used" : g_ramp_seen ? "ignored" : "not set",
+                        bu, cu);
+                }
+            }
+            if (old_target)
+            {
+                g_device->SetRenderTarget(0, old_target);
+                old_target->Release();
+            }
+            state->Apply();
+            g_device->SetViewport(&old_viewport);
+            state->Release();
+        }
+
         // Secure-grip badge: a solid yellow disc with a fist emoji, drawn
         // once into a texture with Direct2D/DirectWrite (colour glyphs; both
         // DLLs loaded at runtime, nothing linked).
@@ -3983,6 +4139,45 @@ namespace trlvr
         }
     }
 
+    void vr_submit_set_game_ramp(const void* ramp_data)
+    {
+        const D3DGAMMARAMP* ramp = static_cast<const D3DGAMMARAMP*>(ramp_data);
+        if (!ramp)
+            return;
+        // The best straight line through it (least squares on the mean of
+        // the three channels): brightness and contrast are what the game's
+        // sliders make of a ramp, so a line is all it holds.
+        double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+        for (int i = 0; i < 256; ++i)
+        {
+            const double x = i / 255.0;
+            const double y = (ramp->red[i] + ramp->green[i] + ramp->blue[i]) /
+                             (3.0 * 65535.0);
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+        }
+        const double n = 256.0;
+        const double var = sxx - sx * sx / n;
+        if (!(var > 1e-9))
+            return;
+        const double c = (sxy - sx * sy / n) / var;
+        const double k = (sy - c * sx) / n;
+        if (!std::isfinite(c) || !std::isfinite(k) || c <= 0.05)
+            return;
+        const bool changed = !g_ramp_seen || fabs(c - g_ramp_c) > 0.01 ||
+                             fabs(k - g_ramp_k) > 0.005;
+        g_ramp_c = (float)c;
+        g_ramp_k = (float)k;
+        g_ramp_seen = true;
+        if (changed)
+            log("picture: the game set its gamma ramp -- contrast %.2f, "
+                "offset %+.3f%s", c, k, config().picture_follow_game
+                ? "; applied to the headset"
+                : " (ignored: picture_follow_game = 0)");
+    }
+
     void vr_submit_notice(const wchar_t* title, const wchar_t* body)
     {
         if (!title || !body)
@@ -4044,6 +4239,7 @@ namespace trlvr
         // Mono: one image, both eyes, no copy.
         if (!config().stereo)
         {
+            draw_picture_adjust(back_buffer);
             const bool ok = submit_pair(back_buffer, back_buffer);
 
             if (!ok)
@@ -4090,7 +4286,9 @@ namespace trlvr
             // to be current when the mode started. Centre is the honest answer
             // for a draw with no eye of its own.
             vr_set_current_eye(EyeCenter);
-        
+            // Last, so it covers the game, its HUD and the mod's own drawing.
+            draw_picture_adjust(back_buffer);
+
             IDirect3DSurface9* submitted = resolved_back_buffer(back_buffer);
             if (!submitted || !submit_side_by_side(submitted))
             {
@@ -4111,6 +4309,7 @@ namespace trlvr
         // was being drawn. Keep it, so the other eye still has something to
         // show while it waits its turn.
         const int drawn = (vr_current_eye() == EyeRight) ? 1 : 0;
+        draw_picture_adjust(back_buffer);
         HRESULT hr = g_device->StretchRect(back_buffer, nullptr,
                                            g_eye[drawn], nullptr, D3DTEXF_NONE);
         if (FAILED(hr))

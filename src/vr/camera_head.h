@@ -49,6 +49,13 @@ namespace trlvr
     // only *active* in gameplay; this is what the player picked.
     bool camera_view_first_person();
     void camera_toggle_view(const char* why);
+    // A view switch is still gliding (or about to become first person).
+    bool camera_view_tween_active();
+    // Third person: that controller hand is on Lara's body right now (its
+    // trigger and grip then belong to the touch, not the game).
+    bool camera_hand_touching_lara(bool left);
+    // The grip buttons this frame, for the third-person soft-part hold.
+    void camera_set_hand_grips(bool left, bool right);
     // The third-person preset in use (0 classic, 1 shoulder, 2 board):
     // third_person_mode at start; with third_person_mode = all the view
     // switch steps through every preset and first person in turn.

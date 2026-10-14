@@ -38,4 +38,9 @@ namespace trlvr
     // menu actions that cannot start (user 2026-10-06: a tester's holster
     // setup "did nothing" with no way to tell why).
     void vr_submit_notice(const wchar_t* title, const wchar_t* body);
+
+    // The gamma ramp the game asks the device for (its brightness and
+    // contrast sliders): a D3DGAMMARAMP. Windows ignores it in a window,
+    // so the submit path applies it to the frame instead.
+    void vr_submit_set_game_ramp(const void* ramp);
 }

@@ -17,6 +17,12 @@ bundles jsoncpp, MIT / public domain); see `third_party/openxr/LICENSE` and
 `third_party/openxr/COPYING.adoc`. `third_party/openxr/README.md` says how
 the library was built.
 
+## Dear ImGui (`third_party/imgui/`)
+
+[Dear ImGui](https://github.com/ocornut/imgui) 1.91.8 by Omar Cornut, with
+its Direct3D 9 and Win32 backends, unmodified. Draws the in-game settings
+overlay. MIT licence; see `third_party/imgui/LICENSE.txt`.
+
 ## TRAWindowed
 
 The D3D9 proxy wrapper in `src/proxy/` started from
