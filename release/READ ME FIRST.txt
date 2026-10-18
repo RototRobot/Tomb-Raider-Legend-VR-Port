@@ -1,10 +1,9 @@
 ================================================================
-  Tomb Raider: Legend  --  VR mod          PREVIEW 5 (testers)
+  Tomb Raider: Legend  --  VR mod                    VERSION 1.0.0
 ================================================================
 
-This is an early preview for testers. Expect rough edges. Please report what
-you find (see REPORTING PROBLEMS at the end) -- the logs make most problems
-fixable without needing your PC.
+Please report anything that goes wrong (see REPORTING PROBLEMS at the end)
+-- the logs make most problems fixable without needing your PC.
 
 WHAT YOU NEED
 -------------
@@ -16,34 +15,21 @@ The original game files are not modified. The mod adds files beside trl.exe,
 and its launcher writes a separate patched copy named trl_vr.exe.
 
 
-NEW IN PREVIEW 5
-----------------
-  * New defaults for a fresh trlvr.ini: immersive controls on, the radial
-    gear menu, and the right-stick long press stepping through classic,
-    shoulder and board third person and first person. Your existing
-    trlvr.ini keeps its settings.
-  * Left stick: a click opens the radial gear menu, a hold pauses.
-  * Motorbike (first person): grip a handlebar to hold it.
-    bike_handlebars = 2 lets your hands steer; 3 adds a twist throttle on
-    the bar. Pistols on the bike stay in your main hand.
-  * Guns sit properly in Lara's hands everywhere, including on the bike and
-    after loading any checkpoint. The shotgun is lined up out of the box,
-    and left-handed play mirrors every gun's grip automatically.
-  * Reaching for a holster with gear in your hand puts the gear away and
-    draws the gun.
-  * Binoculars, grapple, grenades and medipacks are held while the grip is
-    held; let go and they go back. In the binocular view only zoom (left
-    stick), the triggers and a grip press (to leave) do anything.
-  * Theatre window and board diorama: corner handles resize them to any
-    shape; the handles fade in only as a hand comes near.
-  * Gear cross, sliders and handles also answer to your index fingertip.
-  * First person without immersive controls shows Lara's own animated hands
-    / body and guns, and a gamepad's right stick turns the view.
-  * smooth_turn_speed (degrees per second) for smooth turning;
-    first_person_eye_height can now go lower if your view sits too high.
-  * The board-mode god hand only works at board scale.
-  * Fixes: a warped copy of the crosshair and outlines in the other eye up
-    close; the long gun being drawn when reaching for the chest.
+NEW IN 1.0.0
+------------
+  * Soft body in third person too (immersive controls, body_soft = 1):
+    her chest moves with her and gives under your hands.
+  * Your whole hand meets Lara's body now -- palm, sides and fingers, not
+    just the fingertip.
+  * Player model mods work: the Lara Remastered Player Model Mod (and other
+    replacement models with many more bones) no longer leave Lara
+    invisible in first person.
+  * TR7-Menu-Hook (the mod loader those mods need) shows its menu on a
+    panel over your off hand. Point your main hand at it -- a laser shows
+    where -- and pull the main trigger to click. While you point at the
+    panel the game does not see that trigger. [vr] imgui_panel = 0 turns
+    the panel off.
+  * [developer] function_keys = 0 frees F1..F9 for other mods' menus.
 
 ------------------------------------------------------------
 1. PREPARE THE GAME

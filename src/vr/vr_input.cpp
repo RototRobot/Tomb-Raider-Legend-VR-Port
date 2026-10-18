@@ -3602,7 +3602,8 @@ namespace trlvr
         // left trigger fires and the right one does Action / precision aim.
         // Gear tuning, menus and the grapple pull keep the physical hands.
         const bool swap_triggers = config().left_handed;
-        const bool action_trigger = swap_triggers ? right_trigger : left_trigger;
+        const bool action_trigger = (swap_triggers ? right_trigger : left_trigger) &&
+            !vr_submit_imgui_pointing();
         const int action_hold = swap_triggers ? 1 : 0;
         // Single-pistol mode with pistols (not the long gun) in hand.
         const bool single_pistols_out = config().single_pistols &&
@@ -3744,6 +3745,11 @@ namespace trlvr
                 // (Y) and weapon switch (right stick click).
                 if (immersive_first_person &&
                     (i == GameGrenade || i == GameWeapon))
+                    continue;
+                // Pointing at another mod's ImGui menu: the triggers are
+                // its mouse button.
+                if (vr_submit_imgui_pointing() &&
+                    (i == GameFire || i == GameInteract))
                     continue;
                 // Binocular view: only the triggers (the view's own mode
                 // keys), pause and recentre; the left stick zooms and a

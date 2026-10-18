@@ -78,6 +78,12 @@ namespace trlvr
         // body_soft_angle degrees.
         bool body_soft = true;
         float body_soft_angle = 12.0f;
+        // Undocumented: size of the soft parts (1 = as modelled).
+        float body_soft_scale = 1.0f;
+        // F1..F9 developer keys (0 frees them for other mods' menus).
+        bool function_keys = true;
+        // Other mods' Dear ImGui menus shown as a VR panel.
+        bool imgui_panel = true;
         bool hmd_aim = true;
         float world_scale = 291.0f;
         float head_rotation_scale = 1.0f;

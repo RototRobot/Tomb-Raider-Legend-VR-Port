@@ -14,10 +14,10 @@ launcher that makes the game large-address-aware.
 > **This mod was made with heavy AI (Claude) assistance.** I want to be upfront
 > about that.
 
-> [!WARNING]
-> **This is a preview.** It is playable from start to finish in third person
-> and most of the way in first person, but expect rough edges. Bug reports with
-> logs are very welcome; see [Troubleshooting](#troubleshooting).
+> [!NOTE]
+> **Version 1.0.0.** It is playable from start to finish in third person and
+> most of the way in first person. Bug reports with logs are very welcome; see
+> [Troubleshooting](#troubleshooting).
 
 > [!IMPORTANT]
 > **Windows may block this mod from running.**
@@ -174,6 +174,11 @@ start-up.
   is what counts.
 - **Five languages**: the mod's own text follows the game's language (English,
   French, German, Italian, Spanish).
+- **Other mods' menus**: TR7-Menu-Hook's menu (the loader the Lara Remastered
+  Player Model Mod needs) is shown on a panel over your off hand. Point your
+  main hand at it and pull the main trigger to click; while you point at it the
+  game does not see that trigger. `imgui_panel = 0` turns it off. Player model
+  mods with many more bones work in first person.
 
 ---
 
@@ -298,6 +303,8 @@ Mostly for diagnosing problems. Each writes what it did to `trlvr.log`.
 | Numpad / | Start / stop recording finger poses to `trlvr_finger_poses.csv` |
 
 The game's own keys (Home, End, Delete, Page Up/Down, Insert) are left alone.
+`function_keys = 0` (`[developer]`) makes F1–F9 do nothing, for other mods
+that use them.
 
 ---
 
@@ -340,7 +347,8 @@ first and third person at any time in gameplay.
 | `board_diorama` | `0` | `board` camera: the world in an open box you can grab and move |
 | `hand_collision` | `0` | First-person hands stop at walls and floors |
 | `hand_body_collision` | `1` | Hands stop at Lara's body (full body) |
-| `body_spring` / `body_soft` | `1` / `1` | Torso and soft-body movement in full body |
+| `body_spring` / `body_soft` | `1` / `1` | Torso and soft-body movement in full body; soft body also in third person (immersive controls) |
+| `imgui_panel` | `1` | Other mods' ImGui menus (TR7-Menu-Hook) on a panel over your off hand, worked with a main-hand pointer |
 | `roomscale` / `roomscale_walk` | `1` / `1` | First person: walking in your room moves Lara; real steps play her walk |
 | `finger_tracking` | `0` | Lara's fingers follow yours on controllers that track fingers |
 | `first_person_hardcore` | `0` | The view turns with Lara through flips and rolls |

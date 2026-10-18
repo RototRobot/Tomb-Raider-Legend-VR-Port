@@ -82,6 +82,7 @@ namespace trlvr
             vr_update_pose();
 
         camera_first_person_gpu_frame_end();
+        imgui_state_reset();
 
         return _device->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion);
     }
@@ -156,6 +157,7 @@ namespace trlvr
 
         vr_submit_release_targets();
         reflection_stereo_release();
+        imgui_overlay_release();
         const HRESULT hr = _device->Reset(pPresentationParameters);
         gpu_profile_set_device(_device);
 
@@ -223,6 +225,8 @@ namespace trlvr
 
     HRESULT ProxyDevice::SetTransform(D3DTRANSFORMSTATETYPE State, CONST D3DMATRIX* pMatrix)
     {
+        if (State == D3DTS_PROJECTION && pMatrix)
+            imgui_state().projection = *pMatrix;
         return _device->SetTransform(State, pMatrix);
     }
 }

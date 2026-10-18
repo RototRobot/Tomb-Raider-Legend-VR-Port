@@ -95,6 +95,8 @@ namespace trlvr
             { L"vr", L"body_spring_angle", L"4" },
             { L"vr", L"body_soft", L"1" },
             { L"vr", L"body_soft_angle", L"12" },
+            { L"developer", L"function_keys", L"1" },
+            { L"vr", L"imgui_panel", L"1" },
             { L"vr", L"cutscene_mode", L"normal" },
             { L"vr", L"cutscene_screen_width", L"3.0" },
             { L"vr", L"cutscene_screen_height", L"0" },
@@ -327,6 +329,10 @@ namespace trlvr
             L"; your hands; at most body_soft_angle degrees (0..30).\r\n"
             L"body_soft = 1\r\n"
             L"body_soft_angle = 12\r\n"
+            L"; 1 = other mods' ImGui menus (TR7-Menu-Hook) are shown on a\r\n"
+            L"; panel over your off hand; point the main hand at it and pull\r\n"
+            L"; its trigger to click.\r\n"
+            L"imgui_panel = 1\r\n"
             L"; Cutscenes: normal (your head turns the cutscene camera) or\r\n"
             L"; theatre (comfort: the cutscene plays through a big window fixed\r\n"
             L"; in front of you in a dark space, still 3D -- lean to look\r\n"
@@ -450,6 +456,10 @@ namespace trlvr
             L"look_vertical = 1\r\n"
             L"\r\n"
             L"[developer]\r\n"
+            L"; 0 = the F1..F9 developer keys do nothing (frees them for other\r\n"
+            L"; mods' menus, e.g. TR7-Menu-Hook). F1 recentre is also on the\r\n"
+            L"; left stick double click.\r\n"
+            L"function_keys = 1\r\n"
             L"; Headset-local hand position in game units; controller-relative rotation in degrees.\r\n"
             L"; Rotation order is X, Y, Z. Press F5 to reload.\r\n"
             L"hand_left_x = 0\r\n"
@@ -808,6 +818,13 @@ namespace trlvr
         value = read_float(L"vr", L"body_soft_angle", L"12", path);
         g_config.body_soft_angle = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 30.0f ? 30.0f : value) : 12.0f;
+        // Undocumented (not written to the INI): [vr] body_soft_scale.
+        value = read_float(L"vr", L"body_soft_scale", L"1", path);
+        g_config.body_soft_scale = std::isfinite(value) && value >= 0.5f &&
+            value <= 2.0f ? value : 1.0f;
+        g_config.function_keys = read_bool(L"developer", L"function_keys",
+                                           true, path);
+        g_config.imgui_panel = read_bool(L"vr", L"imgui_panel", true, path);
         value = read_float(L"vr", L"body_spring_angle", L"4", path);
         g_config.body_spring_angle = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 15.0f ? 15.0f : value) : 4.0f;

@@ -13,6 +13,7 @@
 #include "../vr/hud_capture.h"
 #include "../vr/tune.h"
 #include "../vr/vr_submit.h"
+#include "imgui_overlay.h"
 #include "../vr/reflection_stereo.h"
 #include "msaa_cap.h"
 #include "gpu_profile.h"
@@ -174,7 +175,7 @@ namespace trlvr
         STDMETHOD(GetPaletteEntries)(THIS_ UINT PaletteNumber, PALETTEENTRY* pEntries) { return _device->GetPaletteEntries(PaletteNumber, pEntries); }
         STDMETHOD(SetCurrentTexturePalette)(THIS_ UINT PaletteNumber) { return _device->SetCurrentTexturePalette(PaletteNumber); }
         STDMETHOD(GetCurrentTexturePalette)(THIS_ UINT* PaletteNumber) { return _device->GetCurrentTexturePalette(PaletteNumber); }
-        STDMETHOD(SetScissorRect)(THIS_ CONST RECT* pRect) { return _device->SetScissorRect(pRect); }
+        STDMETHOD(SetScissorRect)(THIS_ CONST RECT* pRect) { if (pRect) imgui_state().scissor = *pRect; return _device->SetScissorRect(pRect); }
         STDMETHOD(GetScissorRect)(THIS_ RECT* pRect) { return _device->GetScissorRect(pRect); }
         STDMETHOD(SetSoftwareVertexProcessing)(THIS_ BOOL bSoftware) { return _device->SetSoftwareVertexProcessing(bSoftware); }
         STDMETHOD_(BOOL, GetSoftwareVertexProcessing)(THIS) { return _device->GetSoftwareVertexProcessing(); }
@@ -402,6 +403,12 @@ namespace trlvr
         STDMETHOD(DrawPrimitive)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); return dispatch_draw([&] { return _device->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount); }); }
         STDMETHOD(DrawIndexedPrimitive)(THIS_ D3DPRIMITIVETYPE PrimitiveType, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount)
         {
+            // Another mod's ImGui menu: into its own overlay (imgui_overlay.h).
+            if (imgui_overlay_matches(imgui_state()))
+                return imgui_overlay_draw(_device, imgui_state(), [&] {
+                    return _device->DrawIndexedPrimitive(PrimitiveType,
+                        BaseVertexIndex, MinVertexIndex, NumVertices,
+                        startIndex, primCount); });
             hud_capture_set_call(_ReturnAddress(), primCount);
             return dispatch_draw([&] { return _device->DrawIndexedPrimitive(
                 PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices,
@@ -411,12 +418,12 @@ namespace trlvr
         STDMETHOD(DrawIndexedPrimitiveUP)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount, CONST void* pIndexData, D3DFORMAT IndexDataFormat, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); return dispatch_draw([&] { return _device->DrawIndexedPrimitiveUP(PrimitiveType, MinVertexIndex, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride); }); }
         STDMETHOD(ProcessVertices)(THIS_ UINT SrcStartIndex, UINT DestIndex, UINT VertexCount, IDirect3DVertexBuffer9* pDestBuffer, IDirect3DVertexDeclaration9* pVertexDecl, DWORD Flags) { return _device->ProcessVertices(SrcStartIndex, DestIndex, VertexCount, pDestBuffer, pVertexDecl, Flags); }
         STDMETHOD(CreateVertexDeclaration)(THIS_ CONST D3DVERTEXELEMENT9* pVertexElements, IDirect3DVertexDeclaration9** ppDecl) { return _device->CreateVertexDeclaration(pVertexElements, ppDecl); }
-        STDMETHOD(SetVertexDeclaration)(THIS_ IDirect3DVertexDeclaration9* pDecl) { return _device->SetVertexDeclaration(pDecl); }
+        STDMETHOD(SetVertexDeclaration)(THIS_ IDirect3DVertexDeclaration9* pDecl) { imgui_state().fvf = 0; return _device->SetVertexDeclaration(pDecl); }
         STDMETHOD(GetVertexDeclaration)(THIS_ IDirect3DVertexDeclaration9** ppDecl) { return _device->GetVertexDeclaration(ppDecl); }
-        STDMETHOD(SetFVF)(THIS_ DWORD FVF) { return _device->SetFVF(FVF); }
+        STDMETHOD(SetFVF)(THIS_ DWORD FVF) { imgui_state().fvf = FVF; return _device->SetFVF(FVF); }
         STDMETHOD(GetFVF)(THIS_ DWORD* pFVF) { return _device->GetFVF(pFVF); }
         STDMETHOD(CreateVertexShader)(THIS_ CONST DWORD* pFunction, IDirect3DVertexShader9** ppShader) { return _device->CreateVertexShader(pFunction, ppShader); }
-        STDMETHOD(SetVertexShader)(THIS_ IDirect3DVertexShader9* pShader) { return _device->SetVertexShader(pShader); }
+        STDMETHOD(SetVertexShader)(THIS_ IDirect3DVertexShader9* pShader) { imgui_state().vertex_shader = pShader != nullptr; return _device->SetVertexShader(pShader); }
         STDMETHOD(GetVertexShader)(THIS_ IDirect3DVertexShader9** ppShader) { return _device->GetVertexShader(ppShader); }
         STDMETHOD(GetVertexShaderConstantF)(THIS_ UINT StartRegister, float* pConstantData, UINT Vector4fCount) { return _device->GetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount); }
         STDMETHOD(SetVertexShaderConstantI)(THIS_ UINT StartRegister, CONST int* pConstantData, UINT Vector4iCount) { return _device->SetVertexShaderConstantI(StartRegister, pConstantData, Vector4iCount); }

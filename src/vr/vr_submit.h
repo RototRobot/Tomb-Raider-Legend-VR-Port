@@ -39,4 +39,7 @@ namespace trlvr
     // menu actions that cannot start (user 2026-10-06: a tester's holster
     // setup "did nothing" with no way to tell why).
     void vr_submit_notice(const wchar_t* title, const wchar_t* body);
+    // The main hand points at another mod's ImGui menu panel: its trigger
+    // is the menu's mouse button, not the game's.
+    bool vr_submit_imgui_pointing();
 }

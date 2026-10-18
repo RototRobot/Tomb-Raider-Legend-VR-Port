@@ -1366,14 +1366,21 @@ namespace trlvr
             return;
         if (!g_hand_offset_loaded)
             load_hand_offsets();
-        if (GetAsyncKeyState(VK_F1) & 1)
+        // [developer] function_keys = 0 frees F1..F9 for other mods (user
+        // 2026-10-18: TR7-Menu-Hook's menu uses them). The edge bit is read
+        // either way, so a press made while off does not fire later.
+        const bool fkeys = config().function_keys;
+        const auto fkey = [fkeys](int vk) {
+            return (GetAsyncKeyState(vk) & 1) != 0 && fkeys;
+        };
+        if (fkey(VK_F1))
             vr_recenter();
-        if (GetAsyncKeyState(VK_F5) & 1)
+        if (fkey(VK_F5))
             load_hand_offsets();
         const bool shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
         // Shift+F7 / Shift+F8: water reflection / screen copy modes
         // (diagnosis, reflection_stereo.h).
-        const bool f7 = (GetAsyncKeyState(VK_F7) & 1) != 0;
+        const bool f7 = fkey(VK_F7);
         if (f7 && shift_down)
             reflection_stereo_cycle_mode(false);
         else if (f7)
@@ -1383,12 +1390,12 @@ namespace trlvr
                 g_view_prescale_fix ? "ON" : "OFF",
                 g_view_prescale_fix ? "restored" : "disabled for comparison");
         }
-        if ((GetAsyncKeyState(VK_F6) & 1) && g_gear_tuning_enabled)
+        if (fkey(VK_F6) && g_gear_tuning_enabled)
             g_gear_request = true;
-        if (GetAsyncKeyState(VK_F9) & 1)
+        if (fkey(VK_F9))
             hud_capture_start();
         // F2: first-person object culling open / headset frustum (cull.h).
-        if (GetAsyncKeyState(VK_F2) & 1)
+        if (fkey(VK_F2))
         {
             if (GetAsyncKeyState(VK_SHIFT) & 0x8000)
                 cull_toggle_terrain_culling();
@@ -1396,9 +1403,9 @@ namespace trlvr
                 cull_toggle_object_culling();
         }
         // F3: GPU time of each part of the next frame (gpu_profile.h).
-        if (GetAsyncKeyState(VK_F3) & 1)
+        if (fkey(VK_F3))
             gpu_profile_request();
-        if (GetAsyncKeyState(VK_F4) & 1)
+        if (fkey(VK_F4))
         {
             hud_scene_capture_start();
             vr_world_capture_start();
@@ -1455,7 +1462,7 @@ namespace trlvr
                     camera_pose_debug_key(20);
             }
         }
-        const bool f8 = (GetAsyncKeyState(VK_F8) & 1) != 0;
+        const bool f8 = fkey(VK_F8);
         if (f8 && shift_down)
             reflection_stereo_cycle_mode(true);
         else if (f8)

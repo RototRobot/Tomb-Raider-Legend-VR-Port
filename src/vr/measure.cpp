@@ -110,7 +110,7 @@ namespace trlvr
         {
             const int nseg = at<int>(model, kModNumSegments);
             const void* segs = at<void*>(model, kModSegmentList);
-            if (nseg < 1 || nseg > 512 || !readable(segs, (size_t)nseg * kSegSize))
+            if (nseg < 1 || nseg > 2048 || !readable(segs, (size_t)nseg * kSegSize))
                 return false;
 
             float lo[3] = { 1e30f, 1e30f, 1e30f };
@@ -125,7 +125,7 @@ namespace trlvr
             float bhi[3] = { -1e30f, -1e30f, -1e30f };
 
             // Accumulated pivots, one per segment.
-            static float world[512][3];
+            static float world[2048][3];
 
             for (int i = 0; i < nseg; ++i)
             {

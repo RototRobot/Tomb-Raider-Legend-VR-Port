@@ -1,4 +1,5 @@
 #include "vr_submit.h"
+#include "../proxy/imgui_overlay.h"
 #include "lang.h"
 #include "perf_cpu.h"
 #include "vr_session.h"
@@ -2507,6 +2508,12 @@ namespace trlvr
 
         // A text panel floating in front of the player (yaw-only body frame),
         // drawn over the finished frame in both eyes.
+        void draw_world_panel_at(IDirect3DSurface9* back,
+                                 const D3DSURFACE_DESC& desc,
+                                 IDirect3DTexture9* texture,
+                                 const float centre[3], float half_w,
+                                 float half_h);
+
         void draw_world_panel(IDirect3DSurface9* back,
                               const D3DSURFACE_DESC& desc,
                               IDirect3DTexture9* texture, float up,
@@ -2518,8 +2525,19 @@ namespace trlvr
             if (!texture || !(metre > 0.0f) ||
                 !vr_body_point_head_position(0.0f, up, forward, centre))
                 return;
-            const float half_w = half_w_metres * metre;
-            const float half_h = half_h_metres * metre;
+            draw_world_panel_at(back, desc, texture, centre,
+                                half_w_metres * metre, half_h_metres * metre);
+        }
+
+        // A head-facing textured quad at a head-frame point (game units).
+        void draw_world_panel_at(IDirect3DSurface9* back,
+                                 const D3DSURFACE_DESC& desc,
+                                 IDirect3DTexture9* texture,
+                                 const float centre[3], float half_w,
+                                 float half_h)
+        {
+            if (!texture)
+                return;
             const float eye_w = desc.Width * 0.5f;
             IDirect3DStateBlock9* state = nullptr;
             if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
@@ -3253,6 +3271,394 @@ namespace trlvr
                 draw_hand_lines(back, desc, lines, used);
         }
 
+        // Another mod's ImGui menu (imgui_overlay.h), user 2026-10-18:
+        // held over the off hand like a tablet and worked with a pointer
+        // from the main hand.
+        //  * The panel shows what ImGui actually drew: a quarter-size copy
+        //    of its drawn area is read back four times a second and the
+        //    non-transparent pixels bound it (its menu bar spans the whole
+        //    window, 3844 px, with a few items at its left).
+        //  * 12 cm above the off hand's palm, facing the eye, 0.9 mm a
+        //    window pixel (at most 0.5 x 0.5 m).
+        //  * The main hand's forward ray: a laser to the panel; where it
+        //    hits, the real mouse is moved there (SendInput -- the menu
+        //    hook blocks SetCursorPos while its menu is open) and the main
+        //    trigger clicks. While pointing, the game does not see that
+        //    trigger (vr_submit_imgui_pointing).
+        IDirect3DTexture9* g_imgui_panel = nullptr;
+        UINT g_imgui_panel_w = 0, g_imgui_panel_h = 0;
+        IDirect3DTexture9* g_imgui_probe = nullptr;      // quarter size
+        IDirect3DSurface9* g_imgui_probe_cpu = nullptr;
+        UINT g_imgui_probe_w = 0, g_imgui_probe_h = 0;
+        RECT g_imgui_content{};
+        bool g_imgui_content_valid = false;
+        ULONGLONG g_imgui_probe_at = 0;
+        ULONGLONG g_imgui_pointing_at = 0;
+        bool g_imgui_trigger_was = false;
+
+        void imgui_release()
+        {
+            if (g_imgui_panel) g_imgui_panel->Release();
+            if (g_imgui_probe) g_imgui_probe->Release();
+            if (g_imgui_probe_cpu) g_imgui_probe_cpu->Release();
+            g_imgui_panel = g_imgui_probe = nullptr;
+            g_imgui_probe_cpu = nullptr;
+            g_imgui_panel_w = g_imgui_panel_h = 0;
+            g_imgui_probe_w = g_imgui_probe_h = 0;
+            g_imgui_content_valid = false;
+        }
+
+        // The drawn pixels' bounds inside `area` (overlay pixels).
+        void imgui_probe(IDirect3DSurface9* overlay, const RECT& area)
+        {
+            const UINT w = (UINT)((area.right - area.left + 3) / 4);
+            const UINT h = (UINT)((area.bottom - area.top + 3) / 4);
+            if (!w || !h || w > 2048 || h > 2048)
+                return;
+            if (!g_imgui_probe || g_imgui_probe_w != w || g_imgui_probe_h != h)
+            {
+                if (g_imgui_probe) g_imgui_probe->Release();
+                if (g_imgui_probe_cpu) g_imgui_probe_cpu->Release();
+                g_imgui_probe = nullptr;
+                g_imgui_probe_cpu = nullptr;
+                if (FAILED(g_device->CreateTexture(w, h, 1,
+                        D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                        D3DPOOL_DEFAULT, &g_imgui_probe, nullptr)) ||
+                    FAILED(g_device->CreateOffscreenPlainSurface(w, h,
+                        D3DFMT_A8R8G8B8, D3DPOOL_SYSTEMMEM,
+                        &g_imgui_probe_cpu, nullptr)))
+                {
+                    if (g_imgui_probe) g_imgui_probe->Release();
+                    g_imgui_probe = nullptr;
+                    g_imgui_probe_cpu = nullptr;
+                    return;
+                }
+                g_imgui_probe_w = w;
+                g_imgui_probe_h = h;
+            }
+            IDirect3DSurface9* probe_surface = nullptr;
+            if (FAILED(g_imgui_probe->GetSurfaceLevel(0, &probe_surface)) || !probe_surface)
+                return;
+            const bool copied =
+                SUCCEEDED(g_device->StretchRect(overlay, &area, probe_surface,
+                                                nullptr, D3DTEXF_LINEAR)) &&
+                SUCCEEDED(g_device->GetRenderTargetData(probe_surface,
+                                                        g_imgui_probe_cpu));
+            probe_surface->Release();
+            D3DLOCKED_RECT locked{};
+            if (!copied || FAILED(g_imgui_probe_cpu->LockRect(&locked, nullptr,
+                                                              D3DLOCK_READONLY)))
+            {
+                static bool failed = false;
+                if (!failed)
+                {
+                    failed = true;
+                    log("imgui: content probe read-back failed");
+                }
+                return;
+            }
+            LONG x0 = (LONG)w, y0 = (LONG)h, x1 = -1, y1 = -1;
+            for (UINT y = 0; y < h; ++y)
+            {
+                const DWORD* row = reinterpret_cast<const DWORD*>(
+                    static_cast<const unsigned char*>(locked.pBits) +
+                    y * locked.Pitch);
+                // The row's background: its right-most pixel (user
+                // 2026-10-18: the menu bar's own fill spans the whole
+                // window, so only what differs from it counts -- its items
+                // at the left; rows that end transparent count any pixel).
+                const DWORD back_px = row[w - 1];
+                const bool filled = (back_px >> 24) > 8;
+                for (UINT x = 0; x < w; ++x)
+                {
+                    const DWORD px = row[x];
+                    if ((px >> 24) <= 8)
+                        continue;
+                    if (filled)
+                    {
+                        int diff = 0;
+                        for (int sh = 0; sh < 32; sh += 8)
+                        {
+                            const int d = (int)((px >> sh) & 0xFF) -
+                                          (int)((back_px >> sh) & 0xFF);
+                            diff = d < 0 ? (-d > diff ? -d : diff)
+                                         : (d > diff ? d : diff);
+                        }
+                        if (diff <= 24)
+                            continue;
+                    }
+                    if ((LONG)x < x0) x0 = (LONG)x;
+                    if ((LONG)x > x1) x1 = (LONG)x;
+                    if ((LONG)y < y0) y0 = (LONG)y;
+                    if ((LONG)y > y1) y1 = (LONG)y;
+                }
+            }
+            g_imgui_probe_cpu->UnlockRect();
+            static bool reported = false;
+            if (!reported)
+            {
+                reported = true;
+                log("imgui: content probe %ux%u -> %ld,%ld-%ld,%ld (quarter "
+                    "pixels)", w, h, x0, y0, x1, y1);
+            }
+            if (x1 < 0)
+            {
+                g_imgui_content_valid = false;
+                return;
+            }
+            g_imgui_content = { area.left + x0 * 4 - 6, area.top + y0 * 4 - 6,
+                                area.left + x1 * 4 + 10,
+                                area.top + y1 * 4 + 10 };
+            g_imgui_content_valid = true;
+        }
+
+        void imgui_mouse(const POINT& client, bool click, bool release)
+        {
+            D3DDEVICE_CREATION_PARAMETERS cp{};
+            if (FAILED(g_device->GetCreationParameters(&cp)) ||
+                !cp.hFocusWindow)
+                return;
+            POINT screen = client;
+            if (!ClientToScreen(cp.hFocusWindow, &screen))
+                return;
+            const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            const int vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            const int vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            if (vw < 2 || vh < 2)
+                return;
+            INPUT in[2]{};
+            int n = 0;
+            in[n].type = INPUT_MOUSE;
+            in[n].mi.dx = (LONG)((screen.x - vx) * 65535LL / (vw - 1));
+            in[n].mi.dy = (LONG)((screen.y - vy) * 65535LL / (vh - 1));
+            in[n].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE |
+                               MOUSEEVENTF_VIRTUALDESK;
+            ++n;
+            if (click || release)
+            {
+                in[n].type = INPUT_MOUSE;
+                in[n].mi.dwFlags = click ? MOUSEEVENTF_LEFTDOWN
+                                         : MOUSEEVENTF_LEFTUP;
+                ++n;
+            }
+            SendInput(n, in, sizeof(INPUT));
+        }
+
+        void draw_imgui_panel(IDirect3DSurface9* back)
+        {
+            IDirect3DSurface9* overlay = nullptr;
+            RECT drawn{};
+            if (!imgui_overlay_take(&overlay, &drawn))
+            {
+                g_imgui_content_valid = false;
+                if (g_imgui_trigger_was)
+                {
+                    g_imgui_trigger_was = false;
+                    POINT p{};
+                    imgui_mouse(p, false, true);
+                }
+                return;
+            }
+            D3DSURFACE_DESC desc{}, odesc{};
+            if (FAILED(back->GetDesc(&desc)) || FAILED(overlay->GetDesc(&odesc)))
+            {
+                overlay->Release();
+                return;
+            }
+            const ULONGLONG now = GetTickCount64();
+            if (now - g_imgui_probe_at >= 250)
+            {
+                g_imgui_probe_at = now;
+                imgui_probe(overlay, drawn);
+            }
+            RECT src = g_imgui_content_valid ? g_imgui_content : drawn;
+            if (src.left < 0) src.left = 0;
+            if (src.top < 0) src.top = 0;
+            if (src.right > (LONG)odesc.Width) src.right = (LONG)odesc.Width;
+            if (src.bottom > (LONG)odesc.Height) src.bottom = (LONG)odesc.Height;
+            const UINT w = (UINT)(src.right - src.left);
+            const UINT h = (UINT)(src.bottom - src.top);
+            if (w < 8 || h < 8)
+            {
+                overlay->Release();
+                return;
+            }
+            const float shrink = fminf(1.0f, 2048.0f / (float)(w > h ? w : h));
+            const UINT pw = (UINT)(w * shrink), ph = (UINT)(h * shrink);
+            if (!g_imgui_panel || g_imgui_panel_w != pw || g_imgui_panel_h != ph)
+            {
+                if (g_imgui_panel)
+                    g_imgui_panel->Release();
+                g_imgui_panel = nullptr;
+                if (FAILED(g_device->CreateTexture(pw, ph, 1,
+                        D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8,
+                        D3DPOOL_DEFAULT, &g_imgui_panel, nullptr)))
+                {
+                    g_imgui_panel = nullptr;
+                    overlay->Release();
+                    return;
+                }
+                g_imgui_panel_w = pw;
+                g_imgui_panel_h = ph;
+            }
+            IDirect3DSurface9* panel = nullptr;
+            if (FAILED(g_imgui_panel->GetSurfaceLevel(0, &panel)) || !panel)
+            {
+                overlay->Release();
+                return;
+            }
+            g_device->StretchRect(overlay, &src, panel, nullptr,
+                                  D3DTEXF_LINEAR);
+            overlay->Release();
+
+            // Where: over the off hand, facing the eye.
+            const float metre = tune_world_scale();
+            const bool off_left = !config().left_handed;
+            float centre[3];
+            bool placed = vr_hand_palm_head_position(off_left, centre);
+            if (!placed)
+            {
+                Mat4 pose;
+                placed = vr_controller_head_pose(off_left, &pose);
+                for (int k = 0; k < 3 && placed; ++k)
+                    centre[k] = pose.m[3][k];
+            }
+            float metre_per_px = 0.001f / shrink;
+            metre_per_px = fminf(metre_per_px, fminf(0.6f / pw, 0.6f / ph));
+            const float half_w = 0.5f * pw * metre_per_px * metre;
+            const float half_h = 0.5f * ph * metre_per_px * metre;
+            if (!placed || !(metre > 0.0f))
+            {
+                panel->Release();
+                return;
+            }
+            // Head frame: y is down -- the panel's lower edge 12 cm above
+            // the palm.
+            centre[1] -= 0.12f * metre + half_h;
+
+            // The pointer: the main hand's forward ray onto the panel's
+            // plane (parallel to the view, through its centre).
+            bool hit = false;
+            float hit_u = 0.0f, hit_v = 0.0f;
+            float origin[3]{}, end[3]{};
+            Mat4 ray;
+            if (vr_controller_head_pose(!off_left, &ray))
+            {
+                float d[3] = { ray.m[2][0], ray.m[2][1], ray.m[2][2] };
+                for (int k = 0; k < 3; ++k)
+                    origin[k] = ray.m[3][k];
+                const float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                if (len > 1e-6f && fabsf(d[2]) > 1e-4f)
+                {
+                    for (float& c : d)
+                        c /= len;
+                    const float t = (centre[2] - origin[2]) / d[2];
+                    if (t > 0.0f)
+                    {
+                        for (int k = 0; k < 3; ++k)
+                            end[k] = origin[k] + d[k] * t;
+                        hit_u = (end[0] - (centre[0] - half_w)) / (2.0f * half_w);
+                        hit_v = (end[1] - (centre[1] - half_h)) / (2.0f * half_h);
+                        hit = hit_u >= 0.0f && hit_u <= 1.0f &&
+                              hit_v >= 0.0f && hit_v <= 1.0f;
+                    }
+                }
+            }
+            const bool trigger = hit && vr_input_trigger_held(!off_left);
+            if (hit)
+            {
+                g_imgui_pointing_at = now;
+                const POINT client = {
+                    (LONG)(src.left + hit_u * w), (LONG)(src.top + hit_v * h) };
+                imgui_mouse(client, trigger && !g_imgui_trigger_was,
+                            !trigger && g_imgui_trigger_was);
+                // The pointer's dot on the panel.
+                const LONG x = (LONG)(hit_u * pw), y = (LONG)(hit_v * ph);
+                RECT outer = { x - 5, y - 5, x + 6, y + 6 };
+                RECT inner = { x - 3, y - 3, x + 4, y + 4 };
+                const auto clip = [&](RECT& r) {
+                    if (r.left < 0) r.left = 0;
+                    if (r.top < 0) r.top = 0;
+                    if (r.right > (LONG)pw) r.right = (LONG)pw;
+                    if (r.bottom > (LONG)ph) r.bottom = (LONG)ph;
+                    return r.right > r.left && r.bottom > r.top;
+                };
+                if (clip(outer))
+                    g_device->ColorFill(panel, &outer, 0xFF000000u);
+                if (clip(inner))
+                    g_device->ColorFill(panel, &inner,
+                                        trigger ? 0xFF40FF60u : 0xFFFFFFFFu);
+            }
+            else if (g_imgui_trigger_was)
+            {
+                POINT p{};
+                GetCursorPos(&p);
+                D3DDEVICE_CREATION_PARAMETERS cp{};
+                if (SUCCEEDED(g_device->GetCreationParameters(&cp)) &&
+                    cp.hFocusWindow)
+                    ScreenToClient(cp.hFocusWindow, &p);
+                imgui_mouse(p, false, true);
+            }
+            g_imgui_trigger_was = trigger;
+            panel->Release();
+            draw_world_panel_at(back, desc, g_imgui_panel, centre, half_w,
+                                half_h);
+
+            // The laser: from the main hand to the panel (or 1 m out).
+            {
+                if (!hit && (origin[0] != 0.0f || origin[2] != 0.0f))
+                {
+                    float d[3] = { ray.m[2][0], ray.m[2][1], ray.m[2][2] };
+                    const float len = sqrtf(d[0] * d[0] + d[1] * d[1] +
+                                            d[2] * d[2]);
+                    for (int k = 0; k < 3; ++k)
+                        end[k] = origin[k] + (len > 1e-6f ? d[k] / len : 0.0f) *
+                                 0.6f * metre;
+                }
+                static DebugLineVertex lines[2 * 2 * 2];
+                unsigned used = 0;
+                const float eye_width = desc.Width * 0.5f;
+                const DWORD colour = hit ? 0xFF60E0FFu : 0xFF6080A0u;
+                for (int eye_index = 0; eye_index < 2; ++eye_index)
+                {
+                    const Eye eye = eye_index ? EyeRight : EyeLeft;
+                    float uv[2][2];
+                    if (!vr_project_head_point(eye, origin[0], origin[1],
+                                               origin[2], &uv[0][0], &uv[0][1]) ||
+                        !vr_project_head_point(eye, end[0], end[1], end[2],
+                                               &uv[1][0], &uv[1][1]) ||
+                        !clip_eye_segment(uv[0], uv[1]))
+                        continue;
+                    for (int offset = 0; offset < 2; ++offset)
+                    {
+                        lines[used++] = { eye_width * (eye_index + uv[0][0]) +
+                                          offset, desc.Height * uv[0][1],
+                                          0.0f, 1.0f, colour };
+                        lines[used++] = { eye_width * (eye_index + uv[1][0]) +
+                                          offset, desc.Height * uv[1][1],
+                                          0.0f, 1.0f, colour };
+                    }
+                }
+                if (used)
+                    draw_hand_lines(back, desc, lines, used);
+            }
+
+            static RECT last{};
+            static unsigned reports = 0;
+            if ((src.left != last.left || src.top != last.top ||
+                 src.right != last.right || src.bottom != last.bottom) &&
+                reports < 20)
+            {
+                ++reports;
+                last = src;
+                log("imgui: menu panel %ld,%ld-%ld,%ld (%ux%u window pixels, "
+                    "%.2f x %.2f m, over the %s hand)", src.left, src.top,
+                    src.right, src.bottom, w, h, pw * metre_per_px,
+                    ph * metre_per_px, off_left ? "left" : "right");
+            }
+        }
+
         void draw_pouch_items(IDirect3DSurface9* back)
         {
             if (!stereo_same_frame_active() || !camera_first_person_active() ||
@@ -3780,6 +4186,7 @@ namespace trlvr
 
     void vr_submit_release_targets()
     {
+        imgui_release();
         if (g_resolve)
         {
             g_resolve->Release();
@@ -3998,6 +4405,12 @@ namespace trlvr
             draw_diorama(nullptr);
     }
 
+    bool vr_submit_imgui_pointing()
+    {
+        return g_imgui_pointing_at &&
+               GetTickCount64() - g_imgui_pointing_at < 150;
+    }
+
     void vr_submit_wait()
     {
         if (!g_ready)
@@ -4025,6 +4438,7 @@ namespace trlvr
     void vr_submit_frame(IDirect3DSurface9* back_buffer)
     {
         PerfCpuScope perf_scope(PerfSubmit);
+        imgui_state_reset();
         hud_capture_frame();
         camera_core_position_restore();
         if (!g_ready || !back_buffer)
@@ -4061,6 +4475,7 @@ namespace trlvr
             draw_aim_debug_laser(back_buffer);
             draw_pouch_items(back_buffer);
             draw_bike_bars(back_buffer);
+            draw_imgui_panel(back_buffer);
             draw_gear_tuning_panel(back_buffer);
             draw_hand_calibration_panel(back_buffer);
             draw_notice_panel(back_buffer);
