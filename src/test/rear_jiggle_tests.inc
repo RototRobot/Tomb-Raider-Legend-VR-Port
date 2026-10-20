@@ -110,6 +110,36 @@ static void test_rear_jiggle()
         }
         CHECK(swing > 1.0f && swing < 5.0f + 5.0f);
     }
+    // A hard stop far beyond the limit: the shown offset rounds off toward
+    // the limit (no frame-to-frame jump near the peak), the mass is slowed
+    // by the stiffening rather than parked on the safety wall.
+    {
+        JiggleParams q = p;
+        q.max_offset = 2.0f;
+        JiggleState s;
+        float t[3] = { 0, 0, 0 }, off[3] = {};
+        const float dt = 1.0f / 90.0f;
+        for (int i = 0; i < 90; ++i)
+        {
+            t[0] += 300.0f * dt;
+            jiggle_step(s, t, dt, q, off);
+        }
+        float peak = 0.0f, last = off[0], worst_step = 0.0f, mass_peak = 0.0f;
+        for (int i = 0; i < 60; ++i)
+        {
+            if (i < 9)                              // stopping over 0.1 s
+                t[0] += 300.0f * (1.0f - (float)(i + 1) / 9.0f) * dt;
+            jiggle_step(s, t, dt, q, off);
+            peak = off[0] > peak ? off[0] : peak;
+            mass_peak = s.pos[0] - t[0] > mass_peak ? s.pos[0] - t[0] : mass_peak;
+            if (off[0] > 1.5f && last > 1.5f && std::fabs(off[0] - last) > worst_step)
+                worst_step = std::fabs(off[0] - last);
+            last = off[0];
+        }
+        CHECK(peak > 1.5f && peak < 2.0f);
+        CHECK(worst_step < 0.15f);
+        CHECK(mass_peak < 3.0f * 2.0f - 0.1f);
+    }
     // Frame rate: the same motion at 30 and 90 fps gives the same swing.
     {
         auto run = [&](int fps, float at, float out[3])

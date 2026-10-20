@@ -164,7 +164,8 @@ namespace trlvr
                                     ? g_main_camera_head : current;
                 g_pause_head_anchor_valid = true;
                 log("menu: frozen scene now follows residual HMD motion; "
-                    "pause HUD head-locked, main menu world-locked");
+                    "pause menu %s", config().pause_world_locked
+                    ? "world-locked" : "head-locked");
             }
             return rigid_inverse(g_pause_head_anchor) * current;
         }
@@ -927,7 +928,11 @@ namespace trlvr
                         screen == 0 ? "movie" : "loading screen", screen);
                 }
                 static bool menu_anchor_valid = false;
-                static Mat4 menu_anchor = Mat4::identity();
+                // The pause menu (pause_world_locked) anchors at the heading
+                // the head had when it opened; everything else at forward.
+                static bool menu_anchor_pause = false;
+                static float menu_anchor_yaw = 0.0f;
+                static unsigned menu_anchor_recenter = 0;
                 Mat4 ui{};
                 if (world_locked)
                 {
@@ -946,20 +951,37 @@ namespace trlvr
                         target.tan_top, target.tan_bottom,
                         menu_near, ui_gp.far_z, ui_gp.sy < 0.0f);
                     const Mat4 current = vr_head_rotation();
+                    // A loading screen between the pause menu and the main
+                    // menu stays world-locked, so a change of kind (or a
+                    // recentre) has to re-anchor by itself.
+                    const bool pause = !movie && ui_pause_menu_active();
+                    if (menu_anchor_valid &&
+                        (pause != menu_anchor_pause ||
+                         (pause && menu_anchor_recenter != g_recenter_generation)))
+                        menu_anchor_valid = false;
                     if (!menu_anchor_valid)
                     {
                         // Level and facing forward (SteamVR's forward, or the
                         // recentred one), not the head pose at the moment the
                         // menu opened -- that left menus tilted or off to the
                         // side. vr_head_rotation() is already recentred, so
-                        // forward is the identity.
-                        menu_anchor = Mat4::identity();
+                        // forward is the identity. In a level the player has
+                        // usually turned away from forward, so the pause menu
+                        // takes only the heading at opening, still level.
+                        menu_anchor_pause = pause;
+                        menu_anchor_yaw = pause ? steady_yaw_of(current) : 0.0f;
+                        menu_anchor_recenter = g_recenter_generation;
                         menu_anchor_valid = true;
-                        log("ui: menu anchored level at the recentred forward; "
+                        log("ui: %s anchored level at %s %.0f deg; "
                             "overlay near %.2f replaces game near %.2f",
-                            menu_near, ui_gp.near_z);
+                            pause ? "pause menu" : "menu",
+                            pause ? "the opening heading" : "the recentred forward",
+                            menu_anchor_yaw * 57.29578f, menu_near, ui_gp.near_z);
                     }
-                    const Mat4 relative = rigid_inverse(menu_anchor) * current;
+                    const Mat4 relative = menu_anchor_pause
+                        ? set_yaw(current,
+                                  wrap_pi(yaw_of(current) - menu_anchor_yaw))
+                        : current;
                     ui = reproject_ndc_to_world_locked(
                         projection_from_game(ui_gp), reference,
                         menu_projection, relative, scale);
@@ -1074,7 +1096,8 @@ namespace trlvr
                     }
                     else
                     {
-                        // Pause UI deliberately remains rigidly head-locked.
+                        // The pause menu stays rigidly head-locked unless
+                        // pause_world_locked took it to the branch above.
                         ui = reproject_ndc_to_frustum(
                             projection_from_game(ui_gp), reference,
                             target_projection, scale);
@@ -1218,6 +1241,16 @@ namespace trlvr
             // while retaining the game's far distance and the HMD frustum.
             // Do not cache this per-hand depth as the scene projection.
             const int hand = camera_first_person_current_gpu_hand();
+            // The controller hands drawn under the pinned pause menu swung
+            // against the head and sat off their centres (user 2026-10-20);
+            // not drawn there until that is understood.
+            if (hand >= 0 && config().pause_world_locked &&
+                ui_pause_menu_active())
+            {
+                for (int i = 0; i < 16; ++i)
+                    out[i] = 0.0f;
+                return true;
+            }
             // Third-person controller hands in board mode: drawn at their
             // own size at 1/F of the controller distance (camera_head);
             // scaling view space by F about the head puts them on the

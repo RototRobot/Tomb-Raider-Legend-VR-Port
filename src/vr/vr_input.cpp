@@ -2814,7 +2814,8 @@ namespace trlvr
             const int off = config().left_handed ? 1 : 0;
             const int other = 1 - off;
             const ULONGLONG now = GetTickCount64();
-            const bool available = !menu && camera_tp_view_available();
+            const bool available = !menu && camera_tp_view_available() &&
+                config().tp_scale_control != 1;
             const float up = available ? camera_palm_up(off) : -2.0f;
             float palm[3]{};
             const bool have_palm = available &&

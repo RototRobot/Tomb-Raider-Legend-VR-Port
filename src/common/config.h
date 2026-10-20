@@ -83,18 +83,18 @@ namespace trlvr
         // mostly up and down, and give under the hands; at most
         // body_soft_angle degrees.
         bool body_soft = true;
-        float body_soft_angle = 12.0f;
+        float body_soft_angle = 14.0f;
         // Third person (2026-10-14): how loose the soft parts are sideways
         // -- their side-to-side frequency in Hz (lower swings wider and
         // slower; up and down stays at 2.2) -- and how quickly a swing
         // dies away (damping ratio; lower rings longer).
-        float body_soft_sway_hz = 1.8f;
-        float body_soft_damping = 0.14f;
+        float body_soft_sway_hz = 3.0f;
+        float body_soft_damping = 0.53f;
         // Soft parts' shape (2026-10-14): squash and stretch along the bone
         // (0 none .. 1 strong, volume kept) and how much of a lighter second
         // mass's overrun -- the ripple on top of the swing -- is shown.
-        float body_soft_stretch = 0.5f;
-        float body_soft_ripple = 0.4f;
+        float body_soft_stretch = 0.35f;
+        float body_soft_ripple = 0.3f;
         bool hmd_aim = true;
         float world_scale = 291.0f;
         float head_rotation_scale = 1.0f;
@@ -231,31 +231,36 @@ namespace trlvr
         float body_push_arm_degrees = 8.0f;
         float body_push_hips_degrees = 3.0f;
         float body_push_leg_degrees = 2.0f;
+        // A hand on a soft part (chest or rear) pushes her whole body only
+        // this share as hard as one on the rest of her (0 = not at all): the
+        // soft part gives, the body barely does.
+        float body_push_soft = 0.0f;
         // Rear soft body: the buttocks as masses on springs (hz, damping,
         // gain, max_cm of lag), the share of motion kept per axis, the
         // region's size/shape/placement, the dent a fingertip makes, and two
         // tuning aids (debug lines, test push).
         bool body_rear = true;
         float body_rear_hz = 4.0f;
-        float body_rear_damping = 0.3f;
-        float body_rear_gain = 1.0f;
-        float body_rear_max_cm = 3.0f;
+        float body_rear_damping = 0.47f;
+        float body_rear_gain = 0.55f;
+        float body_rear_max_cm = 3.7f;
         float body_rear_side = 0.6f;
         float body_rear_back = 1.0f;
         float body_rear_up = 1.0f;
         // Baseline fullness (cm at her size, negative = slimmer): how far
         // the cheeks stand out at rest, along the same falloff. The size,
         // width and height only change the region that moves.
-        float body_rear_fullness_cm = 0.0f;
+        float body_rear_fullness_cm = 1.25f;
         // The absolute most any point of the cheeks moves from rest, cm at
-        // her size, whatever the gain or a hand's pull (eased in from 80%).
-        float body_rear_limit_cm = 20.0f;
-        float body_rear_size = 1.0f;
-        float body_rear_width = 1.0f;
-        float body_rear_height = 1.0f;
-        float body_rear_spread_cm = 8.0f;
-        float body_rear_core = 0.5f;
-        float body_rear_lift_cm = 0.0f;
+        // her size, whatever the gain or a hand's pull (limit x tanh(move /
+        // limit): eased toward it all the way, never stopping dead at it).
+        float body_rear_limit_cm = 1.5f;
+        float body_rear_size = 0.8f;
+        float body_rear_width = 1.21f;
+        float body_rear_height = 0.8f;
+        float body_rear_spread_cm = 4.6f;
+        float body_rear_core = 0.36f;
+        float body_rear_lift_cm = -0.2f;
         float body_rear_inward = 0.5f;
         float body_rear_touch_cm = 0.0f;
         float body_rear_cleft_cm = 0.0f;
@@ -263,7 +268,7 @@ namespace trlvr
         float body_rear_seam_cm = 1.0f;
         bool body_rear_debug = false;
         float body_rear_test_cm = 0.0f;
-        float body_rear_dent = 1.0f;
+        float body_rear_dent = 0.5f;
         // Third-person camera collision: the board seat and the head-moved
         // eye stop short of geometry (0 = allow clipping into it).
         bool camera_collision = true;
@@ -313,6 +318,15 @@ namespace trlvr
 
         bool ui_passthrough = true;
         bool menu_world_locked = true;
+        // The in-game pause menu: true pins it
+        // level in the room at the heading the head had when it opened.
+        bool pause_world_locked = true;
+        // Hide the gameplay HUD (health, ammo, prompts) outright instead of
+        // letting it fade. World markers and the binocular view stay.
+        bool hide_gameplay_hud = false;
+        // Third-person scale / zoom: 0 both, 1 right stick only, 2 palm
+        // sliders only.
+        int tp_scale_control = 0;
         float ui_scale = 0.6f;
         // 1 follows the headset exactly; lower values leave part of the
         // current head angle in the gameplay HUD so edge elements move toward
@@ -434,6 +448,8 @@ namespace trlvr
     // 0 classic, 1 shoulder, 2 board, 3 all (the view switch cycles them).
     void config_set_third_person_mode(int mode);
     void config_set_full_body(bool on);
+    // 0 both, 1 stick, 2 sliders.
+    void config_set_tp_scale_control(int mode);
     // Hands against the world and Lara's body.
     void config_set_hand_collision(bool world, bool body);
     void load_config();

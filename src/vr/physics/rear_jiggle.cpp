@@ -74,24 +74,47 @@ namespace trlvr
         float vt[3];
         for (int k = 0; k < 3; ++k)
             vt[k] = (target[k] - s.target[k]) / dt;
-        // The mass itself is held within twice the limit (a safety for hitches
-        // the reset misses); what is shown eases toward the limit (below).
+        // Past the limit the tissue stiffens: an extra spring (kStiffen x
+        // the base one) and a near-critical damper on outward motion bring a
+        // hard swing to a rounded stop instead of a wall. The mass itself is
+        // held within three times the limit only as a safety for hitches the
+        // reset misses; what is shown eases toward the limit (below).
         const float shown_limit = (p.max_offset > 0.0f ? p.max_offset : 0.0f) +
                                   s.boost * (p.touch_offset > 0.0f ? p.touch_offset : 0.0f);
-        const float limit = 2.0f * shown_limit;
+        const float limit = 3.0f * shown_limit;
+        const float kStiffen = 6.0f;
+        const float k_stiff = kStiffen * k_spring;
+        const float c_stiff = 2.0f * std::sqrt(kStiffen) * omega;
         for (int i = 1; i <= steps; ++i)
         {
             // The force from the sub-step's starting target (semi-implicit
             // Euler then leaves no lag behind a steadily moving target), the
             // limit against its end.
             const float f0 = (float)(i - 1) / (float)steps, f = (float)i / (float)steps;
-            float tgt[3], d[3];
+            float tgt[3], d[3], t0[3], a[3];
+            float lag0[3], lag0_len2 = 0.0f;
             for (int k = 0; k < 3; ++k)
             {
-                const float t0 = s.target[k] + (target[k] - s.target[k]) * f0;
+                t0[k] = s.target[k] + (target[k] - s.target[k]) * f0;
                 tgt[k] = s.target[k] + (target[k] - s.target[k]) * f;
-                const float a = k_spring * (t0 + shift[k] - s.pos[k]) - c_damp * (s.vel[k] - vt[k]);
-                s.vel[k] += a * h;
+                a[k] = k_spring * (t0[k] + shift[k] - s.pos[k]) - c_damp * (s.vel[k] - vt[k]);
+                lag0[k] = s.pos[k] - t0[k];
+                lag0_len2 += lag0[k] * lag0[k];
+            }
+            const float lag0_len = std::sqrt(lag0_len2);
+            if (shown_limit > 0.0f && lag0_len > shown_limit)
+            {
+                float out_v = 0.0f;
+                for (int k = 0; k < 3; ++k)
+                    out_v += (s.vel[k] - vt[k]) * lag0[k] / lag0_len;
+                const float push = k_stiff * (lag0_len - shown_limit) +
+                                   (out_v > 0.0f ? c_stiff * out_v : 0.0f);
+                for (int k = 0; k < 3; ++k)
+                    a[k] -= push * lag0[k] / lag0_len;
+            }
+            for (int k = 0; k < 3; ++k)
+            {
+                s.vel[k] += a[k] * h;
                 s.pos[k] += s.vel[k] * h;
                 d[k] = s.pos[k] - tgt[k];
             }

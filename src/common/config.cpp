@@ -41,10 +41,10 @@ namespace trlvr
             { L"vr", L"picture_brightness", L"0" },
             { L"vr", L"picture_contrast", L"1" },
             { L"vr", L"picture_follow_game", L"1" },
-            { L"vr", L"body_soft_sway_hz", L"1.8" },
-            { L"vr", L"body_soft_damping", L"0.14" },
-            { L"vr", L"body_soft_stretch", L"0.5" },
-            { L"vr", L"body_soft_ripple", L"0.4" },
+            { L"vr", L"body_soft_sway_hz", L"3" },
+            { L"vr", L"body_soft_damping", L"0.53" },
+            { L"vr", L"body_soft_stretch", L"0.35" },
+            { L"vr", L"body_soft_ripple", L"0.3" },
             { L"vr", L"stereo", L"1" },
             { L"vr", L"stereo_same_frame", L"1" },
             { L"vr", L"stereo_lock_pose", L"1" },
@@ -112,22 +112,23 @@ namespace trlvr
             { L"vr", L"body_push_arm_degrees", L"8" },
             { L"vr", L"body_push_hips_degrees", L"3" },
             { L"vr", L"body_push_leg_degrees", L"2" },
+            { L"vr", L"body_push_soft", L"0" },
             { L"vr", L"body_rear", L"1" },
             { L"vr", L"body_rear_hz", L"4" },
-            { L"vr", L"body_rear_damping", L"0.3" },
-            { L"vr", L"body_rear_gain", L"1" },
-            { L"vr", L"body_rear_max_cm", L"3" },
+            { L"vr", L"body_rear_damping", L"0.47" },
+            { L"vr", L"body_rear_gain", L"0.55" },
+            { L"vr", L"body_rear_max_cm", L"3.7" },
             { L"vr", L"body_rear_side", L"0.6" },
             { L"vr", L"body_rear_back", L"1" },
             { L"vr", L"body_rear_up", L"1" },
-            { L"vr", L"body_rear_fullness_cm", L"0" },
-            { L"vr", L"body_rear_limit_cm", L"20" },
-            { L"vr", L"body_rear_size", L"1" },
-            { L"vr", L"body_rear_width", L"1" },
-            { L"vr", L"body_rear_height", L"1" },
-            { L"vr", L"body_rear_spread_cm", L"8" },
-            { L"vr", L"body_rear_core", L"0.5" },
-            { L"vr", L"body_rear_lift_cm", L"0" },
+            { L"vr", L"body_rear_fullness_cm", L"1.25" },
+            { L"vr", L"body_rear_limit_cm", L"1.5" },
+            { L"vr", L"body_rear_size", L"0.8" },
+            { L"vr", L"body_rear_width", L"1.21" },
+            { L"vr", L"body_rear_height", L"0.8" },
+            { L"vr", L"body_rear_spread_cm", L"4.6" },
+            { L"vr", L"body_rear_core", L"0.36" },
+            { L"vr", L"body_rear_lift_cm", L"-0.2" },
             { L"vr", L"body_rear_inward", L"0.5" },
             { L"vr", L"body_rear_touch_cm", L"0" },
             { L"vr", L"body_rear_cleft_cm", L"0" },
@@ -135,7 +136,7 @@ namespace trlvr
             { L"vr", L"body_rear_seam_cm", L"1" },
             { L"vr", L"body_rear_debug", L"0" },
             { L"vr", L"body_rear_test_cm", L"0" },
-            { L"vr", L"body_rear_dent", L"1" },
+            { L"vr", L"body_rear_dent", L"0.5" },
             { L"vr", L"camera_collision", L"1" },
             { L"vr", L"first_person_no_spread", L"1" },
             { L"vr", L"weapon_recoil", L"1.0" },
@@ -155,7 +156,7 @@ namespace trlvr
             { L"vr", L"body_spring", L"1" },
             { L"vr", L"body_spring_angle", L"4" },
             { L"vr", L"body_soft", L"1" },
-            { L"vr", L"body_soft_angle", L"12" },
+            { L"vr", L"body_soft_angle", L"14" },
             { L"vr", L"cutscene_mode", L"normal" },
             { L"vr", L"cutscene_screen_width", L"3.0" },
             { L"vr", L"cutscene_screen_height", L"0" },
@@ -180,6 +181,9 @@ namespace trlvr
             { L"vr", L"first_person_smoothing", L"0.08" },
             { L"vr", L"ui_passthrough", L"1" },
             { L"vr", L"menu_world_locked", L"1" },
+            { L"vr", L"pause_world_locked", L"1" },
+            { L"vr", L"hide_gameplay_hud", L"0" },
+            { L"vr", L"tp_scale_control", L"both" },
             { L"vr", L"ui_scale", L"0.6" },
             { L"vr", L"hud_follow", L"0.85" },
             { L"vr", L"overlay_vr_distance", L"1.0" },
@@ -422,17 +426,20 @@ namespace trlvr
             L"body_push_arm_degrees = 8\r\n"
             L"body_push_hips_degrees = 3\r\n"
             L"body_push_leg_degrees = 2\r\n"
+            L"; live: a hand on her chest or rear pushes her whole body only this\r\n"
+            L"; share as hard (the soft part gives instead). 0 .. 1.\r\n"
+            L"body_push_soft = 0\r\n"
             L"; live: her buttocks: each cheek is a mass on a spring that lags and\r\n"
             L"; settles as she moves. 0 = off.\r\n"
             L"body_rear = 1\r\n"
             L"; live: how fast a cheek bounces, Hz (lower = softer, slower). 0.5 .. 8.\r\n"
             L"body_rear_hz = 4\r\n"
             L"; live: how quickly a bounce dies away (damping ratio). 0.05 .. 1.5.\r\n"
-            L"body_rear_damping = 0.3\r\n"
+            L"body_rear_damping = 0.47\r\n"
             L"; live: how much of the cheeks' lag is shown. 0 = none. 0 .. 3.\r\n"
-            L"body_rear_gain = 1\r\n"
+            L"body_rear_gain = 0.55\r\n"
             L"; live: the most a cheek can lag behind, cm at her size. 0 .. 8.\r\n"
-            L"body_rear_max_cm = 3\r\n"
+            L"body_rear_max_cm = 3.7\r\n"
             L"; live: how much motion is kept along each of her axes: side to side,\r\n"
             L"; back and forth, up and down. 0 .. 2 each.\r\n"
             L"body_rear_side = 0.6\r\n"
@@ -441,23 +448,23 @@ namespace trlvr
             L"; live: baseline fullness, cm at her size: how far the cheeks stand out\r\n"
             L"; at rest (minus = slimmer). The other sizes only change the region\r\n"
             L"; that moves. -2 .. 5.\r\n"
-            L"body_rear_fullness_cm = 0\r\n"
+            L"body_rear_fullness_cm = 1.25\r\n"
             L"; live: the absolute most any point of the cheeks moves from rest, cm at\r\n"
-            L"; her size, whatever the gain or a hand's pull (eased in from 80%).\r\n"
-            L"; 1 .. 40.\r\n"
-            L"body_rear_limit_cm = 20\r\n"
+            L"; her size, whatever the gain or a hand's pull: eased toward it\r\n"
+            L"; (tanh), never stopping dead at it. 0.5 .. 8.\r\n"
+            L"body_rear_limit_cm = 1.5\r\n"
             L"; live: size of the moved region round each cheek. 0.5 .. 2.\r\n"
-            L"body_rear_size = 1\r\n"
+            L"body_rear_size = 0.8\r\n"
             L"; live: its width and height, multiples of the size. 0.5 .. 2.\r\n"
-            L"body_rear_width = 1\r\n"
-            L"body_rear_height = 1\r\n"
+            L"body_rear_width = 1.21\r\n"
+            L"body_rear_height = 0.8\r\n"
             L"; live: the regions are fitted to her mesh; 8 = as fitted, more moves each\r\n"
             L"; one further out from her middle by (value - 8) cm. 0 .. 16.\r\n"
-            L"body_rear_spread_cm = 8\r\n"
+            L"body_rear_spread_cm = 4.6\r\n"
             L"; live: how much of the region moves fully before easing out. 0 .. 0.9.\r\n"
-            L"body_rear_core = 0.5\r\n"
+            L"body_rear_core = 0.36\r\n"
             L"; live: moves both regions up (+) or down (-), cm. -12 .. 12.\r\n"
-            L"body_rear_lift_cm = 0\r\n"
+            L"body_rear_lift_cm = -0.2\r\n"
             L"; live: how much motion INTO her body is kept. 0 .. 1.\r\n"
             L"body_rear_inward = 0.5\r\n"
             L"; live: god mode: grows (+) or shrinks (-) each glute's touch zone, cm.\r\n"
@@ -475,7 +482,7 @@ namespace trlvr
             L"body_rear_test_cm = 0\r\n"
             L"; live: god mode: your fingertip dents her buttocks; the dent's size as a\r\n"
             L"; multiple of a fingertip, 0 = no dent. 0 .. 2.\r\n"
-            L"body_rear_dent = 1\r\n"
+            L"body_rear_dent = 0.5\r\n"
             L"; Third-person camera collision: the view stops short of rock\r\n"
             L"; and walls instead of passing into them (0 = allow clipping).\r\n"
             L"camera_collision = 1\r\n"
@@ -526,7 +533,7 @@ namespace trlvr
             L"; 1 = her soft parts bounce (mostly up and down) and give under\r\n"
             L"; your hands; at most body_soft_angle degrees (0..30).\r\n"
             L"body_soft = 1\r\n"
-            L"body_soft_angle = 12\r\n"
+            L"body_soft_angle = 14\r\n"
             L"; Cutscenes: normal (your head turns the cutscene camera) or\r\n"
             L"; theatre (comfort: the cutscene plays through a big window fixed\r\n"
             L"; in front of you in a dark space, still 3D -- lean to look\r\n"
@@ -565,6 +572,14 @@ namespace trlvr
             L"ui_passthrough = 1\r\n"
             L"; Menus stay where they opened; the gameplay HUD follows the headset.\r\n"
             L"menu_world_locked = 1\r\n"
+            L"; 1 = the pause menu stays level in the room where you were looking\r\n"
+            L"; when it opened; 0 = it follows the headset (head-locked).\r\n"
+            L"pause_world_locked = 1\r\n"
+            L"; 1 = hide the gameplay HUD completely (world markers stay).\r\n"
+            L"hide_gameplay_hud = 0\r\n"
+            L"; Third-person scale and zoom: both, stick (right thumbstick only)\r\n"
+            L"; or sliders (the palm sliders only).\r\n"
+            L"tp_scale_control = both\r\n"
             L"ui_scale = 0.6\r\n"
             L"; 1.0 is rigidly head-locked; 0.85 gives the gameplay HUD gentle drag.\r\n"
             L"hud_follow = 0.85\r\n"
@@ -820,6 +835,13 @@ namespace trlvr
         save_setting(L"vr", L"gameplay_theatre", mode >= 2 ? L"1" : L"0");
     }
 
+    void config_set_tp_scale_control(int mode)
+    {
+        g_config.tp_scale_control = mode >= 0 && mode <= 2 ? mode : 0;
+        config_save_setting(L"vr", L"tp_scale_control",
+            mode == 1 ? L"stick" : mode == 2 ? L"sliders" : L"both");
+    }
+
     void config_set_third_person_mode(int mode)
     {
         g_config.view_cycle_all = mode == 3;
@@ -1020,15 +1042,15 @@ namespace trlvr
             read_bool(L"vr", L"hand_body_collision", true, path);
         g_config.body_spring = read_bool(L"vr", L"body_spring", true, path);
         g_config.body_soft = read_bool(L"vr", L"body_soft", true, path);
-        value = read_float(L"vr", L"body_soft_angle", L"12", path);
+        value = read_float(L"vr", L"body_soft_angle", L"14", path);
         g_config.body_soft_angle = std::isfinite(value)
-            ? (value < 0.0f ? 0.0f : value > 30.0f ? 30.0f : value) : 12.0f;
-        value = read_float(L"vr", L"body_soft_sway_hz", L"1.8", path);
+            ? (value < 0.0f ? 0.0f : value > 30.0f ? 30.0f : value) : 14.0f;
+        value = read_float(L"vr", L"body_soft_sway_hz", L"3", path);
         g_config.body_soft_sway_hz = std::isfinite(value)
-            ? (value < 0.8f ? 0.8f : value > 4.0f ? 4.0f : value) : 1.8f;
-        value = read_float(L"vr", L"body_soft_damping", L"0.14", path);
+            ? (value < 0.8f ? 0.8f : value > 4.0f ? 4.0f : value) : 3.0f;
+        value = read_float(L"vr", L"body_soft_damping", L"0.53", path);
         g_config.body_soft_damping = std::isfinite(value)
-            ? (value < 0.03f ? 0.03f : value > 0.6f ? 0.6f : value) : 0.14f;
+            ? (value < 0.03f ? 0.03f : value > 0.6f ? 0.6f : value) : 0.53f;
         value = read_float(L"vr", L"picture_brightness", L"0", path);
         g_config.picture_brightness = std::isfinite(value)
             ? (value < -0.5f ? -0.5f : value > 0.5f ? 0.5f : value) : 0.0f;
@@ -1037,12 +1059,12 @@ namespace trlvr
             ? (value < 0.5f ? 0.5f : value > 2.0f ? 2.0f : value) : 1.0f;
         g_config.picture_follow_game =
             read_bool(L"vr", L"picture_follow_game", true, path);
-        value = read_float(L"vr", L"body_soft_stretch", L"0.5", path);
+        value = read_float(L"vr", L"body_soft_stretch", L"0.35", path);
         g_config.body_soft_stretch = std::isfinite(value)
-            ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.5f;
-        value = read_float(L"vr", L"body_soft_ripple", L"0.4", path);
+            ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.35f;
+        value = read_float(L"vr", L"body_soft_ripple", L"0.3", path);
         g_config.body_soft_ripple = std::isfinite(value)
-            ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.4f;
+            ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.3f;
         {
             auto rf = [&](const wchar_t* key, const wchar_t* def, float lo,
                           float hi, float fallback) {
@@ -1100,29 +1122,30 @@ namespace trlvr
                 rf(L"body_push_hips_degrees", L"3", 0.0f, 15.0f, 3.0f);
             c.body_push_leg_degrees =
                 rf(L"body_push_leg_degrees", L"2", 0.0f, 8.0f, 2.0f);
+            c.body_push_soft = rf(L"body_push_soft", L"0", 0.0f, 1.0f, 0.0f);
             c.body_rear = rb(L"body_rear", true);
             c.body_rear_hz = rf(L"body_rear_hz", L"4", 0.5f, 8.0f, 4.0f);
             c.body_rear_damping =
-                rf(L"body_rear_damping", L"0.3", 0.05f, 1.5f, 0.3f);
-            c.body_rear_gain = rf(L"body_rear_gain", L"1", 0.0f, 3.0f, 1.0f);
+                rf(L"body_rear_damping", L"0.47", 0.05f, 1.5f, 0.47f);
+            c.body_rear_gain = rf(L"body_rear_gain", L"0.55", 0.0f, 3.0f, 0.55f);
             c.body_rear_max_cm =
-                rf(L"body_rear_max_cm", L"3", 0.0f, 8.0f, 3.0f);
+                rf(L"body_rear_max_cm", L"3.7", 0.0f, 8.0f, 3.7f);
             c.body_rear_side = rf(L"body_rear_side", L"0.6", 0.0f, 2.0f, 0.6f);
             c.body_rear_back = rf(L"body_rear_back", L"1", 0.0f, 2.0f, 1.0f);
             c.body_rear_up = rf(L"body_rear_up", L"1", 0.0f, 2.0f, 1.0f);
             c.body_rear_fullness_cm =
-                rf(L"body_rear_fullness_cm", L"0", -2.0f, 5.0f, 0.0f);
+                rf(L"body_rear_fullness_cm", L"1.25", -2.0f, 5.0f, 1.25f);
             c.body_rear_limit_cm =
-                rf(L"body_rear_limit_cm", L"20", 1.0f, 40.0f, 20.0f);
-            c.body_rear_size = rf(L"body_rear_size", L"1", 0.5f, 2.0f, 1.0f);
-            c.body_rear_width = rf(L"body_rear_width", L"1", 0.5f, 2.0f, 1.0f);
+                rf(L"body_rear_limit_cm", L"1.5", 0.5f, 8.0f, 1.5f);
+            c.body_rear_size = rf(L"body_rear_size", L"0.8", 0.5f, 2.0f, 0.8f);
+            c.body_rear_width = rf(L"body_rear_width", L"1.21", 0.5f, 2.0f, 1.21f);
             c.body_rear_height =
-                rf(L"body_rear_height", L"1", 0.5f, 2.0f, 1.0f);
+                rf(L"body_rear_height", L"0.8", 0.5f, 2.0f, 0.8f);
             c.body_rear_spread_cm =
-                rf(L"body_rear_spread_cm", L"8", 0.0f, 16.0f, 8.0f);
-            c.body_rear_core = rf(L"body_rear_core", L"0.5", 0.0f, 0.9f, 0.5f);
+                rf(L"body_rear_spread_cm", L"4.6", 0.0f, 16.0f, 4.6f);
+            c.body_rear_core = rf(L"body_rear_core", L"0.36", 0.0f, 0.9f, 0.36f);
             c.body_rear_lift_cm =
-                rf(L"body_rear_lift_cm", L"0", -12.0f, 12.0f, 0.0f);
+                rf(L"body_rear_lift_cm", L"-0.2", -12.0f, 12.0f, -0.2f);
             c.body_rear_inward =
                 rf(L"body_rear_inward", L"0.5", 0.0f, 1.0f, 0.5f);
             c.body_rear_touch_cm =
@@ -1136,7 +1159,7 @@ namespace trlvr
             c.body_rear_debug = rb(L"body_rear_debug", false);
             c.body_rear_test_cm =
                 rf(L"body_rear_test_cm", L"0", -5.0f, 5.0f, 0.0f);
-            c.body_rear_dent = rf(L"body_rear_dent", L"1", 0.0f, 2.0f, 1.0f);
+            c.body_rear_dent = rf(L"body_rear_dent", L"0.5", 0.0f, 2.0f, 0.5f);
         }
         value = read_float(L"vr", L"view_transition_seconds", L"0.3", path);
         g_config.view_transition_seconds = std::isfinite(value)
@@ -1232,6 +1255,17 @@ namespace trlvr
             value >= 0.0f && value <= 1.0f ? value : 0.08f;
         g_config.ui_passthrough = read_bool(L"vr", L"ui_passthrough", true, path);
         g_config.menu_world_locked = read_bool(L"vr", L"menu_world_locked", true, path);
+        g_config.pause_world_locked =
+            read_bool(L"vr", L"pause_world_locked", true, path);
+        g_config.hide_gameplay_hud =
+            read_bool(L"vr", L"hide_gameplay_hud", false, path);
+        {
+            wchar_t text[32]{};
+            GetPrivateProfileStringW(L"vr", L"tp_scale_control", L"both",
+                                     text, 32, path);
+            g_config.tp_scale_control = _wcsicmp(text, L"stick") == 0 ? 1
+                : _wcsicmp(text, L"sliders") == 0 ? 2 : 0;
+        }
         value = read_float(L"vr", L"ui_scale", L"0.6", path);
         g_config.ui_scale = value >= 0.1f && value <= 2.0f ? value : 0.6f;
         value = read_float(L"vr", L"hud_follow", L"0.85", path);

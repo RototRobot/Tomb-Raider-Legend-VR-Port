@@ -463,6 +463,16 @@ namespace trlvr
             slider("Menu and HUD scale", &c.ui_scale, 0.1f, 2.0f, "%.2f",
                    L"vr", L"ui_scale", "Size of menus and the HUD in the "
                    "headset.");
+            toggle("Pause menu fixed in the room", &c.pause_world_locked,
+                   L"vr", L"pause_world_locked",
+                   "On: the pause menu stays level where you were looking "
+                   "when it opened, like the main menu. Off: it follows the "
+                   "headset. The gameplay HUD always follows the headset.");
+            toggle("Hide the gameplay HUD", &c.hide_gameplay_hud, L"vr",
+                   L"hide_gameplay_hud",
+                   "Turns off the head-locked gameplay HUD (health, ammo, "
+                   "prompts) completely. World markers, the binocular view "
+                   "and menus are not affected.");
         }
 
         void camera_section(Config& c)
@@ -532,6 +542,62 @@ namespace trlvr
                  "damping together. The sliders below still fine-tune.");
         }
 
+        // Rear presets. High is the tuning the user settled on (2026-10-20);
+        // the others step either side of it, keeping the max lag x gain
+        // about 1.4 x the absolute max so a hard swing reaches into the
+        // eased part of the limit without piling up against it. Fullness
+        // stays at or above 1 cm: lower, and her stock mesh creases.
+        struct RearPreset
+        {
+            const char* name;
+            bool on;
+            float hz, damping, gain, max_cm, limit_cm, fullness_cm, dent;
+        };
+        const RearPreset kRearPresets[] = {
+            { "Off",    false, 3.5f, 0.39f, 0.66f, 4.4f, 2.0f, 2.0f,  0.62f },
+            { "Low",    true,  4.5f, 0.55f, 0.45f, 3.0f, 1.0f, 1.0f,  0.40f },
+            { "Medium", true,  4.0f, 0.47f, 0.55f, 3.7f, 1.5f, 1.25f, 0.50f },
+            { "High",   true,  3.5f, 0.39f, 0.66f, 4.4f, 2.0f, 1.5f,  0.62f },
+            { "Max",    true,  3.0f, 0.31f, 0.80f, 5.2f, 3.0f, 2.0f,  0.80f },
+        };
+
+        void rear_presets(Config& c)
+        {
+            ImGui::PushID("rear");
+            ImGui::TextUnformatted("Preset");
+            for (const RearPreset& preset : kRearPresets)
+            {
+                ImGui::SameLine();
+                if (!ImGui::Button(preset.name))
+                    continue;
+                c.body_rear = preset.on;
+                config_save_setting(L"vr", L"body_rear",
+                                    preset.on ? L"1" : L"0");
+                if (!preset.on)
+                    continue;       // Off keeps the tuning for next time
+                c.body_rear_hz = preset.hz;
+                c.body_rear_damping = preset.damping;
+                c.body_rear_gain = preset.gain;
+                c.body_rear_max_cm = preset.max_cm;
+                c.body_rear_limit_cm = preset.limit_cm;
+                c.body_rear_fullness_cm = preset.fullness_cm;
+                c.body_rear_dent = preset.dent;
+                save_float(L"vr", L"body_rear_hz", preset.hz);
+                save_float(L"vr", L"body_rear_damping", preset.damping);
+                save_float(L"vr", L"body_rear_gain", preset.gain);
+                save_float(L"vr", L"body_rear_max_cm", preset.max_cm);
+                save_float(L"vr", L"body_rear_limit_cm", preset.limit_cm);
+                save_float(L"vr", L"body_rear_fullness_cm",
+                           preset.fullness_cm);
+                save_float(L"vr", L"body_rear_dent", preset.dent);
+            }
+            ImGui::PopID();
+            help("Sets the rear's speed, damping, gain, max lag, absolute "
+                 "max, fullness and dent together. Off shows her stock "
+                 "shape and keeps the tuning. The sliders below still "
+                 "fine-tune.");
+        }
+
         void body_section(Config& c)
         {
             soft_presets(c);
@@ -589,6 +655,7 @@ namespace trlvr
                    "%.1f deg", L"vr", L"body_push_leg_degrees", nullptr);
 
             ImGui::SeparatorText("Rear");
+            rear_presets(c);
             toggle("Rear soft body", &c.body_rear, L"vr", L"body_rear",
                    "Her buttocks are masses on springs that lag and settle "
                    "as she moves.");
@@ -605,10 +672,11 @@ namespace trlvr
             slider("Rear max lag", &c.body_rear_max_cm, 0.0f, 8.0f, "%.1f cm",
                    L"vr", L"body_rear_max_cm",
                    "The most a cheek lags behind, at her size.");
-            slider("Rear absolute max", &c.body_rear_limit_cm, 1.0f, 40.0f,
-                   "%.0f cm", L"vr", L"body_rear_limit_cm",
+            slider("Rear absolute max", &c.body_rear_limit_cm, 0.5f, 8.0f,
+                   "%.1f cm", L"vr", L"body_rear_limit_cm",
                    "The most any point of the cheeks ever moves from rest, "
-                   "however hard a hand pulls or high the gain is.");
+                   "however hard a hand pulls or high the gain is. Motion "
+                   "eases toward it rather than stopping at it.");
             slider("Rear fullness", &c.body_rear_fullness_cm, -2.0f, 5.0f,
                    "%.1f cm", L"vr", L"body_rear_fullness_cm",
                    "How far the cheeks stand out at rest (her real size): "
@@ -660,6 +728,15 @@ namespace trlvr
                    "%.2f s", L"vr", L"view_switch_hold",
                    "Hold the right stick's click this long to switch view. "
                    "A quick click resets the angle.");
+            {
+                int control = c.tp_scale_control;
+                if (ImGui::Combo("Scale / zoom control", &control,
+                                 "Both\0Thumbstick\0Palm sliders\0"))
+                    config_set_tp_scale_control(control);
+                help("How the board view's scale and zoom are changed: the "
+                     "right thumbstick, the sliders on the off hand's "
+                     "upturned palm, or both.");
+            }
             slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
                    L"vr", L"board_zoom_speed",
                    "Board view: right stick up/down zooms to Lara (up = "

@@ -23,6 +23,7 @@ Status below is per the fork author; verify on a headset before relying on it.
 | 664f6c3 | godmode modules | 6, 7, 11 (`src/vr/godmode/*` + tests) |
 | 9a636c0 | finger maths + in-VR menu panel | 8, 13 (`finger_input.*`, `menu_panel.*` + tests) |
 | 11bd8b2 | integration | glue for 6-14 (`camera_head.*`, `vr_input.*`, `vr_session.*`, `vr_submit.cpp`, `config.*`, `overlay.*`, `vr_math.*`, `mathtest.cpp`, `build.bat`, `mathtest.bat`) |
+| (this commit) | menu fixes, scale input option, rear physics tuning | 10, 11, 13 (`ui_space.cpp`, `vr_session.cpp`, `vr_input.cpp`, `camera_head.cpp`, `config.*`, `overlay.cpp`, `physics/rear_*`) |
 
 - **Cherry-pick story:** modules under `src/vr/physics/` and `src/vr/godmode/`,
   and `src/vr/finger_input.*` and `src/vr/menu_panel.*`, are pure maths on
@@ -230,10 +231,12 @@ upstream-base
   `rear_hands`, `rear_frame`, `rear_soft_apply`, `rear_soft_begin`
   (`RearDrawGuard` wraps the draw). `vr_submit.cpp`: `draw_rear_debug`
   (line overlay when `body_rear_debug` is on).
+- **Tuning (this commit):** the rear offset limit is now applied once with a
+  smooth ease instead of twice; no new keys.
 - **Ini keys:** 24 `vr.body_rear_*` keys in total. Main ones (defaults):
   `body_rear` 1 (on), `body_rear_hz` 4, `body_rear_damping` 0.3,
   `body_rear_gain` 1, `body_rear_max_cm` 3, `body_rear_side` 0.6,
-  `body_rear_back` 1, `body_rear_up` 1, `body_rear_limit_cm` 20,
+  `body_rear_back` 1, `body_rear_up` 1, `body_rear_limit_cm` 3,
   `body_rear_size` 1, `body_rear_width` 1, `body_rear_height` 1,
   `body_rear_spread_cm` 8, `body_rear_core` 0.5, `body_rear_inward` 0.5,
   `body_rear_dent` 1.
@@ -260,8 +263,17 @@ upstream-base
   - `vr.board_leash_height` 0.1 (0..1)
   - `vr.board_zoom_speed` 1 (0..5; 0 = off)
   - `vr.board_scale_speed` 0.7 (0..5; 0 = off)
+- **Scale / zoom input choice (this commit):** a setting picks how scale and
+  zoom are changed: the right stick, the palm sliders (the off hand held
+  palm-up opens them), or both (default).
+  - **Glue:** `camera_head.cpp`: `camera_view_stick` ignores zoom and scale
+    when the choice is sliders only; `vr_input.cpp`: `update_tp_sliders`
+    never opens the sliders when it is stick only. Overlay combo "Scale / zoom
+    control" in the God mode section; `config_set_tp_scale_control`.
+  - **Ini key:** `vr.tp_scale_control` `both` (`both`, `stick`, `sliders`)
 - **Depends on:** 3 (board view camera), 6.
-- **Status:** built, headset-tested in an earlier iteration.
+- **Status:** built, headset-tested in an earlier iteration; the input choice
+  is headset-tested.
 
 ### 12. Right-stick rework in immersive third person
 
@@ -297,8 +309,29 @@ upstream-base
   - `vr.overlay_vr_open_hold` 0.6 (0..3 s; 0 = off)
 - **Caveat:** on Index and WMR the panel opens only with Insert, and cannot
   be closed from the controllers.
+- **Pause menu fixed in the room (this commit):** the in-game pause menu can
+  be pinned level in the room, like the main menu, at the heading the head had
+  when it opened (a recentre re-anchors it). The gameplay HUD is told apart
+  from menus by the game's menu stack, so it stays head-locked.
+  - **Glue:** `ui_space.cpp`: `draw_detour` (the `g_world_locked_hud` choice
+    uses `pause_world_locked` for the pause root screen, `menu_world_locked`
+    for the rest); `vr_session.cpp`: `vr_substitute_c0_for_eye` (menu anchor
+    re-taken when the menu kind changes; pause anchors at the opening yaw
+    via `steady_yaw_of`/`set_yaw`).
+  - **Known issue:** the controller hands drawn under the pinned pause menu
+    swung against the head and sat off their centres, so they are not drawn
+    there (`vr_substitute_c0_for_eye`, the `hand >= 0` early return). Cause
+    not found: likely the pause head correction applied on top of hands that
+    are already posed live.
+  - **Ini key:** `vr.pause_world_locked` 1
+- **Hide the gameplay HUD (this commit):** skips drawing the head-locked HUD
+  outright. World markers, the binocular view and menus still draw.
+  - **Glue:** `ui_space.cpp`: `draw_detour` (the `hidden` test).
+  - **Ini key:** `vr.hide_gameplay_hud` 0
+- **Both toggles** are in the overlay under "Scale, height and distance".
 - **Depends on:** 1, 2.
-- **Status:** built, headset-tested in an earlier iteration.
+- **Status:** built, headset-tested in an earlier iteration; pause pinning and
+  HUD hide headset-tested this commit.
 
 ### 14. Hands near Lara withhold grip and trigger from the game
 

@@ -290,19 +290,28 @@ static void test_rear_shape()
         rear_inflate(s, w, centre, 0.0f, d6);
         CHECK(d6[1] == 0.0f);
     }
-    // The absolute limit: untouched below 0.8 x limit, never above the
-    // limit however far it is pulled, direction kept, off at 0.
+    // The absolute limit: limit x tanh(len / limit) -- nearly untouched when
+    // small, never above the limit however far it is pulled, still growing
+    // past it (no wall), direction kept, off at 0.
     {
-        float a[3] = { 3.0f, 4.0f, 0.0f };          // length 5, limit 10: knee 8
+        float s[3] = { 0.3f, 0.4f, 0.0f };          // length 0.5, limit 10
+        soft_limit_vector(s, 10.0f);
+        CHECK(near(s[0], 0.3f, 0.002f) && near(s[1], 0.4f, 0.002f));
+        float a[3] = { 3.0f, 4.0f, 0.0f };          // length 5: 10 tanh(0.5)
         soft_limit_vector(a, 10.0f);
-        CHECK(near(a[0], 3.0f) && near(a[1], 4.0f));
+        CHECK(near(std::sqrt(a[0] * a[0] + a[1] * a[1]), 10.0f * std::tanh(0.5f)) &&
+              near(a[0] / a[1], 0.75f));
+        float f[3] = { 15.0f, 0.0f, 0.0f }, g[3] = { 20.0f, 0.0f, 0.0f };
+        soft_limit_vector(f, 10.0f);
+        soft_limit_vector(g, 10.0f);
+        CHECK(g[0] > f[0] + 0.3f && g[0] < 10.0f);  // past the limit it still moves
         float b[3] = { 0.0f, 0.0f, 1000.0f };
         soft_limit_vector(b, 10.0f);
         CHECK(b[2] <= 10.0f && b[2] > 9.9f && b[0] == 0.0f);
-        float c[3] = { 6.0f, 8.0f, 0.0f };          // length 10: between knee and limit
+        float c[3] = { 6.0f, 8.0f, 0.0f };          // length 10: on the limit
         soft_limit_vector(c, 10.0f);
         const float len = std::sqrt(c[0] * c[0] + c[1] * c[1]);
-        CHECK(len > 8.0f && len < 10.0f && near(c[0] / c[1], 0.75f));
+        CHECK(near(len, 10.0f * std::tanh(1.0f)) && near(c[0] / c[1], 0.75f));
         float d[3] = { 50.0f, 0.0f, 0.0f };
         soft_limit_vector(d, 0.0f);
         CHECK(near(d[0], 50.0f));

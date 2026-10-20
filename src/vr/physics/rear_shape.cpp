@@ -166,12 +166,14 @@ namespace rear
             v[0] = v[1] = v[2] = 0.0f;
             return;
         }
-        const float knee = 0.8f * limit;
-        if (len <= knee)
+        // limit x tanh(len / limit) all the way (as the chest's soft parts):
+        // one to one when small, bending gradually from about half the
+        // limit, never reaching it. A knee late in the range (it was 0.8)
+        // squeezes everything past it into the last few millimetres, so a
+        // big swing looks as if it hit a wall.
+        if (!(len > 1e-9f))
             return;
-        const float room = limit - knee;
-        const float shown = knee + room * std::tanh((len - knee) / room);
-        const float scale = shown / len;
+        const float scale = limit * std::tanh(len / limit) / len;
         for (int k = 0; k < 3; ++k)
             v[k] *= scale;
     }

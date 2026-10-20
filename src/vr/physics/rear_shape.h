@@ -86,8 +86,9 @@ namespace rear
                       float delta[3]);
 
     // The absolute most a point may be moved from where it rests: a vector's
-    // length is left alone up to 0.8 x limit, then eased toward the limit
-    // (tanh), so no push or pull, whatever the gain, goes beyond it. A
+    // length becomes limit x tanh(length / limit) -- one to one when small,
+    // easing in smoothly, never reaching the limit -- so no push or pull,
+    // whatever the gain, goes beyond it and none stops dead at it. A
     // limit <= 0 leaves it unlimited.
     void soft_limit_vector(float v[3], float limit);
 

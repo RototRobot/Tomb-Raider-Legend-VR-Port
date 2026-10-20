@@ -38,8 +38,9 @@ namespace trlvr
     // Advances by dt seconds (fixed sub-steps, so the result does not depend
     // on the frame rate) and returns the mass's offset from the target
     // (world units), eased toward the limit (limit x tanh(lag / limit),
-    // limit = max_offset + boost x touch_offset); the mass itself is held
-    // within twice that. A first step, a dt outside (0, 0.25] or a target
+    // limit = max_offset + boost x touch_offset); past the limit the spring
+    // stiffens (and damps outward motion) so a hard swing rounds off, and the
+    // mass is held within three times it. A first step, a dt outside (0, 0.25] or a target
     // jump beyond reset_distance puts the mass on the target at rest.
     // contact may be null (no hand).
     void jiggle_step(JiggleState& s, const float target[3], float dt, const JiggleParams& p,

@@ -13658,9 +13658,11 @@ namespace trlvr
                     const float len = sqrtf(contact.shift[0] * contact.shift[0] +
                                             contact.shift[1] * contact.shift[1] +
                                             contact.shift[2] * contact.shift[2]);
-                    if (len > cap && len > 0.0f)
+                    // Eased toward the cap (tanh), not clipped at it: a hand
+                    // pulling further still moves it, ever less.
+                    if (cap > 0.0f && len > 1e-6f)
                         for (float& v : contact.shift)
-                            v *= cap / len;
+                            v *= cap * tanhf(len / cap) / len;
                     if (t.kick_pending)
                     {
                         for (int k = 0; k < 3; ++k)
@@ -13679,10 +13681,8 @@ namespace trlvr
                                        cfg.body_rear_inward,
                                        cfg.body_rear_test_cm * metre * 0.01f,
                                        r.offset[c]);
-                    // The absolute most a cheek is shown from rest, however
-                    // far a hand pulls it or high the gain is.
-                    rear::soft_limit_vector(r.offset[c],
-                        cfg.body_rear_limit_cm * metre * 0.01f);
+                    // The absolute limit is applied once, per vertex below
+                    // (a second curve here squeezed the range twice).
                 }
             }
             // Each vertex: its weighted offsets, then the dents, rounded to
@@ -14255,10 +14255,28 @@ namespace trlvr
             for (int i = 0; i < g_soft_count; ++i)
                 if (g_soft[i].grab_time[h] && tick - g_soft[i].grab_time[h] < 150)
                     return true;
+            // A grip closed on a cheek: busy. A hand only touching it still
+            // pushes, lightly (push_on_soft).
+            for (int c = 0; c < 2; ++c)
+                if (g_rear.hold[h][c].grabbing)
+                    return true;
+            return h == 0 && g_flick.phase != 0;
+        }
+
+        // Is hand h on a soft part (chest press in the last 150 ms, or on
+        // the rear)? Its push on her whole body is then scaled down by
+        // [vr] body_push_soft: the soft part gives, the body barely does.
+        bool push_on_soft(int h, DWORD tick)
+        {
+            for (int i = 0; i < g_soft_count; ++i)
+                if (g_soft[i].press_time[h] && tick - g_soft[i].press_time[h] < 150)
+                    return true;
+            if (g_rear.touching[h])
+                return true;
             for (int c = 0; c < 2; ++c)
                 if (g_rear.hold[h][c].holding)
                     return true;
-            return h == 0 && g_flick.phase != 0;
+            return false;
         }
 
         // Once a frame, on her matrices as the game (and wall touch) left
@@ -14341,7 +14359,7 @@ namespace trlvr
             // Each free hand: its posed index tip and pinch (as Underworld),
             // as drawn (true world scale). A soft part's hit wins, else the
             // deepest; inside makes a contact, which pushes the segment the
-            // volume belongs to (a soft part: the chest, at half weight).
+            // volume belongs to (a hand on the chest or rear: body_push_soft).
             BodyPushContact contacts[2];
             int n_contacts = 0;
             const DWORD tick = GetTickCount();
@@ -14395,7 +14413,8 @@ namespace trlvr
                         pc.depth = best.depth;
                         pc.velocity_valid = v_ok;
                         pc.arriving = v_ok && !p.touching_last[h];
-                        pc.weight = best.soft >= 0 ? 0.5f : 1.0f;
+                        pc.weight = best.soft >= 0 || push_on_soft(h, tick)
+                            ? cfg.body_push_soft : 1.0f;
                         for (int k = 0; k < 3; ++k)
                         {
                             pc.point[k] = points[best_point][k];
@@ -19356,6 +19375,9 @@ namespace trlvr
     void camera_view_stick(float height_in, float zoom_in, float scale_in,
                            float dt)
     {
+        // Palm sliders only: the stick leaves scale and zoom alone.
+        if (config().tp_scale_control == 2)
+            zoom_in = scale_in = 0.0f;
         // The right stick in the board and shoulder views. Board: up/down
         // zooms to Lara (board_zoom_speed), and the stick dragged while
         // clicked in scales the world (board_scale_speed); left/right turns
