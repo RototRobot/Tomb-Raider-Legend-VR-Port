@@ -39,12 +39,16 @@
 #include "vr_input.h"
 #include "lang.h"
 #include "../proxy/window.h"
+#include "../proxy/overlay.h"
+#include "menu_panel.h"
 
 #include "camera_head.h"
 #include "hud_capture.h"
 #include "ui_space.h"
 #include "tune.h"
 #include "vr_gesture.h"
+#include "finger_input.h"
+#include "godmode/board_leash.h"
 #include "vr_session.h"
 #include "vr_submit.h"
 
@@ -59,6 +63,7 @@
 #include <cstring>
 #include <cwchar>
 #include <windows.h>
+#include <xinput.h>     // XINPUT_GAMEPAD_* bits for the overlay's pad only
 
 namespace trlvr
 {
@@ -153,8 +158,21 @@ namespace trlvr
             float palm_sign = 0.0f;    // which side of the knuckles is palm
             bool reported_on = false;
             bool reported_off = false;
+            FingerCurls eased;         // finger_input's eased curls
         };
         FingerState g_fingers[2];
+        // God mode: each hand's grab from its finger pose (finger_grabbing;
+        // pinch or fist), physical hands (left, right). False while the
+        // finger data is off (vr_input_hand_grab falls back to the grip).
+        bool g_pose_grab[2] = { false, false };
+        // God mode's claim on each physical hand (as Underworld's
+        // update_claims): a grip / trigger press made while the hand is the
+        // mod's (near or on table-Lara) stays withheld from the game until
+        // it is released, wherever the hand goes. g_god_claim_was: last
+        // frame's claim, which keeps that hand off the gear cross.
+        bool g_claim_grip[2] = { false, false };
+        bool g_claim_trig[2] = { false, false };
+        bool g_god_claim_was[2] = { false, false };
         // finger_debug: SteamVR's bone positions (model space, metres,
         // without the controller) and its animation-side curls.
         float g_finger_bones[2][31][3];
@@ -549,8 +567,10 @@ namespace trlvr
         // Hover and grab on the third-person gear cross. A grip press on a
         // hovered icon pulses that item's game key for 120 ms and claims
         // the grip (no grapple / lock-on key) until it is released.
+        // blocked: hands that are god mode's (near or on table-Lara, last
+        // frame's claim): they neither hover nor grab an icon.
         void update_gear_cross(bool active, bool left_grip, bool right_grip,
-                               ULONGLONG now)
+                               ULONGLONG now, const bool blocked[2])
         {
             const bool grips[2] = { left_grip, right_grip };
             gear_cross_load();
@@ -631,6 +651,13 @@ namespace trlvr
                         gear_cross_save();
                     }
                     nearest = 0.0f;
+                    continue;
+                }
+                // A hand at table-Lara (god mode): hers, not the cross's.
+                if (blocked && blocked[hand])
+                {
+                    g_gear_hover[hand] = -1;
+                    g_gear_handle_hover[hand] = -1;
                     continue;
                 }
                 float centre[3];
@@ -766,9 +793,6 @@ namespace trlvr
         ULONGLONG g_profile_next_check = 0;
         // The A press that skipped the last calibration step is not a jump.
         bool     g_cal_jump_hold = false;
-        // View switch: right stick click (the weapon-switch action, free in
-        // both immersive views) and the \ key.
-        bool     g_view_button_was = false;
         // A recentre a moment after the view switch (user 2026-10-06), once
         // the new camera has settled.
         ULONGLONG g_view_recenter_at = 0;
@@ -2079,6 +2103,21 @@ namespace trlvr
         ULONGLONG g_pulse_until[kLogicalCount]{};
         bool g_trigger_down[2] = { false, false };
         bool g_squeeze_down[2] = { false, false };
+        // The right stick's click held long enough: switch the view.
+        bool g_view_switch_request = false;
+        // The right stick pushed while held in (immersive, user
+        // 2026-10-19): a click-drag like the left stick's radial menu. The
+        // seat height / world scale follow the stick until it is let go.
+        bool g_seat_drag = false;
+
+        // The settings overlay (proxy/overlay.cpp) from the controllers:
+        // the menu button's hold-to-open (menu_panel.h), and, once the
+        // overlay has closed, the game kept from the controllers until
+        // every button is let go (the press that closed it is not the
+        // game's).
+        MenuHold g_menu_hold;
+        bool g_overlay_until_release = false;
+        bool g_overlay_was_open = false;
 
         void pulse(int logical, ULONGLONG now)
         {
@@ -2158,6 +2197,8 @@ namespace trlvr
                 g_complex_face = ComplexButton{};
                 g_trigger_down[0] = g_trigger_down[1] = false;
                 g_squeeze_down[0] = g_squeeze_down[1] = false;
+                g_menu_hold = MenuHold{};
+                g_seat_drag = false;
                 return;
             }
 
@@ -2198,13 +2239,81 @@ namespace trlvr
                            GameRecentre, left_menu ? -1 : GamePause);
             held[kLogicalStickHeld] = left_stick;
             if (left_menu)
-                held[GamePause] = xr_input_button(0, XrButtonMenu);
-            // Right stick: click (weapon switch; the view switch in
-            // immersive play), double click PDA, long press binoculars. The
-            // Index has trackpads for the long-press actions.
-            complex_update(g_complex_stick[1],
-                xr_input_button(1, XrButtonStick), now, GameWeapon, GamePda,
-                index ? -1 : GameBinoculars);
+            {
+                // [vr] overlay_vr_open_hold (Underworld's start hold): with
+                // the settings overlay closed the menu button is kept from
+                // the game while down. Let go before the hold time it is a
+                // tap, a short press of pause; held to the hold time the
+                // overlay opens and the game never sees that press (it
+                // stays masked from the overlay too until let go, by
+                // overlay.cpp poll_pad). 0 = straight to the game. Index /
+                // WMR pause is the left stick's long press (above), left
+                // alone for now: there Insert still opens the overlay.
+                bool to_game = false;
+                const MenuHoldEvent event = menu_hold_update(g_menu_hold,
+                    xr_input_button(0, XrButtonMenu), now,
+                    config().overlay_vr_open_hold,
+                    overlay_open() || g_overlay_until_release, &to_game);
+                held[GamePause] = to_game;
+                if (event == MenuHoldTap)
+                {
+                    pulse(GamePause, now);
+                    log("controls: menu tapped: pause");
+                }
+                else if (event == MenuHoldOpen)
+                {
+                    release_all();
+                    if (overlay_request_open(true))
+                    {
+                        log("controls: menu held %.1f s: settings overlay "
+                            "opened", (double)config().overlay_vr_open_hold);
+                        xr_input_haptic(0, 0.05f, 160.0f, 0.4f);
+                    }
+                    else
+                        log("controls: menu held, but the settings overlay "
+                            "is not up yet");
+                }
+            }
+            // Right stick. Plain play: click (weapon switch), double click
+            // PDA, long press binoculars; the Index has trackpads for the
+            // long-press actions. Immersive play (user 2026-10-19): a quick
+            // hold (view_switch_hold) switches the view, a click resets the
+            // angle (recentre), a double click is still the PDA; binoculars
+            // are on the gear cross. Pushing the stick while it is down
+            // (past half, as the left stick's radial menu) is neither: it
+            // starts the seat drag -- height and world scale follow the
+            // stick until it is let go (g_seat_drag, read by the look stick).
+            if (config().immersive_controls)
+            {
+                ComplexButton& s = g_complex_stick[1];
+                const bool r3 = xr_input_button(1, XrButtonStick);
+                float rx = 0.0f, ry = 0.0f;
+                xr_input_stick(1, &rx, &ry);
+                if (!r3)
+                    g_seat_drag = false;
+                if (s.down && !s.long_fired)
+                {
+                    if (rx * rx + ry * ry > 0.25f)
+                    {
+                        s.long_fired = true;
+                        g_seat_drag = r3;
+                    }
+                    else if (r3 && now - s.pressed_at >=
+                             (ULONGLONG)(config().view_switch_hold * 1000.0f))
+                    {
+                        s.long_fired = true;
+                        g_view_switch_request = true;
+                    }
+                }
+                complex_update(s, r3, now, GameRecentre, GamePda, -1);
+            }
+            else
+            {
+                g_seat_drag = false;
+                complex_update(g_complex_stick[1],
+                    xr_input_button(1, XrButtonStick), now, GameWeapon,
+                    GamePda, index ? -1 : GameBinoculars);
+            }
 
             bool face = false;      // the grenade / light / flick button
             if (left == XrControllerWmr || right == XrControllerWmr)
@@ -2232,6 +2341,17 @@ namespace trlvr
             held[kLogicalFlick] = face;
             complex_update(g_complex_face, face, now, GameGrenade, -1,
                            GameLight);
+            // The settings menu has the controllers: no click counted there
+            // fires into the game later (a view switch, a grenade).
+            if (overlay_open() || g_overlay_until_release)
+            {
+                g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
+                g_complex_face = ComplexButton{};
+                g_view_switch_request = false;
+                g_seat_drag = false;
+                for (int i = 0; i < kLogicalCount; ++i)
+                    g_pulse_until[i] = 0;
+            }
 
             for (int i = 0; i < kLogicalCount; ++i)
                 g_logical[i] = held[i] || now < g_pulse_until[i];
@@ -2451,12 +2571,14 @@ namespace trlvr
             // on the controller while it touches anything, up otherwise.
             // Controllers without touch sensors use the pulls alone. Eased
             // over 50 ms so a sensor flicking does not snap a finger.
+            // The curls come from finger_input (shared with the Underworld
+            // mod), which also counts a real trigger pull as the finger on
+            // it when the touch sensor drops out at full press.
             static ULONGLONG last_ms = 0;
             const ULONGLONG now_ms = GetTickCount64();
             const float step = last_ms && now_ms - last_ms < 250
                 ? (float)(now_ms - last_ms) / 1000.0f : 1.0f;
             last_ms = now_ms;
-            const float follow = 1.0f - expf(-step / 0.05f);
             for (int hand = 0; hand < 2; ++hand)
             {
                 FingerState& f = g_fingers[hand];
@@ -2467,38 +2589,31 @@ namespace trlvr
                     xr_input_controller(hand) == XrControllerNone)
                 {
                     f.valid = false;
+                    finger_curls_reset(f.eased);
+                    g_pose_grab[hand] = false;
                     continue;
                 }
                 const XrControllerKind kind = xr_input_controller(hand);
-                const bool sensors = kind == XrControllerTouch ||
-                                     kind == XrControllerIndex;
-                const float trigger = xr_input_trigger(hand);
-                const float grip = xr_input_squeeze(hand);
-                const bool on_trigger = sensors
-                    ? xr_input_button(hand, XrTouchTrigger)
-                    : trigger > 0.05f;
-                const bool thumb_down = sensors
-                    ? xr_input_button(hand, XrTouchThumb)
-                    : xr_input_button(hand, XrButtonPrimary) ||
-                      xr_input_button(hand, XrButtonSecondary) ||
-                      xr_input_button(hand, XrButtonStick);
+                FingerInput in;
+                in.has_sensors = kind == XrControllerTouch ||
+                                 kind == XrControllerIndex;
+                in.trigger = xr_input_trigger(hand);
+                in.grip = xr_input_squeeze(hand);
+                in.touch_trigger = xr_input_button(hand, XrTouchTrigger);
+                in.touch_thumb = xr_input_button(hand, XrTouchThumb);
+                in.thumb_button = xr_input_button(hand, XrButtonPrimary) ||
+                                  xr_input_button(hand, XrButtonSecondary) ||
+                                  xr_input_button(hand, XrButtonStick);
                 // 0.9 is a full curl (a real fist, see pose_fingers).
-                const float want[5] = {
-                    thumb_down ? 0.55f + 0.1f * grip : 0.05f,
-                    on_trigger ? 0.35f + 0.55f * trigger : 0.0f,
-                    0.9f * grip,
-                    0.9f * grip,
-                    0.9f * grip,
-                };
-                if (!f.valid)
-                    for (int i = 0; i < 5; ++i)
-                        f.curl[i] = want[i];
+                finger_curls_step(f.eased, in, 0.0f, step);
                 for (int i = 0; i < 5; ++i)
-                    f.curl[i] += (want[i] - f.curl[i]) * follow;
-                // An open hand spreads its fingers a little.
-                const float splay = 0.4f + 0.15f * (1.0f - grip);
+                    f.curl[i] = f.eased.curl[i];
                 for (int i = 0; i < 4; ++i)
-                    f.splay[i] = splay;
+                    f.splay[i] = f.eased.spread[i];
+                // God mode's grab: a pinch (trigger + thumb down) or a fist
+                // (trigger + grip), from the player's own fingers, with
+                // hysteresis so a flickering trigger does not drop her.
+                g_pose_grab[hand] = finger_grabbing(f.curl, g_pose_grab[hand]);
                 f.valid = true;
                 f.level = 1;
                 if (!f.reported_on)
@@ -2506,7 +2621,7 @@ namespace trlvr
                     f.reported_on = true;
                     log("fingers: %s hand follows the controller's %s",
                         hand == 0 ? "left" : "right",
-                        sensors ? "touch sensors, trigger and grip"
+                        in.has_sensors ? "touch sensors, trigger and grip"
                                 : "trigger and grip (no touch sensors)");
                 }
             }
@@ -2955,6 +3070,15 @@ namespace trlvr
         return g_ready && g_grip_held[left ? 0 : 1];
     }
 
+    bool vr_input_hand_grab(int hand)
+    {
+        if (!g_ready || hand < 0 || hand > 1)
+            return false;
+        if (config().god_grab_pose && g_fingers[hand].valid)
+            return g_pose_grab[hand];
+        return g_grip_held[hand];
+    }
+
     void vr_input_weapon_haptic(bool left, float strength)
     {
         const int hand = left ? 0 : 1;
@@ -3097,6 +3221,80 @@ namespace trlvr
         ++g_frames_in_set;
         measure_grip_offsets();
         read_fingers();
+
+        // The settings overlay open (held menu button or Insert): the
+        // controllers are its gamepad and the game gets nothing. Closed, the
+        // game stays cut off until every button is let go, so the press that
+        // closed it (or one still held) does not land in the game.
+        {
+            const bool open = overlay_open();
+            if (open != g_overlay_was_open)
+            {
+                g_overlay_was_open = open;
+                if (open)
+                    log("controls: settings overlay open -- the controllers "
+                        "drive it, the game gets nothing");
+                else
+                    g_overlay_until_release = true;
+            }
+            if (g_overlay_until_release && !open)
+            {
+                bool any = false;
+                for (int hand = 0; hand < 2 && !any; ++hand)
+                {
+                    any = xr_input_trigger(hand) > 0.20f ||
+                          xr_input_squeeze(hand) > 0.35f;
+                    // Buttons only: the capacitive sensors after them read
+                    // a resting finger.
+                    for (int b = 0; b < XrTouchTrigger && !any; ++b)
+                        any = xr_input_button(hand, (XrButton)b);
+                }
+                if (!any)
+                {
+                    g_overlay_until_release = false;
+                    log("controls: settings overlay closed and the "
+                        "controllers let go; the game has them again");
+                }
+            }
+            if (open || g_overlay_until_release)
+            {
+                if (open)
+                {
+                    OverlayPad pad{};
+                    const bool wmr = xr_input_controller(0) == XrControllerWmr ||
+                                     xr_input_controller(1) == XrControllerWmr;
+                    struct { bool on; WORD bit; } map[] = {
+                        { xr_input_button(1, wmr ? XrButtonTrackpad
+                                                 : XrButtonPrimary),
+                          XINPUT_GAMEPAD_A },
+                        { xr_input_button(1, XrButtonSecondary) ||
+                          (wmr && xr_input_button(0, XrButtonTrackpad)),
+                          XINPUT_GAMEPAD_B },
+                        { xr_input_button(0, XrButtonPrimary),
+                          XINPUT_GAMEPAD_X },
+                        { xr_input_button(0, XrButtonSecondary),
+                          XINPUT_GAMEPAD_Y },
+                        { xr_input_squeeze(0) > 0.5f,
+                          XINPUT_GAMEPAD_LEFT_SHOULDER },
+                        { xr_input_squeeze(1) > 0.5f,
+                          XINPUT_GAMEPAD_RIGHT_SHOULDER },
+                        { xr_input_button(0, XrButtonMenu),
+                          XINPUT_GAMEPAD_START },
+                    };
+                    for (const auto& m : map)
+                        if (m.on)
+                            pad.buttons |= m.bit;
+                    xr_input_stick(0, &pad.lx, &pad.ly);
+                    xr_input_stick(1, &pad.rx, &pad.ry);
+                    overlay_set_pad(pad);
+                }
+                release_all();
+                g_holster_grip_was[0] = digital(g_game[GameGrapple].handle);
+                g_holster_grip_was[1] = digital(g_game[GameLockOn].handle);
+                g_light_grip_was = g_holster_grip_was[0];
+                return;
+            }
+        }
 
         if (!game_has_focus())
         {
@@ -3393,12 +3591,10 @@ namespace trlvr
         // menus, setups or calibration; guns and held gear are put away
         // first so neither view inherits the other's hand state.
         {
-            const bool view_down = config().immersive_controls &&
-                digital(g_game[GameWeapon].handle);
             const bool view_key = (GetAsyncKeyState(VK_OEM_5) & 1) != 0;
-            const bool pressed = (view_down && !g_view_button_was) ||
-                                 view_key;
-            g_view_button_was = view_down;
+            const bool pressed = (config().immersive_controls &&
+                                  g_view_switch_request) || view_key;
+            g_view_switch_request = false;
             if (pressed && !menu && !tune_gear_tuning_active() &&
                 !vr_hand_calibration_active() && !ui_loading_screen_active() &&
                 !camera_cinematic_playing())
@@ -3652,24 +3848,51 @@ namespace trlvr
         // Not with first person on: between levels and in loads the
         // first-person view is not active yet, which read as third person
         // and showed the cross (user, 2026-10-04).
+        // A hand god mode claimed last frame (at table-Lara) neither hovers
+        // nor grabs the cross (it sits waist-high, where she often is).
         update_gear_cross(tp_gameplay && !camera_view_first_person() &&
                           !radial_gear_menu_enabled(), left_grip,
-                          right_grip, gear_now);
-        // Board mode: a grip around the tiny Lara picks her up (after the
-        // gear cross, which keeps any grip on or hovering it).
+                          right_grip, gear_now, g_god_claim_was);
+        // Board mode: a grab around the tiny Lara picks her up (after the
+        // gear cross, which keeps any grip on or hovering it). The grab is
+        // the hand's pose with god_grab_pose (pinch or fist; the grip
+        // alone only points and presses), else the grip button.
         bool pluck_claim[2] = { false, false };
-        camera_set_hand_grips(left_grip, right_grip);
+        const bool grab[2] = {
+            config().god_grab_pose ? vr_input_hand_grab(0) : left_grip,
+            config().god_grab_pose ? vr_input_hand_grab(1) : right_grip };
+        camera_set_hand_grips(grab[0], grab[1]);
         {
             const bool pluck_grip[2] = {
-                left_grip && !g_gear_grip_claim[0] && g_gear_hover[0] < 0 &&
+                grab[0] && !g_gear_grip_claim[0] && g_gear_hover[0] < 0 &&
                     g_gear_handle_hover[0] < 0,
-                right_grip && !g_gear_grip_claim[1] && g_gear_hover[1] < 0 &&
+                grab[1] && !g_gear_grip_claim[1] && g_gear_hover[1] < 0 &&
                     g_gear_handle_hover[1] < 0 };
             camera_board_pluck_update(tp_gameplay, pluck_grip, pluck_claim);
             // Y long press (light, freed in third-person immersive): the
             // board-mode finger flick on the left hand.
             camera_board_flick_update(tp_gameplay,
                 g_flick_action && digital(g_flick_action));
+        }
+        // God mode's claims latch per physical hand (as Underworld): a grip
+        // or trigger pressed while claimed stays the mod's until released.
+        // Cleared in menus and first person.
+        {
+            const bool live = tp_gameplay && !camera_view_first_person();
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                const bool claim = live && pluck_claim[hand];
+                g_god_claim_was[hand] = claim;
+                // Held until the game's own grip lets go (0.35, not the
+                // 0.5 press): a relaxed grip must not grapple on the way out.
+                g_claim_grip[hand] = live &&
+                    (xr_input_squeeze(hand) > 0.5f ||
+                     (g_claim_grip[hand] && g_squeeze_down[hand])) &&
+                    (g_claim_grip[hand] || claim);
+                g_claim_trig[hand] = live &&
+                    xr_input_trigger(hand) > 0.05f &&
+                    (g_claim_trig[hand] || claim);
+            }
         }
 
         bool want[256] = { false };
@@ -3743,11 +3966,23 @@ namespace trlvr
                 // A grip that grabbed from the gear cross, or holds Lara.
                 if ((i == GameGrapple && (g_gear_grip_claim[0] ||
                                           pluck_claim[0] ||
+                                          g_claim_grip[0] ||
                                           theatre_claim[0])) ||
                     (i == GameLockOn && (g_gear_grip_claim[1] ||
                                          pluck_claim[1] ||
+                                         g_claim_grip[1] ||
                                          theatre_claim[1])))
                     continue;
+                // God mode: the trigger of a hand at table-Lara (or one
+                // pressed there and still held) neither interacts nor
+                // fires -- she would draw her pistols and shoot. Left
+                // trigger = Interact, right = Fire; left_handed swaps.
+                if (i == GameInteract || i == GameFire)
+                {
+                    const int th = (i == GameInteract) != swap_triggers ? 0 : 1;
+                    if (pluck_claim[th] || g_claim_trig[th])
+                        continue;
+                }
                 // A hand on Lara's body (third person): its trigger and grip
                 // are not game buttons while it is (user 2026-10-14). The
                 // god hand's pick-up reads the grips itself and still works.
@@ -4543,6 +4778,48 @@ namespace trlvr
             // deflection, integrated with the remainder carried so slow
             // movements are not lost to rounding.
             analog(g_look, &x, &y);
+            // Seat controls (user 2026-10-19, Underworld's layout). Board
+            // view (god mode): y zooms to Lara (up = closer), x turns round
+            // her (the game's camera, which the board seat follows), and a
+            // click-drag -- hold the right stick in and push it (g_seat_drag,
+            // set past half deflection in update_logical_actions), as the
+            // left stick's radial menu -- scales the world (up = bigger
+            // Lara). Shoulder view: the click-drag's y is the height, y
+            // otherwise pitches. While the stick is in (and for 200 ms
+            // after, its release spring) it neither turns nor pitches. A
+            // plain click keeps its own job (recentre / view switch hold).
+            // Saved once the stick is back at the centre.
+            {
+                const int view = camera_third_person_mode();
+                const bool seat_stick = tp_gameplay &&
+                    !camera_view_first_person() &&
+                    (view == 1 || view == 2);
+                static ULONGLONG r3_down_at = 0;
+                const ULONGLONG t = GetTickCount64();
+                const bool r3 = xr_input_button(1, XrButtonStick);
+                if (r3)
+                    r3_down_at = t;
+                float height_in = 0.0f, zoom_in = 0.0f, scale_in = 0.0f;
+                if (seat_stick && r3 && g_seat_drag)
+                {
+                    // The click-drag: board = scale Lara, shoulder = height.
+                    if (view == 2)
+                        scale_in = board_stick_axis(y, 0.2f);
+                    else
+                        height_in = board_stick_axis(y, 0.2f);
+                }
+                else if (seat_stick && view == 2 && t - r3_down_at > 200)
+                    zoom_in = board_stick_axis(y, 0.2f);
+                if (seat_stick && (r3 || t - r3_down_at <= 200))
+                {
+                    // In (and its release spring): neither turns nor pitches.
+                    y = 0.0f;
+                    x = 0.0f;
+                }
+                else if (seat_stick && view == 2)
+                    y = 0.0f;   // the board's up/down is the zoom; x turns
+                camera_view_stick(height_in, zoom_in, scale_in, dt);
+            }
             if (camera_first_person_active() && fabsf(x) < 0.05f)
             {
                 const float pad = gamepad_right_stick_x();

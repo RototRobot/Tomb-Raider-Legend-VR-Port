@@ -176,16 +176,100 @@ namespace trlvr
         // flick). Only with third_person_mode = board, immersive_controls
         // = 1 and first_person = 0 as well.
         bool board_god_hand = true;
+        // Board leash: Lara runs free inside this radius (table metres) of
+        // the board's centre before the board follows her; board_leash_height
+        // is the same for up/down. 0 = the old exact following.
+        float board_leash = 0.35f;
+        float board_leash_height = 0.1f;
+        // God-hand pick-up (board mode with board_god_hand only). Zones are
+        // metres at her size: head grip zone, claim zone (a hand this close
+        // keeps its grip/trigger from the game) and arm grip zone (0 = no
+        // arm grab). god_arm_lead: a held arm leads until pulled past her
+        // reach. god_hang_arm: Legend's old dangle by the wrist. god_throw:
+        // letting go mid-swing throws her (speed x strength, own gravity);
+        // god_land_anim plays that animation on landing (-1 none);
+        // god_drop_height caps the fall when put down over a floor.
+        float god_head_zone = 0.3f;
+        float god_claim_zone = 0.6f;
+        float god_arm_zone = 0.25f;
+        bool god_arm_lead = true;
+        bool god_hang_arm = false;
+        bool god_arms_limp = false;
+        bool god_throw = true;
+        float god_throw_strength = 1.0f;
+        float god_throw_gravity = 9.81f;
+        int god_land_anim = -1;
+        float god_drop_height = 1.0f;
+        // god_grab_pose: grabs come from the hand's pose -- a pinch (trigger
+        // + thumb down) or a fist (trigger + grip); grip alone only points
+        // and presses. 0 = the old grip-button grabs.
+        bool god_grab_pose = true;
+        // Right stick (immersive third person): a quick hold of its click
+        // (seconds) switches the view; a click resets the angle. Board view:
+        // up/down zooms to Lara (board_zoom_speed, e-folds a second at full
+        // tilt), left/right turns round her, and held in, up/down scales the
+        // world (board_scale_speed, e-folds a second). Shoulder view: held
+        // in, up/down is the height (stick_height_speed, metres a second).
+        float view_switch_hold = 0.4f;
+        float stick_height_speed = 0.4f;
+        float board_zoom_speed = 1.0f;
+        float board_scale_speed = 0.7f;
+        // Experimental: grab her hand or arm and drag her up like a
+        // ragdoll (arm zones, procedural IK hang). Off: the head grab with
+        // Legend's own dangle animation.
+        bool god_drag_hand = false;
+        // Whole-body push (god mode): a hand leaning on her tilts head,
+        // chest, waist, arms, hips and legs by up to these degrees on a
+        // spring (hz, damping), scaled by body_push_strength.
+        bool body_push = true;
+        float body_push_strength = 1.0f;
+        float body_push_hz = 2.5f;
+        float body_push_damping = 0.9f;
+        float body_push_head_degrees = 6.0f;
+        float body_push_chest_degrees = 4.0f;
+        float body_push_waist_degrees = 3.0f;
+        float body_push_arm_degrees = 8.0f;
+        float body_push_hips_degrees = 3.0f;
+        float body_push_leg_degrees = 2.0f;
+        // Rear soft body: the buttocks as masses on springs (hz, damping,
+        // gain, max_cm of lag), the share of motion kept per axis, the
+        // region's size/shape/placement, the dent a fingertip makes, and two
+        // tuning aids (debug lines, test push).
+        bool body_rear = true;
+        float body_rear_hz = 4.0f;
+        float body_rear_damping = 0.3f;
+        float body_rear_gain = 1.0f;
+        float body_rear_max_cm = 3.0f;
+        float body_rear_side = 0.6f;
+        float body_rear_back = 1.0f;
+        float body_rear_up = 1.0f;
+        // Baseline fullness (cm at her size, negative = slimmer): how far
+        // the cheeks stand out at rest, along the same falloff. The size,
+        // width and height only change the region that moves.
+        float body_rear_fullness_cm = 0.0f;
+        // The absolute most any point of the cheeks moves from rest, cm at
+        // her size, whatever the gain or a hand's pull (eased in from 80%).
+        float body_rear_limit_cm = 20.0f;
+        float body_rear_size = 1.0f;
+        float body_rear_width = 1.0f;
+        float body_rear_height = 1.0f;
+        float body_rear_spread_cm = 8.0f;
+        float body_rear_core = 0.5f;
+        float body_rear_lift_cm = 0.0f;
+        float body_rear_inward = 0.5f;
+        float body_rear_touch_cm = 0.0f;
+        float body_rear_cleft_cm = 0.0f;
+        float body_rear_cleft_width_cm = 2.0f;
+        float body_rear_seam_cm = 1.0f;
+        bool body_rear_debug = false;
+        float body_rear_test_cm = 0.0f;
+        float body_rear_dent = 1.0f;
         // Third-person camera collision: the board seat and the head-moved
         // eye stop short of geometry (0 = allow clipping into it).
         bool camera_collision = true;
         // First person: bullets go exactly where the gun points (0 = keep
         // the game's random spread).
         bool first_person_no_spread = true;
-        // Mission Prep backdrop: size relative to the view (1 = exactly
-        // fills it) and how slowly it turns after the head (seconds).
-        float mission_prep_backdrop_scale = 1.15f;
-        float mission_prep_backdrop_lag = 0.4f;
         // Visual recoil kick on each of Lara's shots (0 = off, 1 = default
         // strength, up to 2) and a controller vibration per shot.
         float weapon_recoil = 1.0f;
@@ -235,6 +319,18 @@ namespace trlvr
         // the centre of view. 0 is fully world-relative. Menus have their own
         // policies.
         float hud_follow = 0.85f;
+
+        // The settings overlay in the headset: a square panel placed in the
+        // room in front of the head when it opens (and at a recentre or a
+        // change of these), distance metres away, width degrees wide, turned
+        // yaw degrees to the left and pitch degrees up. Holding the menu
+        // button open_hold seconds opens it (0 = off: the button always goes
+        // to the game).
+        float overlay_vr_distance = 1.0f;
+        float overlay_vr_width_degrees = 38.0f;
+        float overlay_vr_yaw_degrees = 15.0f;
+        float overlay_vr_pitch_degrees = -10.0f;
+        float overlay_vr_open_hold = 0.6f;
 
         // The safe production policy keeps portal/room culling bypassed and
         // widens only the engine's much cheaper object frustum.

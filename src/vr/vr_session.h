@@ -148,6 +148,17 @@ namespace trlvr
     // forward), as used by the tracked-hand grab-zone renderer.
     bool vr_project_head_point(Eye eye, float x, float y, float z,
                                float* u, float* v);
+    // The headset in the runtime's tracking space (metres, x right, y up,
+    // z back): its position and its level forward (x, z; unit length).
+    // False without a valid head pose or when it looks straight up/down.
+    bool vr_head_tracking_level(float position[3], float* forward_x,
+                                float* forward_z);
+    // Project a fixed point in that tracking space into an eye's normalized
+    // texture coordinates, with its depth in front of the eye in metres
+    // (negative or small behind it -- the caller decides; u and v are only
+    // meaningful with a positive depth). False without a head pose.
+    bool vr_project_tracking_point(Eye eye, const float point[3], float* u,
+                                   float* v, float* depth);
 
     // Latest tracked controller transform relative to the HMD, in engine
     // coordinates and units. This is intentionally independent of the game

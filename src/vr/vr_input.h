@@ -63,6 +63,11 @@ namespace trlvr
     void vr_input_game_motors(float low, float high);
     // The grip button of one controller, as last sampled.
     bool vr_input_grip_held(bool left);
+    // God mode's grab for one physical hand (0 left, 1 right): with
+    // [vr] god_grab_pose and finger data, a pinch (trigger + thumb down) or
+    // a fist (trigger + grip) from the player's fingers (finger_grabbing);
+    // otherwise the grip button.
+    bool vr_input_hand_grab(int hand);
     // SteamVR skeletal input (finger tracking): each finger's curl, 0
     // straight .. 1 curled (thumb, index, middle, ring, pinky), and the
     // splay between neighbours (0 touching .. 1 apart). False when that

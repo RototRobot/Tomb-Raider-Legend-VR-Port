@@ -278,6 +278,20 @@ chest, the light on a left-hand grip at the left chest, and climbing with your
 hands. The action trigger aims with a gun out and acts otherwise. X, the long
 press on Y and the long press on the right stick give way to gestures.
 
+The right stick's click: a quick hold (`view_switch_hold`, 0.4 s) switches the
+view, a click resets the angle (recentres). In the `board` view (god mode) the
+right stick's up/down zooms to Lara (`board_zoom_speed`) and left/right turns
+the board round her; hold it in and push up/down (a click-drag, like the left
+stick's radial menu) to scale the world (up = bigger Lara; `board_scale_speed`);
+zoom and scale are saved as the board's. In the `shoulder` view the click-drag's
+up/down is the height (`stick_height_speed`). Letting go ends it.
+Grabbing her hand or arm to drag her up like a ragdoll is
+experimental (`god_drag_hand`, off: the head grab and the dangle animation).
+With `god_grab_pose = 1`
+you grab Lara with a pinch (trigger + thumb down) or a fist (trigger + grip);
+the grip alone only points and presses. A hand near or on her keeps its grip
+and trigger from the game until they are released.
+
 ### Developer keys
 
 Mostly for diagnosing problems. Each writes what it did to `trlvr.log`.

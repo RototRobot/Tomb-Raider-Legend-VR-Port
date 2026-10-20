@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
 using namespace trlvr;
 
@@ -27,6 +28,25 @@ namespace
     bool close(float a, float b, float eps = 1e-4f)
     {
         return fabsf(a - b) <= eps;
+    }
+
+    // For the god-mode test files (*_tests.inc): quiet, only failures print.
+    int g_quiet_checks = 0;
+
+    void quiet_check(bool ok, const char* what, const char* file, int line)
+    {
+        ++g_quiet_checks;
+        if (!ok)
+        {
+            ++g_failures;
+            printf("  [FAIL] %s  (%s:%d)\n", what, file, line);
+        }
+    }
+#define CHECK(cond) quiet_check((cond), #cond, __FILE__, __LINE__)
+
+    bool near(float a, float b, float eps = 1e-4f)
+    {
+        return fabsf(a - b) <= eps * (1.0f + fabsf(b));
     }
 
     void print_regs(const char* label, const float* r)
@@ -78,9 +98,34 @@ namespace
     };
 }
 
+// God-mode modules ported from the Underworld mod: one file of tests each.
+#include "body_push_tests.inc"
+#include "body_volumes_tests.inc"
+#include "god_carry_tests.inc"
+#include "god_pluck_tests.inc"
+#include "soft_body_tests.inc"
+#include "rear_jiggle_tests.inc"
+#include "rear_shape_tests.inc"
+#include "board_leash_tests.inc"
+#include "menu_panel_tests.inc"
+#include "finger_input_tests.inc"
+
 int main()
 {
     printf("projection maths tests\n\n");
+
+    test_body_push();
+    test_body_volumes();
+    test_body_volumes_legend();
+    test_god_carry();
+    test_god_pluck();
+    test_soft_body();
+    test_rear_jiggle();
+    test_rear_shape();
+    test_board_leash();
+    test_menu_panel();
+    test_finger_input();
+    printf("  %d god-mode checks run quietly\n\n", g_quiet_checks);
 
     // --- reading the game's projection back out of its registers ----------
     GameProjection gp = projection_from_registers(kGameRegs);

@@ -83,10 +83,61 @@ namespace trlvr
             { L"vr", L"board_distance", L"0.5" },
             { L"vr", L"board_height", L"0.35" },
             { L"vr", L"board_god_hand", L"1" },
+            { L"vr", L"board_leash", L"0.35" },
+            { L"vr", L"board_leash_height", L"0.1" },
+            { L"vr", L"god_head_zone", L"0.3" },
+            { L"vr", L"god_claim_zone", L"0.6" },
+            { L"vr", L"god_arm_zone", L"0.25" },
+            { L"vr", L"god_arm_lead", L"1" },
+            { L"vr", L"god_hang_arm", L"0" },
+            { L"vr", L"god_arms_limp", L"0" },
+            { L"vr", L"god_throw", L"1" },
+            { L"vr", L"god_throw_strength", L"1" },
+            { L"vr", L"god_throw_gravity", L"9.81" },
+            { L"vr", L"god_land_anim", L"-1" },
+            { L"vr", L"god_drop_height", L"1" },
+            { L"vr", L"god_grab_pose", L"1" },
+            { L"vr", L"view_switch_hold", L"0.4" },
+            { L"vr", L"stick_height_speed", L"0.4" },
+            { L"vr", L"board_zoom_speed", L"1" },
+            { L"vr", L"god_drag_hand", L"0" },
+            { L"vr", L"board_scale_speed", L"0.7" },
+            { L"vr", L"body_push", L"1" },
+            { L"vr", L"body_push_strength", L"1" },
+            { L"vr", L"body_push_hz", L"2.5" },
+            { L"vr", L"body_push_damping", L"0.9" },
+            { L"vr", L"body_push_head_degrees", L"6" },
+            { L"vr", L"body_push_chest_degrees", L"4" },
+            { L"vr", L"body_push_waist_degrees", L"3" },
+            { L"vr", L"body_push_arm_degrees", L"8" },
+            { L"vr", L"body_push_hips_degrees", L"3" },
+            { L"vr", L"body_push_leg_degrees", L"2" },
+            { L"vr", L"body_rear", L"1" },
+            { L"vr", L"body_rear_hz", L"4" },
+            { L"vr", L"body_rear_damping", L"0.3" },
+            { L"vr", L"body_rear_gain", L"1" },
+            { L"vr", L"body_rear_max_cm", L"3" },
+            { L"vr", L"body_rear_side", L"0.6" },
+            { L"vr", L"body_rear_back", L"1" },
+            { L"vr", L"body_rear_up", L"1" },
+            { L"vr", L"body_rear_fullness_cm", L"0" },
+            { L"vr", L"body_rear_limit_cm", L"20" },
+            { L"vr", L"body_rear_size", L"1" },
+            { L"vr", L"body_rear_width", L"1" },
+            { L"vr", L"body_rear_height", L"1" },
+            { L"vr", L"body_rear_spread_cm", L"8" },
+            { L"vr", L"body_rear_core", L"0.5" },
+            { L"vr", L"body_rear_lift_cm", L"0" },
+            { L"vr", L"body_rear_inward", L"0.5" },
+            { L"vr", L"body_rear_touch_cm", L"0" },
+            { L"vr", L"body_rear_cleft_cm", L"0" },
+            { L"vr", L"body_rear_cleft_width_cm", L"2" },
+            { L"vr", L"body_rear_seam_cm", L"1" },
+            { L"vr", L"body_rear_debug", L"0" },
+            { L"vr", L"body_rear_test_cm", L"0" },
+            { L"vr", L"body_rear_dent", L"1" },
             { L"vr", L"camera_collision", L"1" },
             { L"vr", L"first_person_no_spread", L"1" },
-            { L"vr", L"mission_prep_backdrop_scale", L"1.15" },
-            { L"vr", L"mission_prep_backdrop_lag", L"0.4" },
             { L"vr", L"weapon_recoil", L"1.0" },
             { L"vr", L"weapon_haptics", L"1" },
             { L"vr", L"shake_rumble", L"1" },
@@ -131,6 +182,11 @@ namespace trlvr
             { L"vr", L"menu_world_locked", L"1" },
             { L"vr", L"ui_scale", L"0.6" },
             { L"vr", L"hud_follow", L"0.85" },
+            { L"vr", L"overlay_vr_distance", L"1.0" },
+            { L"vr", L"overlay_vr_width_degrees", L"38" },
+            { L"vr", L"overlay_vr_yaw_degrees", L"15" },
+            { L"vr", L"overlay_vr_pitch_degrees", L"-10" },
+            { L"vr", L"overlay_vr_open_hold", L"0.6" },
             { L"vr", L"cull_fov_degrees", L"120" },
 
             { L"controls", L"controllers", L"1" },
@@ -286,16 +342,146 @@ namespace trlvr
             L"; her over (hold Y). Needs board mode, immersive controls and\r\n"
             L"; third person too.\r\n"
             L"board_god_hand = 1\r\n"
+            L"; live: board view (god mode), how far Lara can run from the board's\r\n"
+            L"; centre before the table is pulled after her, in table metres.\r\n"
+            L"; 0 = it follows her exactly (the old way). 0 .. 2.\r\n"
+            L"board_leash = 0.35\r\n"
+            L"; live: board view, how far she can go up or down from the board's centre\r\n"
+            L"; before its height follows, in table metres. 0 = at once. 0 .. 1.\r\n"
+            L"board_leash_height = 0.1\r\n"
+            L"; live: god mode (board view with board_god_hand), the pick-up zone round\r\n"
+            L"; her head, metres at her size. 0.05 .. 1.\r\n"
+            L"god_head_zone = 0.3\r\n"
+            L"; live: god mode, a hand this close to her body (metres at her size)\r\n"
+            L"; keeps its grip and trigger from the game. 0 .. 3.\r\n"
+            L"god_claim_zone = 0.6\r\n"
+            L"; live: god mode, a grip this close to one of her arms (metres at her\r\n"
+            L"; size) holds that arm instead of her head. 0 = no arm grab. 0 .. 0.5.\r\n"
+            L"god_arm_zone = 0.25\r\n"
+            L"; live: god mode, holding her arm, only the arm follows your hand until\r\n"
+            L"; you pull past her reach; then she hangs from that wrist. 0 = she is\r\n"
+            L"; lifted by the arm at once.\r\n"
+            L"god_arm_lead = 1\r\n"
+            L"; live: god mode pick-up, 1 = Legend's old way: the dangle animation,\r\n"
+            L"; hanging by her wrist. 0 = she hangs from where you pinched her.\r\n"
+            L"god_hang_arm = 0\r\n"
+            L"; live: god mode, 1 = her arms hang limp while she is held.\r\n"
+            L"god_arms_limp = 0\r\n"
+            L"; live: god mode, let go mid-swing and she flies off your hand, arcs and\r\n"
+            L"; lands where she hits the level. 0 = always put down where you let go.\r\n"
+            L"god_throw = 1\r\n"
+            L"; live: god mode, a throw's speed: your hand's speed times this. 0.2 .. 3.\r\n"
+            L"god_throw_strength = 1\r\n"
+            L"; live: god mode, a thrown Lara's gravity, m/s^2 at your size. 1 .. 30.\r\n"
+            L"god_throw_gravity = 9.81\r\n"
+            L"; live: god mode, a thrown Lara landing plays this animation of hers (the\r\n"
+            L"; game's own, by number). -1 = none. -1 .. 4000.\r\n"
+            L"god_land_anim = -1\r\n"
+            L"; live: god mode, let go over a floor and she falls from where you held\r\n"
+            L"; her, but from no higher than this above the floor (metres at her size).\r\n"
+            L"; 0 = set straight down on the floor. 0 .. 5.\r\n"
+            L"god_drop_height = 1\r\n"
+            L"; live: god mode, 1 = you grab with your hand's pose: a pinch (trigger\r\n"
+            L"; and thumb down) or a fist (trigger and grip); the grip alone only\r\n"
+            L"; points and presses. Needs finger_tracking. 0 = the grip button grabs.\r\n"
+            L"god_grab_pose = 1\r\n"
+            L"; live: the right stick, in the immersive third-person views. Holding\r\n"
+            L"; its click this many seconds switches the view; a quick click resets\r\n"
+            L"; the angle (recentres). 0.15 .. 2.\r\n"
+            L"view_switch_hold = 0.4\r\n"
+            L"; live: shoulder view, hold the right stick in and push up/down to\r\n"
+            L"; raise and lower the seat, metres a second at full tilt. 0 = off.\r\n"
+            L"; 0 .. 3.\r\n"
+            L"stick_height_speed = 0.4\r\n"
+            L"; live: board view, the right stick up/down zooms to Lara (up = closer),\r\n"
+            L"; e-folds a second at full tilt; saved as the board's zoom. Left/right\r\n"
+            L"; turns the board round her. 0 = off. 0 .. 5.\r\n"
+            L"board_zoom_speed = 1\r\n"
+            L"; live: board view, hold the right stick in and push up/down to scale\r\n"
+            L"; Lara (up = bigger), e-folds a second at full tilt; saved as the\r\n"
+            L"; board's scale. 0 = off. 0 .. 5.\r\n"
+            L"board_scale_speed = 0.7\r\n"
+            L"; live: EXPERIMENTAL, god mode: grab her hand or arm and drag her up\r\n"
+            L"; like a ragdoll, hanging by IK. 0 = the head grab and Legend's dangle\r\n"
+            L"; animation.\r\n"
+            L"god_drag_hand = 0\r\n"
+            L"; live: god mode, a hand leaning on her pushes her away: head, chest,\r\n"
+            L"; waist, arms, hips and legs tilt a few degrees and come back. 0 = off.\r\n"
+            L"body_push = 1\r\n"
+            L"; live: how much any push tilts her. 0 .. 3.\r\n"
+            L"body_push_strength = 1\r\n"
+            L"; live: how quick the tilt is (spring Hz, 0.5 .. 6) and how damped\r\n"
+            L"; (near 1 = no swing past rest; 0.2 .. 1.5).\r\n"
+            L"body_push_hz = 2.5\r\n"
+            L"body_push_damping = 0.9\r\n"
+            L"; live: the most each part tilts, in degrees. Head 0 .. 20, chest and\r\n"
+            L"; waist 0 .. 15, arms 0 .. 25, hips 0 .. 15, legs 0 .. 8.\r\n"
+            L"body_push_head_degrees = 6\r\n"
+            L"body_push_chest_degrees = 4\r\n"
+            L"body_push_waist_degrees = 3\r\n"
+            L"body_push_arm_degrees = 8\r\n"
+            L"body_push_hips_degrees = 3\r\n"
+            L"body_push_leg_degrees = 2\r\n"
+            L"; live: her buttocks: each cheek is a mass on a spring that lags and\r\n"
+            L"; settles as she moves. 0 = off.\r\n"
+            L"body_rear = 1\r\n"
+            L"; live: how fast a cheek bounces, Hz (lower = softer, slower). 0.5 .. 8.\r\n"
+            L"body_rear_hz = 4\r\n"
+            L"; live: how quickly a bounce dies away (damping ratio). 0.05 .. 1.5.\r\n"
+            L"body_rear_damping = 0.3\r\n"
+            L"; live: how much of the cheeks' lag is shown. 0 = none. 0 .. 3.\r\n"
+            L"body_rear_gain = 1\r\n"
+            L"; live: the most a cheek can lag behind, cm at her size. 0 .. 8.\r\n"
+            L"body_rear_max_cm = 3\r\n"
+            L"; live: how much motion is kept along each of her axes: side to side,\r\n"
+            L"; back and forth, up and down. 0 .. 2 each.\r\n"
+            L"body_rear_side = 0.6\r\n"
+            L"body_rear_back = 1\r\n"
+            L"body_rear_up = 1\r\n"
+            L"; live: baseline fullness, cm at her size: how far the cheeks stand out\r\n"
+            L"; at rest (minus = slimmer). The other sizes only change the region\r\n"
+            L"; that moves. -2 .. 5.\r\n"
+            L"body_rear_fullness_cm = 0\r\n"
+            L"; live: the absolute most any point of the cheeks moves from rest, cm at\r\n"
+            L"; her size, whatever the gain or a hand's pull (eased in from 80%).\r\n"
+            L"; 1 .. 40.\r\n"
+            L"body_rear_limit_cm = 20\r\n"
+            L"; live: size of the moved region round each cheek. 0.5 .. 2.\r\n"
+            L"body_rear_size = 1\r\n"
+            L"; live: its width and height, multiples of the size. 0.5 .. 2.\r\n"
+            L"body_rear_width = 1\r\n"
+            L"body_rear_height = 1\r\n"
+            L"; live: the regions are fitted to her mesh; 8 = as fitted, more moves each\r\n"
+            L"; one further out from her middle by (value - 8) cm. 0 .. 16.\r\n"
+            L"body_rear_spread_cm = 8\r\n"
+            L"; live: how much of the region moves fully before easing out. 0 .. 0.9.\r\n"
+            L"body_rear_core = 0.5\r\n"
+            L"; live: moves both regions up (+) or down (-), cm. -12 .. 12.\r\n"
+            L"body_rear_lift_cm = 0\r\n"
+            L"; live: how much motion INTO her body is kept. 0 .. 1.\r\n"
+            L"body_rear_inward = 0.5\r\n"
+            L"; live: god mode: grows (+) or shrinks (-) each glute's touch zone, cm.\r\n"
+            L"; -3 .. 3.\r\n"
+            L"body_rear_touch_cm = 0\r\n"
+            L"; live: pulls the cleft between the glutes into her body, cm (0 .. 3),\r\n"
+            L"; over this many cm either side (0.5 .. 6).\r\n"
+            L"body_rear_cleft_cm = 0\r\n"
+            L"body_rear_cleft_width_cm = 2\r\n"
+            L"; live: the cut at her midline, cm; 0 = no cut. 0 .. 4.\r\n"
+            L"body_rear_seam_cm = 1\r\n"
+            L"; live: tuning aid: draws each cheek's region as lines. 1 = on.\r\n"
+            L"body_rear_debug = 0\r\n"
+            L"; live: tuning aid: pushes both cheeks this many cm back. -5 .. 5.\r\n"
+            L"body_rear_test_cm = 0\r\n"
+            L"; live: god mode: your fingertip dents her buttocks; the dent's size as a\r\n"
+            L"; multiple of a fingertip, 0 = no dent. 0 .. 2.\r\n"
+            L"body_rear_dent = 1\r\n"
             L"; Third-person camera collision: the view stops short of rock\r\n"
             L"; and walls instead of passing into them (0 = allow clipping).\r\n"
             L"camera_collision = 1\r\n"
             L"; First person: no random bullet spread -- shots go exactly where\r\n"
             L"; the gun points (0 = keep the game's spread).\r\n"
             L"first_person_no_spread = 1\r\n"
-            L"; Backdrop behind the Mission Prep menu: size relative to the view\r\n"
-            L"; (1 = exactly fills it) and how slowly it follows the head (s).\r\n"
-            L"mission_prep_backdrop_scale = 1.15\r\n"
-            L"mission_prep_backdrop_lag = 0.4\r\n"
             L"; Visual gun kick per shot: 0 = off, 1 = default, up to 2.\r\n"
             L"weapon_recoil = 1.0\r\n"
             L"; 1 = the firing controller vibrates on each shot.\r\n"
@@ -382,6 +568,18 @@ namespace trlvr
             L"ui_scale = 0.6\r\n"
             L"; 1.0 is rigidly head-locked; 0.85 gives the gameplay HUD gentle drag.\r\n"
             L"hud_follow = 0.85\r\n"
+            L"\r\n"
+            L"; The settings window (Insert) in the headset: a panel placed in front\r\n"
+            L"; of you when it opens. Distance in metres (0.3 to 5), width in degrees\r\n"
+            L"; (10 to 120), yaw degrees to the left (-90 to 90, negative = right),\r\n"
+            L"; pitch degrees up (-60 to 60, negative = down).\r\n"
+            L"overlay_vr_distance = 1.0\r\n"
+            L"overlay_vr_width_degrees = 38\r\n"
+            L"overlay_vr_yaw_degrees = 15\r\n"
+            L"overlay_vr_pitch_degrees = -10\r\n"
+            L"; Hold the controller menu (pause) button this many seconds to open\r\n"
+            L"; it; a quicker press still pauses the game. 0 = off (0 to 3).\r\n"
+            L"overlay_vr_open_hold = 0.6\r\n"
             L"\r\n"
             L"; Object visibility only. Room culling is conservatively bypassed for VR.\r\n"
             L"cull_fov_degrees = 120\r\n"
@@ -765,17 +963,6 @@ namespace trlvr
                 : _wcsnicmp(culling, L"game", 4) == 0 ? -1 : 0;
         }
         {
-            const float backdrop = read_float(
-                L"vr", L"mission_prep_backdrop_scale", L"1.15", path);
-            g_config.mission_prep_backdrop_scale =
-                std::isfinite(backdrop) && backdrop >= 0.3f &&
-                backdrop <= 6.0f ? backdrop : 1.15f;
-            const float lag = read_float(
-                L"vr", L"mission_prep_backdrop_lag", L"0.4", path);
-            g_config.mission_prep_backdrop_lag =
-                std::isfinite(lag) && lag >= 0.0f && lag <= 3.0f ? lag : 0.4f;
-        }
-        {
             wchar_t vignette[32] = {};
             GetPrivateProfileStringW(L"vr", L"comfort_vignette", L"off",
                                      vignette, 32, path);
@@ -856,6 +1043,101 @@ namespace trlvr
         value = read_float(L"vr", L"body_soft_ripple", L"0.4", path);
         g_config.body_soft_ripple = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.4f;
+        {
+            auto rf = [&](const wchar_t* key, const wchar_t* def, float lo,
+                          float hi, float fallback) {
+                const float v = read_float(L"vr", key, def, path);
+                return std::isfinite(v) ? (v < lo ? lo : v > hi ? hi : v)
+                                        : fallback;
+            };
+            auto rb = [&](const wchar_t* key, bool fallback) {
+                return read_bool(L"vr", key, fallback, path);
+            };
+            Config& c = g_config;
+            c.board_leash = rf(L"board_leash", L"0.35", 0.0f, 2.0f, 0.35f);
+            c.board_leash_height =
+                rf(L"board_leash_height", L"0.1", 0.0f, 1.0f, 0.1f);
+            c.god_head_zone = rf(L"god_head_zone", L"0.3", 0.05f, 1.0f, 0.3f);
+            c.god_claim_zone = rf(L"god_claim_zone", L"0.6", 0.0f, 3.0f, 0.6f);
+            c.god_arm_zone = rf(L"god_arm_zone", L"0.25", 0.0f, 0.5f, 0.25f);
+            c.god_arm_lead = rb(L"god_arm_lead", true);
+            c.god_hang_arm = rb(L"god_hang_arm", false);
+            c.god_arms_limp = rb(L"god_arms_limp", false);
+            c.god_throw = rb(L"god_throw", true);
+            c.god_throw_strength =
+                rf(L"god_throw_strength", L"1", 0.2f, 3.0f, 1.0f);
+            c.god_throw_gravity =
+                rf(L"god_throw_gravity", L"9.81", 1.0f, 30.0f, 9.81f);
+            c.god_land_anim = (int)rf(L"god_land_anim", L"-1", -1.0f,
+                                      4000.0f, -1.0f);
+            c.god_drop_height =
+                rf(L"god_drop_height", L"1", 0.0f, 5.0f, 1.0f);
+            c.god_grab_pose = rb(L"god_grab_pose", true);
+            c.view_switch_hold =
+                rf(L"view_switch_hold", L"0.4", 0.15f, 2.0f, 0.4f);
+            c.stick_height_speed =
+                rf(L"stick_height_speed", L"0.4", 0.0f, 3.0f, 0.4f);
+            c.board_zoom_speed =
+                rf(L"board_zoom_speed", L"1", 0.0f, 5.0f, 1.0f);
+            c.god_drag_hand = rb(L"god_drag_hand", false);
+            c.board_scale_speed =
+                rf(L"board_scale_speed", L"0.7", 0.0f, 5.0f, 0.7f);
+            c.body_push = rb(L"body_push", true);
+            c.body_push_strength =
+                rf(L"body_push_strength", L"1", 0.0f, 3.0f, 1.0f);
+            c.body_push_hz = rf(L"body_push_hz", L"2.5", 0.5f, 6.0f, 2.5f);
+            c.body_push_damping =
+                rf(L"body_push_damping", L"0.9", 0.2f, 1.5f, 0.9f);
+            c.body_push_head_degrees =
+                rf(L"body_push_head_degrees", L"6", 0.0f, 20.0f, 6.0f);
+            c.body_push_chest_degrees =
+                rf(L"body_push_chest_degrees", L"4", 0.0f, 15.0f, 4.0f);
+            c.body_push_waist_degrees =
+                rf(L"body_push_waist_degrees", L"3", 0.0f, 15.0f, 3.0f);
+            c.body_push_arm_degrees =
+                rf(L"body_push_arm_degrees", L"8", 0.0f, 25.0f, 8.0f);
+            c.body_push_hips_degrees =
+                rf(L"body_push_hips_degrees", L"3", 0.0f, 15.0f, 3.0f);
+            c.body_push_leg_degrees =
+                rf(L"body_push_leg_degrees", L"2", 0.0f, 8.0f, 2.0f);
+            c.body_rear = rb(L"body_rear", true);
+            c.body_rear_hz = rf(L"body_rear_hz", L"4", 0.5f, 8.0f, 4.0f);
+            c.body_rear_damping =
+                rf(L"body_rear_damping", L"0.3", 0.05f, 1.5f, 0.3f);
+            c.body_rear_gain = rf(L"body_rear_gain", L"1", 0.0f, 3.0f, 1.0f);
+            c.body_rear_max_cm =
+                rf(L"body_rear_max_cm", L"3", 0.0f, 8.0f, 3.0f);
+            c.body_rear_side = rf(L"body_rear_side", L"0.6", 0.0f, 2.0f, 0.6f);
+            c.body_rear_back = rf(L"body_rear_back", L"1", 0.0f, 2.0f, 1.0f);
+            c.body_rear_up = rf(L"body_rear_up", L"1", 0.0f, 2.0f, 1.0f);
+            c.body_rear_fullness_cm =
+                rf(L"body_rear_fullness_cm", L"0", -2.0f, 5.0f, 0.0f);
+            c.body_rear_limit_cm =
+                rf(L"body_rear_limit_cm", L"20", 1.0f, 40.0f, 20.0f);
+            c.body_rear_size = rf(L"body_rear_size", L"1", 0.5f, 2.0f, 1.0f);
+            c.body_rear_width = rf(L"body_rear_width", L"1", 0.5f, 2.0f, 1.0f);
+            c.body_rear_height =
+                rf(L"body_rear_height", L"1", 0.5f, 2.0f, 1.0f);
+            c.body_rear_spread_cm =
+                rf(L"body_rear_spread_cm", L"8", 0.0f, 16.0f, 8.0f);
+            c.body_rear_core = rf(L"body_rear_core", L"0.5", 0.0f, 0.9f, 0.5f);
+            c.body_rear_lift_cm =
+                rf(L"body_rear_lift_cm", L"0", -12.0f, 12.0f, 0.0f);
+            c.body_rear_inward =
+                rf(L"body_rear_inward", L"0.5", 0.0f, 1.0f, 0.5f);
+            c.body_rear_touch_cm =
+                rf(L"body_rear_touch_cm", L"0", -3.0f, 3.0f, 0.0f);
+            c.body_rear_cleft_cm =
+                rf(L"body_rear_cleft_cm", L"0", 0.0f, 3.0f, 0.0f);
+            c.body_rear_cleft_width_cm =
+                rf(L"body_rear_cleft_width_cm", L"2", 0.5f, 6.0f, 2.0f);
+            c.body_rear_seam_cm =
+                rf(L"body_rear_seam_cm", L"1", 0.0f, 4.0f, 1.0f);
+            c.body_rear_debug = rb(L"body_rear_debug", false);
+            c.body_rear_test_cm =
+                rf(L"body_rear_test_cm", L"0", -5.0f, 5.0f, 0.0f);
+            c.body_rear_dent = rf(L"body_rear_dent", L"1", 0.0f, 2.0f, 1.0f);
+        }
         value = read_float(L"vr", L"view_transition_seconds", L"0.3", path);
         g_config.view_transition_seconds = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 2.0f ? 2.0f : value) : 0.3f;
@@ -954,6 +1236,28 @@ namespace trlvr
         g_config.ui_scale = value >= 0.1f && value <= 2.0f ? value : 0.6f;
         value = read_float(L"vr", L"hud_follow", L"0.85", path);
         g_config.hud_follow = value >= 0.0f && value <= 1.0f ? value : 0.85f;
+        {
+            const auto clamped = [](float v, float low, float high,
+                                    float fallback) {
+                return std::isfinite(v) ? (v < low ? low : v > high ? high : v)
+                                        : fallback;
+            };
+            g_config.overlay_vr_distance = clamped(
+                read_float(L"vr", L"overlay_vr_distance", L"1.0", path),
+                0.3f, 5.0f, 1.0f);
+            g_config.overlay_vr_width_degrees = clamped(
+                read_float(L"vr", L"overlay_vr_width_degrees", L"38", path),
+                10.0f, 120.0f, 38.0f);
+            g_config.overlay_vr_yaw_degrees = clamped(
+                read_float(L"vr", L"overlay_vr_yaw_degrees", L"15", path),
+                -90.0f, 90.0f, 15.0f);
+            g_config.overlay_vr_pitch_degrees = clamped(
+                read_float(L"vr", L"overlay_vr_pitch_degrees", L"-10", path),
+                -60.0f, 60.0f, -10.0f);
+            g_config.overlay_vr_open_hold = clamped(
+                read_float(L"vr", L"overlay_vr_open_hold", L"0.6", path),
+                0.0f, 3.0f, 0.6f);
+        }
         value = read_float(L"vr", L"cull_fov_degrees", L"120", path);
         g_config.cull_fov_degrees =
             value >= 100.0f && value <= 150.0f ? value : 120.0f;

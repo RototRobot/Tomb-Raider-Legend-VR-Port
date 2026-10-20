@@ -44,6 +44,16 @@ set SRC=%SRC% "%ROOT%src\vr\input_labels.cpp"
 set SRC=%SRC% "%ROOT%src\vr\lang.cpp"
 set SRC=%SRC% "%ROOT%src\vr\hud_capture.cpp"
 set SRC=%SRC% "%ROOT%src\vr\perf_cpu.cpp"
+set SRC=%SRC% "%ROOT%src\vr\physics\body_push.cpp"
+set SRC=%SRC% "%ROOT%src\vr\physics\body_volumes.cpp"
+set SRC=%SRC% "%ROOT%src\vr\godmode\god_carry.cpp"
+set SRC=%SRC% "%ROOT%src\vr\godmode\god_pluck.cpp"
+set SRC=%SRC% "%ROOT%src\vr\physics\soft_body.cpp"
+set SRC=%SRC% "%ROOT%src\vr\physics\rear_jiggle.cpp"
+set SRC=%SRC% "%ROOT%src\vr\physics\rear_shape.cpp"
+set SRC=%SRC% "%ROOT%src\vr\godmode\board_leash.cpp"
+set SRC=%SRC% "%ROOT%src\vr\menu_panel.cpp"
+set SRC=%SRC% "%ROOT%src\vr\finger_input.cpp"
 
 rem OpenXR: headers and a static loader (third_party\openxr). Linking the
 rem loader in means there is no DLL of ours to go missing; a missing or

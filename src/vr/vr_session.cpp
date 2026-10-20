@@ -793,6 +793,55 @@ namespace trlvr
         }
     }
 
+    // Mission Prep's own pure projection (the game's flat shot), for the
+    // depth terms of its world-view-projection and flat draws: the scene
+    // branch below returns before g_game_proj is updated.
+    static GameProjection g_prep_proj{};
+
+    // Mission Prep: the camera kept the game's flat shot (camera_head), so
+    // every draw there already produces the flat picture. Post-map its clip
+    // coordinates exactly as the world-locked menu does (source * clip
+    // scale * inv(centre frustum) * head rotation * eye frustum), so the 3D
+    // scene, Lara, the 2D backdrop and the menu items stay pinned together
+    // -- same anchor (level, recentred forward), same UI scale. `close`
+    // gives flat draws the menu's own close clip plane: they may sit on the
+    // game's near plane, which the rotation would cut into wedges.
+    static Mat4 mission_prep_pinned(const float* in, const GameProjection& gp,
+                                    Eye eye, bool close)
+    {
+        Mat4 m{};
+        for (int i = 0; i < 4; ++i)
+            for (int k = 0; k < 4; ++k)
+                m.m[k][i] = in[i * 4 + k];
+        if (gp.valid)
+            g_prep_proj = gp;
+        const GameProjection depth = gp.valid ? gp
+            : g_prep_proj.valid ? g_prep_proj
+            : (g_game_proj_known ? g_game_proj : gp);
+        const float near_z = depth.valid && depth.near_z > 0.0f
+            ? depth.near_z : 1.0f;
+        const float far_z = depth.valid && depth.far_z > near_z
+            ? depth.far_z : 100000.0f;
+        const bool flip = depth.valid ? depth.sy < 0.0f : false;
+        const EyeInfo& l = g_eyes[EyeLeft];
+        const EyeInfo& r = g_eyes[EyeRight];
+        const EyeInfo& target = (eye == EyeCenter) ? l : g_eyes[eye];
+        const Mat4 reference = projection_from_tangents(
+            0.5f * (l.tan_left + r.tan_left),
+            0.5f * (l.tan_right + r.tan_right),
+            0.5f * (l.tan_top + r.tan_top),
+            0.5f * (l.tan_bottom + r.tan_bottom),
+            near_z, far_z, flip);
+        const Mat4 panel = projection_from_tangents(
+            target.tan_left, target.tan_right,
+            target.tan_top, target.tan_bottom,
+            close && near_z > 1.0f ? 1.0f : near_z, far_z, flip);
+        const Mat4 source = gp.valid ? projection_from_game(gp) : m;
+        return reproject_ndc_to_world_locked(source, reference, panel,
+                                             vr_head_rotation(),
+                                             tune_ui_scale());
+    }
+
     bool vr_substitute_c0_for_eye(const float* in, float* out, Eye eye)
     {
         if (!g_ready || !in || !out || !config().head_tracking)
@@ -1059,6 +1108,15 @@ namespace trlvr
                         "mono overlay fallback used");
                 }
             }
+            // Mission Prep: an interface draw without a pure projection
+            // (a 2D backdrop candidate) rode the view on the mono fallback
+            // below. Pin it with the menu by its full matrix instead.
+            if (prep_menu)
+            {
+                registers_from_matrix(
+                    mission_prep_pinned(in, GameProjection{}, eye, true), out);
+                return true;
+            }
             // Unexpected, but safer than putting an unrecognised HUD matrix
             // through the world stereo decomposition. Retain the preceding
             // mono behaviour and size correction for that draw.
@@ -1130,75 +1188,21 @@ namespace trlvr
             return true;
         }
 
-        // Mission Prep: the camera kept the game's flat shot (camera_head),
-        // so every scene draw already produces the flat picture. Post-map
-        // its clip coordinates exactly as the world-locked menu does
-        // (source * clip scale * inv(centre frustum) * head rotation * eye
-        // frustum), so background, Lara and menu stay pinned together.
-        if (config().ui_passthrough && ui_mission_prep_active() &&
-            (gp.valid || is_perspective_registers(in)))
+        // Mission Prep: every draw that is not a menu panel -- the 3D scene,
+        // the staged Lara, and flat (no perspective) draws such as a 2D
+        // backdrop, which used to fall through to the game's own matrix
+        // and ride the view -- is pinned with the world-locked menu.
+        if (config().ui_passthrough && ui_mission_prep_active())
         {
-            Mat4 m{};
-            for (int i = 0; i < 4; ++i)
-                for (int k = 0; k < 4; ++k)
-                    m.m[k][i] = in[i * 4 + k];
-            const GameProjection depth = gp.valid ? gp
-                : (g_game_proj_known ? g_game_proj : gp);
-            const float near_z = depth.valid && depth.near_z > 0.0f
-                ? depth.near_z : 1.0f;
-            const float far_z = depth.valid && depth.far_z > near_z
-                ? depth.far_z : 100000.0f;
-            const bool flip = depth.valid ? depth.sy < 0.0f : false;
-            const EyeInfo& l = g_eyes[EyeLeft];
-            const EyeInfo& r = g_eyes[EyeRight];
-            const EyeInfo& target = (eye == EyeCenter) ? l : g_eyes[eye];
-            const Mat4 reference = projection_from_tangents(
-                0.5f * (l.tan_left + r.tan_left),
-                0.5f * (l.tan_right + r.tan_right),
-                0.5f * (l.tan_top + r.tan_top),
-                0.5f * (l.tan_bottom + r.tan_bottom),
-                near_z, far_z, flip);
-            const Mat4 panel = projection_from_tangents(
-                target.tan_left, target.tan_right,
-                target.tan_top, target.tan_bottom,
-                near_z, far_z, flip);
-            const Mat4 source = gp.valid ? projection_from_game(gp) : m;
-            // The backdrop fills the view (slightly oversized) and turns
-            // after the head with a lag, which reads as a distant backdrop
-            // (user request): its anchor eases toward the current head
-            // rotation, and the mapping counter-rotates by the remaining
-            // difference.
-            static Mat4 anchor = Mat4::identity();
-            static LARGE_INTEGER last{};
-            LARGE_INTEGER now{}, frequency{};
-            QueryPerformanceCounter(&now);
-            QueryPerformanceFrequency(&frequency);
-            const Mat4 current = vr_head_rotation();
-            const double since = last.QuadPart && frequency.QuadPart
-                ? (double)(now.QuadPart - last.QuadPart) /
-                  (double)frequency.QuadPart : 1.0;
-            if (since > 0.5)
-                anchor = current;  // screen (re)opened: start centred
-            else if (since > 0.0)
-            {
-                const float lag = config().mission_prep_backdrop_lag;
-                const float follow = lag > 0.001f
-                    ? 1.0f - expf(-(float)since / lag) : 1.0f;
-                anchor = anchor * rotation_fraction(
-                    rigid_inverse(anchor) * current, follow);
-            }
-            last = now;
-            const float backdrop = config().mission_prep_backdrop_scale;
-            registers_from_matrix(reproject_ndc_to_world_locked(
-                source, reference, panel,
-                rigid_inverse(anchor) * current, backdrop), out);
+            const bool flat = !gp.valid && !is_perspective_registers(in);
+            registers_from_matrix(
+                mission_prep_pinned(in, gp, eye, flat), out);
             static bool reported = false;
             if (!reported)
             {
                 reported = true;
-                log("stereo: Mission Prep backdrop fills the view (scale "
-                    "%.2f) and follows the head with a %.2f s lag",
-                    backdrop, config().mission_prep_backdrop_lag);
+                log("stereo: Mission Prep scene pinned with the world-locked "
+                    "menu (scale %.2f)", tune_ui_scale());
             }
             return true;
         }
@@ -2201,6 +2205,76 @@ namespace trlvr
         *u = (point[0] / depth - projection.tan_left) / dx;
         // Texture v runs down from the up edge, whose tangent OpenVR calls
         // "bottom" (its top/bottom are backwards; see projection_from_tangents).
+        *v = (projection.tan_bottom - point[1] / depth) / dy;
+        return std::isfinite(*u) && std::isfinite(*v);
+    }
+
+    bool vr_head_tracking_level(float position[3], float* forward_x,
+                                float* forward_z)
+    {
+        if (!position || !forward_x || !forward_z || !g_ready ||
+            !g_pose_valid)
+            return false;
+        const TrackedPose& hmd = g_tracked_poses[kPoseHmd];
+        if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+            return false;
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
+        const float fx = -hm.m[0][2], fz = -hm.m[2][2];
+        const float length = sqrtf(fx * fx + fz * fz);
+        if (length < 1.0e-4f)
+            return false;
+        for (int axis = 0; axis < 3; ++axis)
+            position[axis] = hm.m[axis][3];
+        *forward_x = fx / length;
+        *forward_z = fz / length;
+        return std::isfinite(position[0]) && std::isfinite(position[1]) &&
+               std::isfinite(position[2]);
+    }
+
+    bool vr_project_tracking_point(Eye eye, const float point_in[3],
+                                   float* u, float* v, float* depth_out)
+    {
+        if (!point_in || !u || !v || !depth_out || eye == EyeCenter ||
+            !g_ready || !g_pose_valid)
+            return false;
+        const TrackedPose& hmd = g_tracked_poses[kPoseHmd];
+        if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+            return false;
+        // As vr_project_body_point: the offset from the head into the head's
+        // own (pitched and rolled) axes, then into the eye.
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
+        const float tracking[3] = {
+            point_in[0] - hm.m[0][3],
+            point_in[1] - hm.m[1][3],
+            point_in[2] - hm.m[2][3]
+        };
+        float head[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int row = 0; row < 3; ++row)
+                head[axis] += hm.m[row][axis] * tracking[row];
+        const Mat34 eye_to_head = eye_to_head_matrix(eye);
+        const float delta[3] = {
+            head[0] - eye_to_head.m[0][3],
+            head[1] - eye_to_head.m[1][3],
+            head[2] - eye_to_head.m[2][3]
+        };
+        float point[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int row = 0; row < 3; ++row)
+                point[axis] += eye_to_head.m[row][axis] * delta[row];
+        const float depth = -point[2];
+        *depth_out = depth;
+        if (!std::isfinite(depth))
+            return false;
+        *u = *v = 0.0f;
+        if (depth < 1.0e-4f)
+            return true;
+        const EyeInfo& projection = vr_eye(eye);
+        const float dx = projection.tan_right - projection.tan_left;
+        const float dy = projection.tan_bottom - projection.tan_top;
+        if (dx < 1.0e-4f || dy < 1.0e-4f)
+            return false;
+        *u = (point[0] / depth - projection.tan_left) / dx;
         *v = (projection.tan_bottom - point[1] / depth) / dy;
         return std::isfinite(*u) && std::isfinite(*v);
     }

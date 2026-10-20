@@ -3,6 +3,7 @@
 
 #include "../common/config.h"
 #include "../common/log.h"
+#include "../vr/vr_session.h"
 
 #include "imgui.h"
 #include "imgui_impl_dx9.h"
@@ -10,6 +11,7 @@
 
 #include <cstdio>
 #include <windows.h>
+#include <xinput.h>     // the XINPUT_GAMEPAD_* bits only; nothing linked
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg,
                                                              WPARAM wParam,
@@ -29,6 +31,44 @@ namespace trlvr
         bool g_ready = false;
         bool g_failed = false;
         bool g_open = false;
+
+        // --- the panel in the headset (overlay_vr_texture) ----------------
+        //
+        // While VR is up the window is laid out in a square of this many
+        // pixels (io.DisplaySize), filling it, and rendered into a texture
+        // of that size, which vr_submit.cpp puts into both eyes as a panel
+        // in the room. The same draw data then goes to the desktop mirror
+        // at window pixels, so the mouse still lines up with it.
+        const unsigned kPanelSize = 768;
+        IDirect3DTexture9* g_panel = nullptr;
+        IDirect3DSurface9* g_panel_surface = nullptr;
+        bool g_panel_failed = false;
+        bool g_panel_logged = false;
+        unsigned g_open_count = 0;
+
+        // This Present's ImGui frame has been built (for the headset), so
+        // overlay_frame only draws it to the mirror; the window's client
+        // size at the time, which the mirror scales from.
+        bool g_frame_built = false;
+        ImVec2 g_client_size(0.0f, 0.0f);
+        // Set at the open edge: the frame after gives the controllers a
+        // visible, focused first item to start from.
+        bool g_just_opened = false;
+
+        // The controllers (vr_input.cpp, overlay_set_pad) as ImGui sees them
+        // this frame; g_pad_in is the latest given, used once.
+        OverlayPad g_pad_in{};
+        bool g_pad_fresh = false;
+        OverlayPad g_pad{};
+        // Buttons held when the overlay opened: only a fresh press counts,
+        // so the press that was in flight (the held menu button that opened
+        // it) neither activates the first item nor closes it again.
+        WORD g_held_at_open = 0;
+        WORD g_prev_buttons = 0;
+        // The left stick as a D-pad (hysteresis, so a stick resting near the
+        // threshold does not stutter): ImGui moves its focus with the D-pad
+        // only; its left stick scrolls.
+        WORD g_stick_dpad = 0;
 
         LRESULT call_game(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         {
@@ -79,6 +119,15 @@ namespace trlvr
             if (!g_open || !g_ready || (!is_mouse(msg) && !is_key(msg)))
                 return false;
             ImGui_ImplWin32_WndProcHandler(hwnd, msg, wp, lp);
+            // Key releases go on to the game as well: a key held when the
+            // overlay opened (the controllers' keys, which vr_input lets go
+            // of as it opens, or a real one) would otherwise stay down in
+            // the game until pressed again. A release never acts.
+            // Fire is the left mouse button: its release goes on too.
+            if (msg == WM_KEYUP || msg == WM_SYSKEYUP ||
+                msg == WM_LBUTTONUP || msg == WM_RBUTTONUP ||
+                msg == WM_MBUTTONUP || msg == WM_XBUTTONUP)
+                return false;
             return true;
         }
 
@@ -166,6 +215,13 @@ namespace trlvr
                 return false;
             }
 
+            // The VR controllers navigate it (feed_gamepad). The Win32
+            // backend's own XInput polling is compiled out (build.bat
+            // IMGUI_IMPL_WIN32_DISABLE_GAMEPAD): it would read only a real
+            // pad, and fight this feed over the same keys.
+            io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+            io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+
             g_unicode = IsWindowUnicode(hwnd) != FALSE;
             g_game_proc = reinterpret_cast<WNDPROC>(g_unicode
                 ? SetWindowLongPtrW(hwnd, GWLP_WNDPROC,
@@ -194,8 +250,153 @@ namespace trlvr
                     "the window procedure only", GetLastError());
             g_ready = true;
             log("overlay: settings overlay ready -- Insert opens it on the "
-                "desktop window");
+                "desktop window; in the headset, hold the menu button %.1f s",
+                (double)config().overlay_vr_open_hold);
             return true;
+        }
+
+        void release_panel()
+        {
+            if (g_panel_surface)
+                g_panel_surface->Release();
+            if (g_panel)
+                g_panel->Release();
+            g_panel_surface = nullptr;
+            g_panel = nullptr;
+        }
+
+        bool ensure_panel()
+        {
+            if (g_panel_surface)
+                return true;
+            if (g_panel_failed || !g_device)
+                return false;
+            const HRESULT hr = g_device->CreateTexture(kPanelSize, kPanelSize,
+                1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT,
+                &g_panel, nullptr);
+            if (FAILED(hr) || !g_panel ||
+                FAILED(g_panel->GetSurfaceLevel(0, &g_panel_surface)))
+            {
+                log("overlay: could not create the %ux%u VR panel target "
+                    "(0x%08lX); the settings overlay stays on the desktop "
+                    "only", kPanelSize, kPanelSize, (unsigned long)hr);
+                g_panel_failed = true;
+                release_panel();
+                return false;
+            }
+            return true;
+        }
+
+        // The open and close edges, seen once a frame by whichever of
+        // overlay_vr_texture / overlay_frame runs first. set_open() may run
+        // from the window procedure at any time; this is where the rest of
+        // the overlay hears of it.
+        void sync_open()
+        {
+            static bool was_open = false;
+            if (g_open == was_open)
+                return;
+            was_open = g_open;
+            if (g_open)
+            {
+                g_just_opened = true;
+                ++g_open_count;             // the panel goes in front again
+                g_held_at_open = 0xFFFF;    // everything held until let go
+                g_prev_buttons = 0;
+                g_stick_dpad = 0;
+            }
+            else
+            {
+                // Closed with the window's own close button too: give the
+                // mouse back.
+                ImGui::GetIO().MouseDrawCursor = false;
+                window_block_game_mouse(false);
+                g_frame_built = false;
+            }
+        }
+
+        // Once a frame while open: the controllers' pad, with presses that
+        // began before the overlay opened masked until released. The menu
+        // (Start) button closes it. False if it just closed.
+        bool poll_pad()
+        {
+            OverlayPad pad{};
+            if (g_pad_fresh)
+                pad = g_pad_in;
+            g_pad_fresh = false;
+            g_held_at_open &= pad.buttons;
+            pad.buttons &= ~g_held_at_open;
+            const WORD pressed = pad.buttons & ~g_prev_buttons;
+            g_prev_buttons = pad.buttons;
+            if (pressed & XINPUT_GAMEPAD_START)
+            {
+                log("overlay: menu button pressed -- closing");
+                set_open(false);
+                sync_open();
+                return false;
+            }
+
+            // The left stick as a D-pad: in at 0.5, out at 0.3.
+            const struct { WORD bit; float v; } dirs[] = {
+                { XINPUT_GAMEPAD_DPAD_LEFT, -pad.lx },
+                { XINPUT_GAMEPAD_DPAD_RIGHT, pad.lx },
+                { XINPUT_GAMEPAD_DPAD_DOWN, -pad.ly },
+                { XINPUT_GAMEPAD_DPAD_UP, pad.ly },
+            };
+            for (const auto& d : dirs)
+            {
+                if (d.v > 0.5f)
+                    g_stick_dpad |= d.bit;
+                else if (d.v < 0.3f)
+                    g_stick_dpad &= ~d.bit;
+            }
+            g_pad = pad;
+            return true;
+        }
+
+        // g_pad into ImGui. ImGui 1.91 moves its focus with the D-pad (and
+        // tweaks an active slider with it) and scrolls with its left stick;
+        // the Quest's controllers have no D-pad, so the left stick feeds the
+        // D-pad keys (poll_pad) and the right stick ImGui's left-stick keys
+        // (scrolling), as well as its own.
+        void feed_gamepad(ImGuiIO& io)
+        {
+            io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+            const WORD buttons = (WORD)(g_pad.buttons | g_stick_dpad);
+            const struct { ImGuiKey key; WORD bit; } map[] = {
+                { ImGuiKey_GamepadFaceDown, XINPUT_GAMEPAD_A },
+                { ImGuiKey_GamepadFaceRight, XINPUT_GAMEPAD_B },
+                { ImGuiKey_GamepadFaceLeft, XINPUT_GAMEPAD_X },
+                { ImGuiKey_GamepadFaceUp, XINPUT_GAMEPAD_Y },
+                { ImGuiKey_GamepadL1, XINPUT_GAMEPAD_LEFT_SHOULDER },
+                { ImGuiKey_GamepadR1, XINPUT_GAMEPAD_RIGHT_SHOULDER },
+                { ImGuiKey_GamepadDpadLeft, XINPUT_GAMEPAD_DPAD_LEFT },
+                { ImGuiKey_GamepadDpadRight, XINPUT_GAMEPAD_DPAD_RIGHT },
+                { ImGuiKey_GamepadDpadUp, XINPUT_GAMEPAD_DPAD_UP },
+                { ImGuiKey_GamepadDpadDown, XINPUT_GAMEPAD_DPAD_DOWN },
+                { ImGuiKey_GamepadBack, XINPUT_GAMEPAD_BACK },
+            };
+            for (const auto& m : map)
+                io.AddKeyEvent(m.key, (buttons & m.bit) != 0);
+
+            // Past XInput's own right-stick dead zone, 0..1 (as the Win32
+            // backend does).
+            const auto analog = [&io](ImGuiKey key, float v) {
+                const float dead = (float)XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE /
+                                   32767.0f;
+                float n = (v - dead) / (1.0f - dead);
+                n = n < 0.0f ? 0.0f : n > 1.0f ? 1.0f : n;
+                io.AddKeyAnalogEvent(key, n > 0.1f, n);
+            };
+            const float rx = g_pad.rx, ry = g_pad.ry;
+            analog(ImGuiKey_GamepadLStickLeft, -rx);
+            analog(ImGuiKey_GamepadLStickRight, rx);
+            analog(ImGuiKey_GamepadLStickUp, ry);
+            analog(ImGuiKey_GamepadLStickDown, -ry);
+            analog(ImGuiKey_GamepadRStickLeft, -rx);
+            analog(ImGuiKey_GamepadRStickRight, rx);
+            analog(ImGuiKey_GamepadRStickUp, ry);
+            analog(ImGuiKey_GamepadRStickDown, -ry);
         }
 
         // --- widgets: each edits the live value and saves it ---------------
@@ -262,11 +463,6 @@ namespace trlvr
             slider("Menu and HUD scale", &c.ui_scale, 0.1f, 2.0f, "%.2f",
                    L"vr", L"ui_scale", "Size of menus and the HUD in the "
                    "headset.");
-            slider("Mission Prep backdrop scale",
-                   &c.mission_prep_backdrop_scale, 0.3f, 6.0f, "%.2f", L"vr",
-                   L"mission_prep_backdrop_scale",
-                   "Backdrop behind the Mission Prep menu, relative to the "
-                   "view. 1 exactly fills it.");
         }
 
         void camera_section(Config& c)
@@ -367,6 +563,170 @@ namespace trlvr
                    L"vr", L"body_soft_damping",
                    "How quickly a swing dies away. Lower rings longer; 0.22 "
                    "is the old value.");
+
+            ImGui::SeparatorText("Push (god mode)");
+            toggle("Whole-body push", &c.body_push, L"vr", L"body_push",
+                   "A hand leaning on her tilts head, chest, waist, arms, "
+                   "hips and legs a few degrees; board view with god hands.");
+            slider("Push strength", &c.body_push_strength, 0.0f, 3.0f,
+                   "%.2f", L"vr", L"body_push_strength", nullptr);
+            slider("Push speed", &c.body_push_hz, 0.5f, 6.0f, "%.1f Hz",
+                   L"vr", L"body_push_hz", "Spring frequency of the tilt.");
+            slider("Push damping", &c.body_push_damping, 0.2f, 1.5f, "%.2f",
+                   L"vr", L"body_push_damping",
+                   "Near 1 = no swing past rest; lower swings a little.");
+            slider("Head tilt", &c.body_push_head_degrees, 0.0f, 20.0f,
+                   "%.1f deg", L"vr", L"body_push_head_degrees", nullptr);
+            slider("Chest tilt", &c.body_push_chest_degrees, 0.0f, 15.0f,
+                   "%.1f deg", L"vr", L"body_push_chest_degrees", nullptr);
+            slider("Waist tilt", &c.body_push_waist_degrees, 0.0f, 15.0f,
+                   "%.1f deg", L"vr", L"body_push_waist_degrees", nullptr);
+            slider("Arm swing", &c.body_push_arm_degrees, 0.0f, 25.0f,
+                   "%.1f deg", L"vr", L"body_push_arm_degrees", nullptr);
+            slider("Hips tilt", &c.body_push_hips_degrees, 0.0f, 15.0f,
+                   "%.1f deg", L"vr", L"body_push_hips_degrees", nullptr);
+            slider("Leg give", &c.body_push_leg_degrees, 0.0f, 8.0f,
+                   "%.1f deg", L"vr", L"body_push_leg_degrees", nullptr);
+
+            ImGui::SeparatorText("Rear");
+            toggle("Rear soft body", &c.body_rear, L"vr", L"body_rear",
+                   "Her buttocks are masses on springs that lag and settle "
+                   "as she moves.");
+            slider("Rear speed", &c.body_rear_hz, 0.5f, 8.0f, "%.1f Hz",
+                   L"vr", L"body_rear_hz",
+                   "How fast a cheek bounces. Lower is softer and slower.");
+            slider("Rear damping", &c.body_rear_damping, 0.05f, 1.5f, "%.2f",
+                   L"vr", L"body_rear_damping",
+                   "How quickly a bounce dies away.");
+            slider("Rear gain", &c.body_rear_gain, 0.0f, 3.0f, "%.2f", L"vr",
+                   L"body_rear_gain",
+                   "The overall amount of movement: all of it scales with "
+                   "this (0 = none). Use this, not the size, to move less.");
+            slider("Rear max lag", &c.body_rear_max_cm, 0.0f, 8.0f, "%.1f cm",
+                   L"vr", L"body_rear_max_cm",
+                   "The most a cheek lags behind, at her size.");
+            slider("Rear absolute max", &c.body_rear_limit_cm, 1.0f, 40.0f,
+                   "%.0f cm", L"vr", L"body_rear_limit_cm",
+                   "The most any point of the cheeks ever moves from rest, "
+                   "however hard a hand pulls or high the gain is.");
+            slider("Rear fullness", &c.body_rear_fullness_cm, -2.0f, 5.0f,
+                   "%.1f cm", L"vr", L"body_rear_fullness_cm",
+                   "How far the cheeks stand out at rest (her real size): "
+                   "the baseline size. Minus = slimmer.");
+            slider("Rear height", &c.body_rear_lift_cm, -12.0f, 12.0f,
+                   "%.1f cm", L"vr", L"body_rear_lift_cm",
+                   "Moves the moving regions up (+) or down (-): their "
+                   "centre, at her real size.");
+            slider("Rear spread", &c.body_rear_spread_cm, 0.0f, 16.0f,
+                   "%.1f cm", L"vr", L"body_rear_spread_cm",
+                   "8 = as fitted to her mesh; more moves each region out "
+                   "from her middle.");
+            slider("Rear size", &c.body_rear_size, 0.5f, 2.0f, "%.2f", L"vr",
+                   L"body_rear_size",
+                   "Size of the region that moves (not the shape itself; "
+                   "see Rear fullness).");
+            slider("Rear width", &c.body_rear_width, 0.5f, 2.0f, "%.2f",
+                   L"vr", L"body_rear_width", "The region's width, times "
+                   "its size.");
+            slider("Rear tallness", &c.body_rear_height, 0.5f, 2.0f, "%.2f",
+                   L"vr", L"body_rear_height", "The region's height, times "
+                   "its size.");
+            slider("Rear core", &c.body_rear_core, 0.0f, 0.9f, "%.2f",
+                   L"vr", L"body_rear_core", "How much of a region moves "
+                   "fully before it eases out.");
+            slider("Rear dent", &c.body_rear_dent, 0.0f, 2.0f, "%.2f", L"vr",
+                   L"body_rear_dent",
+                   "God mode: a fingertip dents her where it presses, as a "
+                   "multiple of a fingertip. 0 = no dent.");
+            toggle("Rear debug lines", &c.body_rear_debug, L"vr",
+                   L"body_rear_debug",
+                   "Tuning aid: draws the regions as boxes (yellow = moves, "
+                   "green = moves fully, magenta = the cleft, cyan = where "
+                   "your hand touches, white cross = the pelvis origin).");
+        }
+
+        void god_section(Config& c)
+        {
+            ImGui::TextWrapped("Board view with god hands only.");
+            ImGui::SeparatorText("Board leash");
+            slider("Leash radius", &c.board_leash, 0.0f, 2.0f, "%.2f m",
+                   L"vr", L"board_leash",
+                   "Lara runs free this far (table metres) before the board "
+                   "follows her. 0 = it follows exactly.");
+            slider("Leash height", &c.board_leash_height, 0.0f, 1.0f,
+                   "%.2f m", L"vr", L"board_leash_height",
+                   "Same for up and down. 0 = height follows at once.");
+            slider("View switch hold", &c.view_switch_hold, 0.15f, 2.0f,
+                   "%.2f s", L"vr", L"view_switch_hold",
+                   "Hold the right stick's click this long to switch view. "
+                   "A quick click resets the angle.");
+            slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
+                   L"vr", L"board_zoom_speed",
+                   "Board view: right stick up/down zooms to Lara (up = "
+                   "closer); left/right turns round her. 0 = off.");
+            slider("World scale speed", &c.board_scale_speed, 0.0f, 5.0f,
+                   "%.2f", L"vr", L"board_scale_speed",
+                   "Board view: hold the right stick in and push up/down to "
+                   "scale Lara (up = bigger). 0 = off.");
+            slider("Shoulder height speed", &c.stick_height_speed, 0.0f,
+                   3.0f, "%.2f m/s", L"vr", L"stick_height_speed",
+                   "Shoulder view: hold the right stick in and push up/down "
+                   "to raise and lower the seat. 0 = off.");
+            ImGui::SeparatorText("Pick-up");
+            toggle("Grab with hand pose", &c.god_grab_pose, L"vr",
+                   L"god_grab_pose",
+                   "Pinch (trigger + thumb down) or fist (trigger + grip) "
+                   "grabs; grip alone only points and presses. Needs finger "
+                   "tracking. Off = the grip button grabs.");
+            slider("Head zone", &c.god_head_zone, 0.05f, 1.0f, "%.2f m",
+                   L"vr", L"god_head_zone",
+                   "Grip zone round her head, metres at her size.");
+            slider("Claim zone", &c.god_claim_zone, 0.0f, 3.0f, "%.2f m",
+                   L"vr", L"god_claim_zone",
+                   "A hand this close to her keeps its grip and trigger "
+                   "from the game.");
+            toggle("Drag by hand (experimental)", &c.god_drag_hand, L"vr",
+                   L"god_drag_hand",
+                   "Grab her hand or arm and drag her up like a ragdoll, "
+                   "hanging by IK. Off: the head grab and the dangle "
+                   "animation.");
+            if (c.god_drag_hand)
+            {
+                slider("Arm zone", &c.god_arm_zone, 0.0f, 0.5f, "%.2f m",
+                       L"vr", L"god_arm_zone",
+                       "A grip this close to an arm holds that arm. 0 = no "
+                       "arm grab.");
+                toggle("Arm leads", &c.god_arm_lead, L"vr", L"god_arm_lead",
+                       "Holding an arm, only the arm follows until you pull "
+                       "past her reach.");
+                toggle("Limp arms", &c.god_arms_limp, L"vr",
+                       L"god_arms_limp",
+                       "Her arms hang limp while she is held by the head.");
+            }
+            ImGui::SeparatorText("Throw and drop");
+            toggle("Throwing", &c.god_throw, L"vr", L"god_throw",
+                   "Let go mid-swing and she flies off your hand and lands "
+                   "where she hits the level.");
+            slider("Throw strength", &c.god_throw_strength, 0.2f, 3.0f,
+                   "%.2f", L"vr", L"god_throw_strength",
+                   "Your hand's speed times this.");
+            slider("Throw gravity", &c.god_throw_gravity, 1.0f, 30.0f,
+                   "%.2f m/s2", L"vr", L"god_throw_gravity",
+                   "9.81 = a doll thrown on your table; lower floats more.");
+            ImGui::SliderInt("Landing animation", &c.god_land_anim, -1, 4000,
+                             "%d", ImGuiSliderFlags_AlwaysClamp);
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                wchar_t text[16]{};
+                swprintf_s(text, L"%d", c.god_land_anim);
+                config_save_setting(L"vr", L"god_land_anim", text);
+            }
+            help("Animation (game's own, by number) a thrown Lara plays on "
+                 "landing. -1 = none.");
+            slider("Drop height", &c.god_drop_height, 0.0f, 5.0f, "%.2f m",
+                   L"vr", L"god_drop_height",
+                   "Let go over a floor and she falls from no higher than "
+                   "this. 0 = set straight down.");
         }
 
         void theatre_section(Config& c)
@@ -480,26 +840,86 @@ namespace trlvr
                    "How curled her fingers are with your hand open.");
         }
 
-        void build_ui()
+        void overlay_section(Config& c)
+        {
+            slider("Panel distance", &c.overlay_vr_distance, 0.3f, 5.0f,
+                   "%.2f m", L"vr", L"overlay_vr_distance",
+                   "How far in front of you this window floats in the "
+                   "headset, in metres.");
+            slider("Panel width", &c.overlay_vr_width_degrees, 10.0f, 120.0f,
+                   "%.0f deg", L"vr", L"overlay_vr_width_degrees",
+                   "How wide this window looks in the headset, in degrees.");
+            slider("Panel to the left", &c.overlay_vr_yaw_degrees, -90.0f,
+                   90.0f, "%.0f deg", L"vr", L"overlay_vr_yaw_degrees",
+                   "How far to the left of straight ahead this window floats, "
+                   "in degrees, round your head (negative = to the right). "
+                   "It keeps facing you.");
+            slider("Panel up", &c.overlay_vr_pitch_degrees, -60.0f, 60.0f,
+                   "%.0f deg", L"vr", L"overlay_vr_pitch_degrees",
+                   "How far above straight ahead this window floats, in "
+                   "degrees (negative = below).");
+            slider("Hold menu to open", &c.overlay_vr_open_hold, 0.0f, 3.0f,
+                   "%.1f s", L"vr", L"overlay_vr_open_hold",
+                   "Hold the controller menu (pause) button this long to open "
+                   "this window; a quicker press still pauses the game. 0 = "
+                   "off. Touch and Reverb controllers only for now.");
+        }
+
+        // `vr`: laid out for the headset panel (the window fills the
+        // panel's square and stays put), else for the desktop window.
+        void build_ui(bool vr)
         {
             Config& c = config_edit();
-            ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f), ImGuiCond_FirstUseEver);
-            ImGui::SetNextWindowSize(ImVec2(470.0f, 640.0f),
-                                     ImGuiCond_FirstUseEver);
-            if (!ImGui::Begin("Tomb Raider: Legend VR settings", &g_open))
+            ImGuiWindowFlags flags = 0;
+            if (vr)
+            {
+                ImGui::SetNextWindowPos(ImVec2(0.0f, 0.0f), ImGuiCond_Always);
+                ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize,
+                                         ImGuiCond_Always);
+                flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                         ImGuiWindowFlags_NoCollapse;
+            }
+            else
+            {
+                ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f),
+                                        ImGuiCond_FirstUseEver);
+                ImGui::SetNextWindowSize(ImVec2(470.0f, 640.0f),
+                                         ImGuiCond_FirstUseEver);
+            }
+            // Focused on opening, so the controllers start on its first item
+            // (the Recentre button) without a click.
+            if (g_just_opened)
+                ImGui::SetNextWindowFocus();
+            if (!ImGui::Begin("Tomb Raider: Legend VR settings", &g_open,
+                              flags))
             {
                 ImGui::End();
                 return;
             }
             ImGui::TextWrapped("Changes apply at once and are saved to "
                                "trlvr.ini. Insert closes this window; the "
-                               "game takes no mouse or keys while it is "
-                               "open.");
+                               "game takes no mouse, keys or controllers "
+                               "while it is open.");
+            if (vr)
+                ImGui::TextWrapped("Controllers: left stick moves, A selects, "
+                                   "B goes back, right stick scrolls. On a "
+                                   "slider: A, then left/right (hold LB / RB "
+                                   "for slower / faster), then A. The menu "
+                                   "button closes this.");
+            if (ImGui::Button("Recentre"))
+                vr_recenter();
+            if (g_just_opened)
+                ImGui::SetItemDefaultFocus();
+            help("Recentre the view on where you are looking now (the same "
+                 "as a double click of the left stick). This window is put "
+                 "in front of you again too.");
             ImGui::Spacing();
             ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
             if (ImGui::CollapsingHeader("Scale, height and distance",
                                         ImGuiTreeNodeFlags_DefaultOpen))
                 scale_section(c);
+            if (ImGui::CollapsingHeader("In the headset"))
+                overlay_section(c);
             if (ImGui::CollapsingHeader("Picture"))
             {
                 slider("Brightness", &c.picture_brightness, -0.5f, 0.5f,
@@ -518,6 +938,8 @@ namespace trlvr
                 camera_section(c);
             if (ImGui::CollapsingHeader("Body physics"))
                 body_section(c);
+            if (ImGui::CollapsingHeader("God mode"))
+                god_section(c);
             if (ImGui::CollapsingHeader("Cutscene theatre"))
                 theatre_section(c);
             if (ImGui::CollapsingHeader("Board diorama"))
@@ -536,6 +958,10 @@ namespace trlvr
 
     void overlay_before_reset()
     {
+        // The panel target is in D3DPOOL_DEFAULT: made again on next use.
+        release_panel();
+        g_panel_failed = false;
+        g_frame_built = false;
         if (g_ready)
             ImGui_ImplDX9_InvalidateDeviceObjects();
     }
@@ -560,6 +986,9 @@ namespace trlvr
             UnhookWindowsHookEx(g_hook);
         g_hook = nullptr;
         window_block_game_mouse(false);
+        release_panel();
+        g_panel_failed = false;
+        g_frame_built = false;
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext();
@@ -567,24 +996,131 @@ namespace trlvr
         g_hwnd = nullptr;
         g_game_proc = nullptr;
         g_ready = false;
+        g_open = false;
+    }
+
+    namespace
+    {
+        // One ImGui frame: the controllers in, the window laid out, drawn
+        // into draw data. False if the menu button closed it instead.
+        bool build_frame(bool vr)
+        {
+            if (!poll_pad())
+                return false;
+            ImGui_ImplDX9_NewFrame();
+            ImGui_ImplWin32_NewFrame();
+            ImGuiIO& io = ImGui::GetIO();
+            g_client_size = io.DisplaySize;     // the Win32 backend's: client pixels
+            if (vr)
+                io.DisplaySize = ImVec2((float)kPanelSize, (float)kPanelSize);
+            feed_gamepad(io);
+            ImGui::NewFrame();
+            // The focus ring on the first item from the start: by default
+            // ImGui shows it only after a directional press.
+            if (g_just_opened)
+                ImGui::SetNavCursorVisible(true);
+            build_ui(vr);
+            g_just_opened = false;
+            ImGui::Render();
+            g_frame_built = true;
+            return true;
+        }
+
+        // The draw data onto `target`, with the device state restored
+        // around it (the backend restores what it changes, but not the
+        // render target, which the game may have left on anything). `clear`
+        // first clears it to transparent (the panel: ImGui's blending then
+        // leaves it premultiplied); the game's depth buffer is left out
+        // (ImGui does not depth test, and it may not fit).
+        void render_to(IDirect3DSurface9* target, ImDrawData* data, bool clear)
+        {
+            IDirect3DSurface9* old_target = nullptr;
+            IDirect3DSurface9* old_depth = nullptr;
+            D3DVIEWPORT9 old_viewport{};
+            g_device->GetRenderTarget(0, &old_target);
+            g_device->GetDepthStencilSurface(&old_depth);
+            g_device->GetViewport(&old_viewport);
+            if (SUCCEEDED(g_device->SetRenderTarget(0, target)))
+            {
+                g_device->SetDepthStencilSurface(nullptr);
+                if (clear)
+                    g_device->Clear(0, nullptr, D3DCLEAR_TARGET,
+                                    D3DCOLOR_ARGB(0, 0, 0, 0), 1.0f, 0);
+                if (SUCCEEDED(g_device->BeginScene()))
+                {
+                    ImGui_ImplDX9_RenderDrawData(data);
+                    g_device->EndScene();
+                }
+            }
+            if (old_target)
+            {
+                g_device->SetRenderTarget(0, old_target);
+                g_device->SetViewport(&old_viewport);
+                old_target->Release();
+            }
+            g_device->SetDepthStencilSurface(old_depth);
+            if (old_depth)
+                old_depth->Release();
+        }
+    }
+
+    bool overlay_request_open(bool open)
+    {
+        if (!g_ready)
+            return false;
+        if (open != g_open)
+            set_open(open);                 // the same path as Insert
+        return true;
+    }
+
+    unsigned overlay_open_count()
+    {
+        return g_open_count;
+    }
+
+    void overlay_set_pad(const OverlayPad& pad)
+    {
+        g_pad_in = pad;
+        g_pad_fresh = true;
+    }
+
+    IDirect3DTexture9* overlay_vr_texture()
+    {
+        // Nothing at all while closed (or before the overlay is up: it
+        // starts from the first overlay_frame).
+        if (!g_ready || !g_open)
+            return nullptr;
+        sync_open();
+        if (!g_open || !ensure_panel() || !build_frame(true))
+            return nullptr;
+        ImDrawData* data = ImGui::GetDrawData();
+        if (!data || data->DisplaySize.x <= 0.0f ||
+            data->DisplaySize.y <= 0.0f)
+            return nullptr;
+        render_to(g_panel_surface, data, true);
+        if (!g_panel_logged)
+        {
+            g_panel_logged = true;
+            log("overlay: shown in the headset as a %ux%u panel, %.2f m away, "
+                "%.0f deg wide", kPanelSize, kPanelSize,
+                (double)config().overlay_vr_distance,
+                (double)config().overlay_vr_width_degrees);
+        }
+        return g_panel;
     }
 
     void overlay_frame(IDirect3DSwapChain9* chain)
     {
         // Initialised even while closed: the toggle key is seen by the
         // window procedure this installs.
-        static bool was_open = false;
         if (!init(chain))
             return;
-        // Closed with the window's own close button: give the mouse back.
-        if (was_open && !g_open)
-        {
-            ImGui::GetIO().MouseDrawCursor = false;
-            window_block_game_mouse(false);
-        }
-        was_open = g_open;
+        sync_open();
         if (!g_open)
+        {
+            g_frame_built = false;
             return;
+        }
 
         IDirect3DSurface9* back = nullptr;
         D3DSURFACE_DESC desc{};
@@ -597,22 +1133,30 @@ namespace trlvr
             return;
         }
 
-        ImGui_ImplDX9_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-        build_ui();
-        ImGui::Render();
+        // Already built for the headset this frame (overlay_vr_texture): the
+        // same draw data, not a second frame.
+        const bool built = g_frame_built;
+        g_frame_built = false;
+        if (!built && !build_frame(false))
+        {
+            back->Release();
+            return;
+        }
 
-        // ImGui laid this out in the window's client pixels. The back
+        // ImGui laid this out in the window's client pixels (for the
+        // headset, in the panel's square at the client's top left). The back
         // buffer is the two-eye image, usually far larger and of another
         // shape, and is squeezed into the window when presented -- so the
         // draw data is stretched to the back buffer here, and comes out at
-        // its intended size and shape on the monitor.
+        // its intended size and shape on the monitor, under the mouse.
         ImDrawData* data = ImGui::GetDrawData();
-        if (data && data->DisplaySize.x > 0.0f && data->DisplaySize.y > 0.0f)
+        const ImVec2 client = g_client_size.x > 0.0f && g_client_size.y > 0.0f
+            ? g_client_size
+            : (data ? data->DisplaySize : ImVec2(0.0f, 0.0f));
+        if (data && client.x > 0.0f && client.y > 0.0f)
         {
-            const ImVec2 scale((float)desc.Width / data->DisplaySize.x,
-                               (float)desc.Height / data->DisplaySize.y);
+            const ImVec2 scale((float)desc.Width / client.x,
+                               (float)desc.Height / client.y);
             for (int n = 0; n < data->CmdListsCount; ++n)
             {
                 ImDrawList* list = data->CmdLists[n];
@@ -626,25 +1170,7 @@ namespace trlvr
             data->DisplayPos.x *= scale.x;
             data->DisplayPos.y *= scale.y;
             data->DisplaySize = ImVec2((float)desc.Width, (float)desc.Height);
-
-            // The backend restores the device state it changes, but not the
-            // render target, which the game may have left on anything.
-            IDirect3DSurface9* old_target = nullptr;
-            D3DVIEWPORT9 old_viewport{};
-            g_device->GetRenderTarget(0, &old_target);
-            g_device->GetViewport(&old_viewport);
-            if (SUCCEEDED(g_device->SetRenderTarget(0, back)) &&
-                SUCCEEDED(g_device->BeginScene()))
-            {
-                ImGui_ImplDX9_RenderDrawData(data);
-                g_device->EndScene();
-            }
-            if (old_target)
-            {
-                g_device->SetRenderTarget(0, old_target);
-                g_device->SetViewport(&old_viewport);
-                old_target->Release();
-            }
+            render_to(back, data, false);
         }
         back->Release();
     }

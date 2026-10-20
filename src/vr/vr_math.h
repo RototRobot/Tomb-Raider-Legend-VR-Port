@@ -80,6 +80,17 @@ namespace trlvr
     // first-person arm solver; returns identity for a degenerate direction.
     Mat4 rotation_between(const float* from3, const float* to3);
 
+    // Rigid row-vector rotation about the axis rv/|rv| by |rv| radians, turning
+    // counter-clockwise looking down the axis toward the origin (right-hand
+    // rule: rv = (0,0,pi/2) takes +x to +y, as rotation_between does). Identity
+    // for a zero or non-finite vector.
+    Mat4 rotation_from_vector(const float rv3[3]);
+
+    // The inverse: the rotation vector (axis * angle, angle 0..pi) of the upper
+    // 3x3 of `m`, which must be (near) orthonormal. False for a non-finite
+    // matrix.
+    bool rotation_to_vector(const Mat4& m, float rv3[3]);
+
     // Keep the wrist within the two animated arm lengths, and preserve the
     // original elbow's bend side. Returns false for a degenerate arm.
     bool solve_two_bone_arm(const float* shoulder3, const float* elbow3,

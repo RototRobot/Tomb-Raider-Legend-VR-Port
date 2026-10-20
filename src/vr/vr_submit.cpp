@@ -8,6 +8,8 @@
 #include "vr_input.h"
 #include "hud_capture.h"
 #include "ui_space.h"
+#include "menu_panel.h"
+#include "../proxy/overlay.h"
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -2496,6 +2498,51 @@ namespace trlvr
             draw_hand_lines(back, desc, lines, used);
         }
 
+        // body_rear_debug: the rear soft body's regions as wireframes.
+        void draw_rear_debug(IDirect3DSurface9* back)
+        {
+            constexpr int kMax = 512;       // about 483 segments
+            static float seg[kMax][6];
+            static unsigned colours[kMax];
+            const int count = stereo_same_frame_active()
+                ? camera_rear_debug_lines(seg, colours, kMax) : 0;
+            if (count <= 0)
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float eye_w = desc.Width * 0.5f;
+            static DebugLineVertex lines[2 * kMax * 2];
+            unsigned used = 0;
+            for (int eye_index = 0; eye_index < 2; ++eye_index)
+            {
+                const Eye eye = eye_index ? EyeRight : EyeLeft;
+                for (int i = 0; i < count; ++i)
+                {
+                    float uv[2][2]{};
+                    bool ok = true;
+                    for (int e = 0; e < 2 && ok; ++e)
+                        ok = vr_project_head_point(eye, seg[i][e * 3],
+                            seg[i][e * 3 + 1], seg[i][e * 3 + 2],
+                            &uv[e][0], &uv[e][1]) &&
+                            uv[e][0] > -0.5f && uv[e][0] < 1.5f &&
+                            uv[e][1] > -0.5f && uv[e][1] < 1.5f;
+                    if (!ok)
+                        continue;
+                    float ca[2] = { uv[0][0], uv[0][1] };
+                    float cb[2] = { uv[1][0], uv[1][1] };
+                    if (!clip_eye_segment(ca, cb))
+                        continue;
+                    lines[used++] = { eye_w * (eye_index + ca[0]),
+                        desc.Height * ca[1], 0.0f, 1.0f, colours[i] };
+                    lines[used++] = { eye_w * (eye_index + cb[0]),
+                        desc.Height * cb[1], 0.0f, 1.0f, colours[i] };
+                }
+            }
+            draw_hand_lines(back, desc, lines, used);
+        }
+
         // Pouch items as outlines: the medipack (white box, red cross) on the
         // chest and the grenade/flare (olive canister) on the belt, or in
         // the hand that holds one. Axis-aligned to the head frame (X right,
@@ -2778,6 +2825,186 @@ namespace trlvr
                 g_device->SetRenderTarget(0, old_target);
                 old_target->Release();
             }
+            state->Apply();
+            state->Release();
+        }
+
+        // The settings overlay (proxy/overlay.cpp) in the headset: a square
+        // panel world-locked in the room, placed in front of the head (from
+        // [vr] overlay_vr_*) when it opens, at a recentre, or when one of
+        // those settings changes (so a slider shows its effect where you
+        // look), and left there so it can be read by leaning and looking
+        // round. Drawn over everything, both eyes, perspective-correct.
+        struct SettingsPanel
+        {
+            bool placed = false;
+            unsigned open_count = 0;
+            unsigned recentre = 0;
+            float distance = 0.0f, yaw = 0.0f, pitch = 0.0f;
+            MenuPanelPose pose{};
+        };
+        SettingsPanel g_settings_panel;
+
+        // eye_count 2: side by side, one half each; 1: the whole surface
+        // seen through the left eye's projection (mono).
+        // eye_count 2: side by side; 1: the whole surface is first_eye's
+        // (mono uses the left; the alternating path the eye just drawn).
+        void draw_settings_panel(IDirect3DSurface9* back, int eye_count,
+                                 int first_eye = 0)
+        {
+            if (!g_device || !back || !overlay_open())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            IDirect3DTexture9* texture = overlay_vr_texture();
+            if (!texture)
+                return;
+
+            SettingsPanel& panel = g_settings_panel;
+            const Config& c = config();
+            float head[3]{}, fx = 0.0f, fz = 0.0f;
+            if (vr_head_tracking_level(head, &fx, &fz) &&
+                (!panel.placed || panel.open_count != overlay_open_count() ||
+                 panel.recentre != vr_recenter_generation() ||
+                 panel.distance != c.overlay_vr_distance ||
+                 panel.yaw != c.overlay_vr_yaw_degrees ||
+                 panel.pitch != c.overlay_vr_pitch_degrees))
+            {
+                if (menu_panel_place(head, fx, fz, c.overlay_vr_distance,
+                                     c.overlay_vr_yaw_degrees,
+                                     c.overlay_vr_pitch_degrees, &panel.pose))
+                {
+                    panel.placed = true;
+                    panel.open_count = overlay_open_count();
+                    panel.recentre = vr_recenter_generation();
+                    panel.distance = c.overlay_vr_distance;
+                    panel.yaw = c.overlay_vr_yaw_degrees;
+                    panel.pitch = c.overlay_vr_pitch_degrees;
+                }
+            }
+            if (!panel.placed)
+                return;
+            float corner[4][3];
+            menu_panel_corners(panel.pose,
+                menu_panel_half_size(c.overlay_vr_distance,
+                                     c.overlay_vr_width_degrees), corner);
+
+            const float eye_w = (float)desc.Width / (float)eye_count;
+            IDirect3DStateBlock9* state = nullptr;
+            if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
+                !state)
+                return;
+            state->Capture();
+            IDirect3DSurface9* old_target = nullptr;
+            IDirect3DSurface9* old_depth = nullptr;
+            g_device->GetRenderTarget(0, &old_target);
+            g_device->GetDepthStencilSurface(&old_depth);
+            if (SUCCEEDED(g_device->SetRenderTarget(0, back)))
+            {
+                g_device->SetDepthStencilSurface(nullptr);
+                const D3DVIEWPORT9 viewport = { 0, 0, desc.Width,
+                                                desc.Height, 0.0f, 1.0f };
+                g_device->SetViewport(&viewport);
+                g_device->SetVertexShader(nullptr);
+                g_device->SetPixelShader(nullptr);
+                g_device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE |
+                                 D3DFVF_TEX1);
+                g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,
+                                         FALSE);
+                // The panel is premultiplied (overlay.cpp render_to).
+                g_device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+                g_device->SetRenderState(D3DRS_DESTBLEND,
+                                         D3DBLEND_INVSRCALPHA);
+                g_device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+                g_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+                g_device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+                g_device->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+                g_device->SetSamplerState(0, D3DSAMP_MINFILTER,
+                                          D3DTEXF_LINEAR);
+                g_device->SetSamplerState(0, D3DSAMP_MAGFILTER,
+                                          D3DTEXF_LINEAR);
+                g_device->SetSamplerState(0, D3DSAMP_MIPFILTER,
+                                          D3DTEXF_NONE);
+                g_device->SetSamplerState(0, D3DSAMP_ADDRESSU,
+                                          D3DTADDRESS_CLAMP);
+                g_device->SetSamplerState(0, D3DSAMP_ADDRESSV,
+                                          D3DTADDRESS_CLAMP);
+                g_device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+                g_device->SetTextureStageState(0, D3DTSS_COLOROP,
+                                               D3DTOP_SELECTARG1);
+                g_device->SetTextureStageState(0, D3DTSS_COLORARG1,
+                                               D3DTA_TEXTURE);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAOP,
+                                               D3DTOP_SELECTARG1);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAARG1,
+                                               D3DTA_TEXTURE);
+                g_device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+                g_device->SetTextureStageState(0,
+                    D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_COLOROP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_ALPHAOP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTexture(0, texture);
+                for (DWORD s = 1; s < 8; ++s)
+                    g_device->SetTexture(s, nullptr);
+                if (SUCCEEDED(g_device->BeginScene()))
+                {
+                    const float tex[4][2] = {
+                        { 0.0f, 0.0f }, { 1.0f, 0.0f },
+                        { 0.0f, 1.0f }, { 1.0f, 1.0f } };
+                    for (int eye_index = 0; eye_index < eye_count;
+                         ++eye_index)
+                    {
+                        const Eye eye = (eye_index + first_eye) ? EyeRight
+                                                                : EyeLeft;
+                        BadgeVertex quad[4]{};
+                        bool ok = true;
+                        for (int k = 0; k < 4 && ok; ++k)
+                        {
+                            float u = 0.0f, v = 0.0f, depth = 0.0f;
+                            // Pre-transformed vertices are not clipped at
+                            // the near plane: a corner behind the eye would
+                            // fold the quad over, so that eye goes without.
+                            ok = vr_project_tracking_point(eye, corner[k],
+                                     &u, &v, &depth) && depth > 0.05f;
+                            // rhw = 1 / depth: perspective-correct texture
+                            // across a panel seen at an angle.
+                            quad[k] = { eye_width_px(eye_w, eye_index, u),
+                                desc.Height * v, 0.0f, 1.0f / depth,
+                                0xFFFFFFFFu, tex[k][0], tex[k][1] };
+                        }
+                        if (!ok)
+                            continue;
+                        const RECT scissor = {
+                            (LONG)(eye_w * eye_index), 0,
+                            (LONG)(eye_w * (eye_index + 1)),
+                            (LONG)desc.Height };
+                        g_device->SetScissorRect(&scissor);
+                        g_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2,
+                            quad, sizeof(BadgeVertex));
+                    }
+                    g_device->EndScene();
+                }
+            }
+            if (old_target)
+            {
+                g_device->SetRenderTarget(0, old_target);
+                old_target->Release();
+            }
+            g_device->SetDepthStencilSurface(old_depth);
+            if (old_depth)
+                old_depth->Release();
             state->Apply();
             state->Release();
         }
@@ -4239,6 +4466,7 @@ namespace trlvr
         // Mono: one image, both eyes, no copy.
         if (!config().stereo)
         {
+            draw_settings_panel(back_buffer, 1);
             draw_picture_adjust(back_buffer);
             const bool ok = submit_pair(back_buffer, back_buffer);
 
@@ -4279,8 +4507,11 @@ namespace trlvr
             draw_finger_debug(back_buffer);
             draw_tp_sliders(back_buffer);
             draw_pluck_ring(back_buffer);
+            draw_rear_debug(back_buffer);
             draw_comfort_vignette(back_buffer, camera_comfort_vignette());
             draw_aim_crosshair(back_buffer);
+            // The settings overlay, over the game and the mod's own drawing.
+            draw_settings_panel(back_buffer, 2);
             // Nothing flips the eye on this path, so anything that misses the
             // per-pass substitution would otherwise keep whichever eye happened
             // to be current when the mode started. Centre is the honest answer
@@ -4309,6 +4540,7 @@ namespace trlvr
         // was being drawn. Keep it, so the other eye still has something to
         // show while it waits its turn.
         const int drawn = (vr_current_eye() == EyeRight) ? 1 : 0;
+        draw_settings_panel(back_buffer, 1, drawn);
         draw_picture_adjust(back_buffer);
         HRESULT hr = g_device->StretchRect(back_buffer, nullptr,
                                            g_eye[drawn], nullptr, D3DTEXF_NONE);

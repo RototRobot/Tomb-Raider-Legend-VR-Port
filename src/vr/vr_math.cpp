@@ -252,6 +252,68 @@ namespace trlvr
         return result;
     }
 
+    Mat4 rotation_from_vector(const float rv3[3])
+    {
+        Mat4 result = Mat4::identity();
+        const float theta = sqrtf(rv3[0]*rv3[0] + rv3[1]*rv3[1] + rv3[2]*rv3[2]);
+        if (!std::isfinite(theta) || theta < 1.0e-9f)
+            return result;
+        const float k[3] = { rv3[0] / theta, rv3[1] / theta, rv3[2] / theta };
+        const float s = sinf(theta), c = cosf(theta);
+        // Column-vector Rodrigues R, stored transposed for row vectors.
+        const float cross[3][3] = {
+            { 0.0f, -k[2], k[1] }, { k[2], 0.0f, -k[0] }, { -k[1], k[0], 0.0f } };
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+            {
+                const float r = (a == b ? c : 0.0f) + (1.0f - c) * k[a] * k[b] +
+                                s * cross[a][b];
+                result.m[b][a] = r;
+            }
+        return result;
+    }
+
+    bool rotation_to_vector(const Mat4& m, float rv3[3])
+    {
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                if (!std::isfinite(m.m[r][c]))
+                    return false;
+        // Column-form R[a][b] = m[b][a].
+        const float R[3][3] = {
+            { m.m[0][0], m.m[1][0], m.m[2][0] },
+            { m.m[0][1], m.m[1][1], m.m[2][1] },
+            { m.m[0][2], m.m[1][2], m.m[2][2] } };
+        const float s[3] = { 0.5f * (R[2][1] - R[1][2]), 0.5f * (R[0][2] - R[2][0]),
+                             0.5f * (R[1][0] - R[0][1]) };
+        const float c = 0.5f * (R[0][0] + R[1][1] + R[2][2] - 1.0f);
+        const float sl = sqrtf(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
+        const float theta = atan2f(sl, c);
+        rv3[0] = rv3[1] = rv3[2] = 0.0f;
+        if (sl > 1.0e-6f)
+        {
+            for (int i = 0; i < 3; ++i)
+                rv3[i] = s[i] / sl * theta;
+            return true;
+        }
+        if (c > 0.0f)
+            return true;                    // no rotation
+        // Half a turn: the axis from the diagonal (sign of the largest part
+        // is arbitrary).
+        int a = 0;
+        if (R[1][1] > R[a][a]) a = 1;
+        if (R[2][2] > R[a][a]) a = 2;
+        const float ka = sqrtf(fmaxf(0.0f, (R[a][a] - c) / (1.0f - c)));
+        if (ka < 1.0e-6f)
+            return true;
+        float k[3];
+        for (int b = 0; b < 3; ++b)
+            k[b] = b == a ? ka : (R[a][b] + R[b][a]) / (2.0f * (1.0f - c) * ka);
+        for (int i = 0; i < 3; ++i)
+            rv3[i] = k[i] * theta;
+        return true;
+    }
+
     bool solve_two_bone_arm(const float* shoulder3, const float* elbow3,
                             const float* wrist3, const float* target3,
                             float* solved_elbow3, float* solved_wrist3)
