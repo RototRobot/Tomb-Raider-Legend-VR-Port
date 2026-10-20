@@ -1,5 +1,7 @@
 # Tomb Raider: Legend VR
 
+> This is the OpenXR fork of the mod. For what differs from upstream, how to diff it and the commit map, see [FORK_CHANGES.md](FORK_CHANGES.md).
+
 A virtual reality mod for **Tomb Raider: Legend** (PC, Steam or GOG), adding
 stereoscopic rendering, 6DoF head tracking and motion controller support, a
 VR third-person camera, and an optional first-person mode where you climb,
@@ -207,9 +209,9 @@ C:\Program Files (x86)\Steam\steamapps\common\Tomb Raider Legend\
 |---|---|
 | `d3d9.dll` | The mod (a Direct3D 9 proxy the game loads) |
 | `d3d9_dxvk.dll` | The DXVK fork that renders through Vulkan |
-| `openvr_api.dll` | OpenVR, 32-bit |
 | `trlvr_launcher.exe` | The launcher (see below) |
-| `trlvr_actions.json`, `bindings_*.json` | The SteamVR action manifest and controller bindings |
+
+There are no controller `.json` files to copy: the OpenXR controller bindings are built into `d3d9.dll`.
 
 > [!IMPORTANT]
 > **GOG release:** GOG ships its own `D3D9.dll` (a compatibility wrapper) in the
@@ -413,7 +415,7 @@ and the costliest objects. It says why an area is slow.
 - The **Vulkan SDK** installed under `C:\VulkanSDK` (headers and
   `glslangValidator`).
 - **Python 3** with **meson** and **ninja**: `py -3 -m pip install meson ninja`.
-- OpenVR is included in [`third_party/openvr`](third_party/openvr).
+- The OpenXR headers and loader are included in [`third_party/openxr`](third_party/openxr).
 
 Everything is built **32-bit**: `trl.exe` is a 32-bit process.
 
@@ -424,6 +426,7 @@ build_dxvk.bat      :: the DXVK fork  -> dist\d3d9_dxvk.dll  (slow the first tim
 build.bat           :: the mod and launcher -> dist\d3d9.dll, dist\trlvr_launcher.exe
 mathtest.bat        :: tests for the VR maths
 test.bat            :: loads the proxy in a test host
+xrprobe.bat         :: standalone OpenXR runtime probe -> build\test\xrprobe.log (connect the headset first)
 ```
 
 `build_dxvk.bat clean` reconfigures the DXVK build from scratch.
@@ -436,7 +439,7 @@ package.bat                          :: the drag-and-drop release in %USERPROFIL
 ```
 
 The DXVK fork (`dxvk-trlvr/`) adds `Direct3DCreateVR9` (`src/d3d9/d3d9_vr.*`),
-which hands the Vulkan image behind a Direct3D 9 surface to OpenVR, and a DXVK
+which hands the Vulkan image behind a Direct3D 9 surface to the OpenXR runtime, and a DXVK
 profile for `trl_vr.exe`. The shipped `d3d9_dxvk.dll` is a **modified** DXVK
 build; report problems with it here, not upstream.
 
@@ -448,11 +451,13 @@ build; report problems with it here, not upstream.
 | `src/vr` | VR session and submit, cameras and first person, culling, input and gestures, UI, water |
 | `src/common` | `trlvr.ini` settings and the log |
 | `src/launcher` | `trlvr_launcher.exe` |
+| `src/vr/physics` | Body physics modules: soft chest, rear jiggle and shape, body push and volumes |
+| `src/vr/godmode` | God mode modules: pick-up and throw, carry, board leash |
 | `src/test` | Maths and proxy tests |
-| `input` | SteamVR action manifest and controller bindings |
 | `release` | Player documentation shipped in the package |
 | `dxvk-trlvr` | DXVK fork |
-| `third_party/openvr` | OpenVR header and runtime |
+| `third_party/openxr` | OpenXR headers and loader |
+| `third_party/imgui` | Dear ImGui, for the desktop settings overlay |
 
 ---
 
@@ -521,15 +526,15 @@ rest.
 
 ## Licence
 
-This project's own code (`src/`, `input/`, the scripts and the documentation)
+This project's own code (`src/`, the scripts and the documentation)
 is released under the **Apache License 2.0**. See [LICENSE](LICENSE) and
 [NOTICE](NOTICE).
 
 Not covered by it, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md):
 
 - **DXVK** (zlib/libpng). The release's `d3d9_dxvk.dll` is a **modified** build.
-- **OpenVR SDK** (BSD 3-Clause, © Valve). `openvr_api.dll` is redistributed
-  unmodified.
+- **OpenXR SDK** (Apache 2.0, © Khronos). Its loader is linked into `d3d9.dll`.
+- **Dear ImGui** (MIT), for the desktop settings overlay.
 - **TRAWindowed** (MIT, © chreden), which the D3D9 proxy started from.
 
 Tomb Raider: Legend is © its owners. This mod is unofficial, not affiliated

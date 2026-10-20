@@ -3,9 +3,9 @@
 // The VR controllers, as the keyboard and mouse the game is played with.
 //
 // Actions are named for what they do in the game and each presses a fixed
-// key; which button produces which action lives in input/bindings_*.json and
-// SteamVR's own bindings UI. See vr_input.cpp for why this is keyboard and
-// mouse rather than a gamepad.
+// key; which button produces which action is suggested per controller profile
+// in xr_runtime.cpp (the runtime may be rebound in its own UI). See vr_input.cpp
+// for why this is keyboard and mouse rather than a gamepad.
 
 namespace trlvr
 {
