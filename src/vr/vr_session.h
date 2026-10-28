@@ -1,14 +1,16 @@
 #pragma once
-// The OpenVR session: headset, eye frusta, poses.
+// The VR session: headset, eye frusta, poses.
 //
-// openvr_api.dll is loaded by hand rather than linked. This DLL is the game's
-// d3d9.dll, so a missing or broken OpenVR runtime must not stop the game from
-// starting -- it logs why and the game runs flat.
-
+// The runtime is OpenXR (xr_runtime.cpp). This DLL is the game's d3d9.dll,
+// so a missing or broken runtime must not stop the game from starting -- it
+// logs why and the game runs flat.
 #include "vr_math.h"
 
 namespace trlvr
 {
+    struct TrackedPose;
+    struct XrEyeView;
+
     // EyeCenter is not a real eye: it is the average of the two frusta with no
     // lateral offset, used while a single image is being sent to both eyes.
     enum Eye { EyeLeft = 0, EyeRight = 1, EyeCenter = 2 };
@@ -23,7 +25,7 @@ namespace trlvr
         // Offset from the head origin, in metres.
         float offset_x, offset_y, offset_z;
 
-        // Eye-to-head rotation (OpenVR axes, row-major). Identity on most
+        // Eye-to-head rotation (-Z forward, +Y up; row-major). Identity on most
         // headsets; canted displays (Pimax and others) turn each eye outward,
         // and the tangents above are measured about that turned axis.
         float rot[3][3];
@@ -31,17 +33,8 @@ namespace trlvr
 
     bool vr_init();
 
-    // The compositor, fetched through our own dynamic loader. openvr.h's
-    // vr::VRCompositor() helper cannot be used: it calls the *imported*
-    // VR_GetGenericInterface, and we deliberately do not link openvr_api.
-    // Null unless the session came up as a Scene application.
-    void* vr_compositor_raw();
     void vr_shutdown();
     bool vr_ready();
-
-    // Any OpenVR interface by version string, from the session already up --
-    // IVRInput for the controllers, say. Null until vr_ready().
-    void* vr_get_interface(const char* version);
 
     // Empty until vr_init succeeds.
     const char* vr_status();
@@ -62,14 +55,17 @@ namespace trlvr
     // headset can see gets thrown away.
     float vr_max_tangent();
 
-    // Refresh the head pose. Cheap; safe to call once a frame. Does nothing
-    // once vr_set_render_poses is supplying the compositor's poses.
+    // Once a frame, at the frame boundary. The poses themselves arrive
+    // through vr_set_render_poses.
     void vr_update_pose();
 
-    // The poses returned by IVRCompositor::WaitGetPoses (seated space): the
-    // predicted poses the compositor assumes the next frame is rendered
-    // with. `poses` is a vr::TrackedDevicePose_t array.
-    void vr_set_render_poses(const void* poses, unsigned count);
+    // The poses predicted for the frame about to be rendered (LOCAL space),
+    // kPoseCount of them: head, left hand, right hand.
+    void vr_set_render_poses(const TrackedPose* poses, unsigned count);
+
+    // The eye frusta and offsets for that frame. Until the first call the
+    // session reports a provisional symmetric frustum.
+    void vr_set_eye_views(const XrEyeView eyes[2]);
 
     // Head pose as a view matrix in the engine's row-vector convention,
     // in game units. Identity until a pose has been read.
@@ -152,6 +148,17 @@ namespace trlvr
     // forward), as used by the tracked-hand grab-zone renderer.
     bool vr_project_head_point(Eye eye, float x, float y, float z,
                                float* u, float* v);
+    // The headset in the runtime's tracking space (metres, x right, y up,
+    // z back): its position and its level forward (x, z; unit length).
+    // False without a valid head pose or when it looks straight up/down.
+    bool vr_head_tracking_level(float position[3], float* forward_x,
+                                float* forward_z);
+    // Project a fixed point in that tracking space into an eye's normalized
+    // texture coordinates, with its depth in front of the eye in metres
+    // (negative or small behind it -- the caller decides; u and v are only
+    // meaningful with a positive depth). False without a head pose.
+    bool vr_project_tracking_point(Eye eye, const float point[3], float* u,
+                                   float* v, float* depth);
 
     // Latest tracked controller transform relative to the HMD, in engine
     // coordinates and units. This is intentionally independent of the game

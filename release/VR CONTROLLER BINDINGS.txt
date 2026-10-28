@@ -3,7 +3,17 @@
 ================================================================
 
 The VR controllers send the game's normal keyboard and mouse controls.
-The keyboard and mouse continue to work at the same time.
+The keyboard and mouse continue to work at the same time. The layout is the
+same under OpenXR (the default) and OpenVR (the fallback).
+
+SETTINGS PANEL (1.1.0)
+----------------------
+Reverb G2, WMR, Index   Hold both sticks in for 0.6 s
+Oculus Touch            Hold the left menu button (a tap pauses)
+Keyboard                Insert
+In the panel: point with your main hand and pull the trigger, or left stick
+moves, A selects, B goes back, right stick scrolls. The same gesture closes
+it.
 
 
 HP REVERB G2 / OCULUS TOUCH
@@ -14,7 +24,7 @@ Left stick short click      Gear menu: push the stick towards an item
                             down switch weapon, left personal light);
                             in menus: back (Escape)
 Left stick double click     Recenter the VR view
-Left stick long click       Pause (Escape)
+Left stick long click       Pause (Escape); Oculus Touch: left menu button
 
 Right stick                 Turn the camera (mouse movement)
 Right stick short click     Switch weapons (End)

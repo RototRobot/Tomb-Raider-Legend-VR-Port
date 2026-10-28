@@ -9,6 +9,8 @@
 #include "vr_input.h"
 #include "hud_capture.h"
 #include "ui_space.h"
+#include "menu_panel.h"
+#include "../proxy/overlay.h"
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -19,7 +21,8 @@
 #include <dwrite.h>
 #include <cwchar>
 
-#include "openvr.h"
+#include "xr_runtime.h"
+#include "vr_backend.h"
 #include "d3d9_vr.h"
 
 namespace trlvr
@@ -29,7 +32,6 @@ namespace trlvr
         typedef HRESULT(__stdcall* PFN_Direct3DCreateVR9)(IDirect3DDevice9*, IDirect3DVR9**);
 
         IDirect3DVR9* g_vr = nullptr;
-        vr::IVRCompositor* g_comp = nullptr;
         IDirect3DDevice9* g_device = nullptr;
 
         // One image per eye. In alternating mode only one is redrawn each
@@ -544,6 +546,162 @@ namespace trlvr
                             sizeof(VignetteVertex));
                     }
                     g_device->EndScene();
+                }
+            }
+            if (old_target)
+            {
+                g_device->SetRenderTarget(0, old_target);
+                old_target->Release();
+            }
+            state->Apply();
+            g_device->SetViewport(&old_viewport);
+            state->Release();
+        }
+
+        // Picture: brightness and contrast on the finished frame (user
+        // 2026-10-14: "a little washed out"). The game's own sliders work
+        // through the device gamma ramp, which Windows only applies to a
+        // fullscreen display -- never to a window, and never to the image
+        // that goes to the headset -- so the ramp it sets is caught
+        // (vr_submit_set_game_ramp) and applied here, with [vr]
+        // picture_brightness / picture_contrast on top.
+        //
+        // No shader: out = c * (in - 0.5) + 0.5 + b is c * in + k, done
+        // with two full-screen quads and fixed-function blending -- a
+        // multiply (src = c/2 and dest*src + src*dest, so up to 2x) and an
+        // add or subtract of k. The order avoids clipping highlights: a
+        // brightening contrast subtracts first and then multiplies.
+        float g_ramp_c = 1.0f, g_ramp_k = 0.0f;
+        bool g_ramp_seen = false;
+
+        void picture_pass(D3DBLENDOP op, D3DBLEND src, D3DBLEND dest,
+                          float value, UINT width, UINT height)
+        {
+            const float v = value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value;
+            const DWORD level = (DWORD)(v * 255.0f + 0.5f);
+            const DWORD colour = 0xFF000000u | (level << 16) | (level << 8) |
+                                 level;
+            const float w = (float)width, h = (float)height;
+            const VignetteVertex quad[4] = {
+                { -0.5f, -0.5f, 0.0f, 1.0f, colour },
+                { w - 0.5f, -0.5f, 0.0f, 1.0f, colour },
+                { -0.5f, h - 0.5f, 0.0f, 1.0f, colour },
+                { w - 0.5f, h - 0.5f, 0.0f, 1.0f, colour } };
+            g_device->SetRenderState(D3DRS_BLENDOP, op);
+            g_device->SetRenderState(D3DRS_SRCBLEND, src);
+            g_device->SetRenderState(D3DRS_DESTBLEND, dest);
+            g_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad,
+                                      sizeof(VignetteVertex));
+        }
+
+        void draw_picture_adjust(IDirect3DSurface9* back)
+        {
+            if (!g_device || !back)
+                return;
+            // The game's ramp first, then the mod's settings.
+            const bool game = config().picture_follow_game && g_ramp_seen;
+            const float cg = game ? g_ramp_c : 1.0f;
+            const float kg = game ? g_ramp_k : 0.0f;
+            const float cu = config().picture_contrast;
+            const float bu = config().picture_brightness;
+            float c = cu * cg;
+            const float k = cu * (kg - 0.5f) + 0.5f + bu;
+            if (!(c > 0.0f) || !std::isfinite(c) || !std::isfinite(k))
+                return;
+            c = fminf(c, 2.0f);
+            if (fabsf(c - 1.0f) < 0.004f && fabsf(k) < 0.002f)
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || !desc.Width || !desc.Height)
+                return;
+            IDirect3DStateBlock9* state = nullptr;
+            IDirect3DSurface9* old_target = nullptr;
+            D3DVIEWPORT9 old_viewport{};
+            if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
+                !state)
+                return;
+            state->Capture();
+            g_device->GetRenderTarget(0, &old_target);
+            g_device->GetViewport(&old_viewport);
+            if (SUCCEEDED(g_device->SetRenderTarget(0, back)))
+            {
+                const D3DVIEWPORT9 viewport = { 0, 0, desc.Width,
+                                                desc.Height, 0.0f, 1.0f };
+                g_device->SetViewport(&viewport);
+                g_device->SetVertexShader(nullptr);
+                g_device->SetPixelShader(nullptr);
+                g_device->SetTexture(0, nullptr);
+                g_device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE);
+                g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,
+                                         FALSE);
+                g_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+                g_device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+                g_device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+                g_device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_SHADEMODE, D3DSHADE_FLAT);
+                // Colour only; whatever is in alpha is left alone.
+                g_device->SetRenderState(D3DRS_COLORWRITEENABLE,
+                    D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN |
+                    D3DCOLORWRITEENABLE_BLUE);
+                g_device->SetTextureStageState(0, D3DTSS_COLOROP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_COLORARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAOP,
+                                               D3DTOP_SELECTARG2);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAARG2,
+                                               D3DTA_DIFFUSE);
+                g_device->SetTextureStageState(1, D3DTSS_COLOROP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_ALPHAOP,
+                                               D3DTOP_DISABLE);
+                if (SUCCEEDED(g_device->BeginScene()))
+                {
+                    const auto multiply = [&](float factor)
+                    {
+                        if (fabsf(factor - 1.0f) >= 0.004f)
+                            picture_pass(D3DBLENDOP_ADD, D3DBLEND_DESTCOLOR,
+                                         D3DBLEND_SRCCOLOR, 0.5f * factor,
+                                         desc.Width, desc.Height);
+                    };
+                    const auto offset = [&](float amount)
+                    {
+                        if (amount >= 0.002f)
+                            picture_pass(D3DBLENDOP_ADD, D3DBLEND_ONE,
+                                         D3DBLEND_ONE, amount, desc.Width,
+                                         desc.Height);
+                        else if (amount <= -0.002f)
+                            picture_pass(D3DBLENDOP_REVSUBTRACT,
+                                         D3DBLEND_ONE, D3DBLEND_ONE, -amount,
+                                         desc.Width, desc.Height);
+                    };
+                    if (k < 0.0f)
+                    {
+                        offset(k / c);      // (in + k/c) * c
+                        multiply(c);
+                    }
+                    else
+                    {
+                        multiply(c);
+                        offset(k);
+                    }
+                    g_device->EndScene();
+                }
+                static bool reported = false;
+                if (!reported)
+                {
+                    reported = true;
+                    log("picture: contrast %.2f, offset %+.3f (game ramp %s, "
+                        "trlvr.ini brightness %+.2f contrast %.2f)", c, k,
+                        game ? "used" : g_ramp_seen ? "ignored" : "not set",
+                        bu, cu);
                 }
             }
             if (old_target)
@@ -1712,7 +1870,8 @@ namespace trlvr
         {
             if (!count || !g_device)
                 return;
-            static DebugLineVertex verts[2 * 600];
+            // Both eyes' worth: the palm sliders send up to 1200 points.
+            static DebugLineVertex verts[2 * 1200];
             unsigned used = 0;
             const float eye_w = desc.Width * 0.5f;
             for (int eye_index = 0; eye_index < 2; ++eye_index)
@@ -1818,8 +1977,8 @@ namespace trlvr
             if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
                 !desc.Height)
                 return;
-            static float pts[600][3];
-            static DWORD cols[600];
+            static float pts[1200][3];
+            static DWORD cols[1200];
             unsigned n = 0;
             const auto alpha = [&](DWORD rgb, float a)
             {
@@ -1836,7 +1995,7 @@ namespace trlvr
             const auto quad = [&](const float c[3], float r0, float u0,
                                   float r1, float u1, DWORD colour)
             {
-                if (n + 6 > 600)
+                if (n + 6 > 1200)
                     return;
                 float a[3], b[3], d[3], e[3];
                 if (!head(c, r0, u0, a) || !head(c, r1, u0, b) ||
@@ -1855,7 +2014,7 @@ namespace trlvr
                 float centre[3];
                 if (!head(c, 0.0f, 0.0f, centre))
                     return;
-                for (int i = 0; i < 16 && n + 3 <= 600; ++i)
+                for (int i = 0; i < 16 && n + 3 <= 1200; ++i)
                 {
                     const float a0 = 6.2831853f * i / 16.0f;
                     const float a1 = 6.2831853f * (i + 1) / 16.0f;
@@ -1874,7 +2033,7 @@ namespace trlvr
             const auto ring = [&](const float c[3], float r_in, float r_out,
                                   DWORD colour)
             {
-                for (int i = 0; i < 16 && n + 6 <= 600; ++i)
+                for (int i = 0; i < 16 && n + 6 <= 1200; ++i)
                 {
                     const float a0 = 6.2831853f * i / 16.0f;
                     const float a1 = 6.2831853f * (i + 1) / 16.0f;
@@ -1892,7 +2051,7 @@ namespace trlvr
                     }
                 }
             };
-            for (int i = 0; i < 2; ++i)
+            for (int i = 0; i < 3; ++i)
             {
                 float mid[3];
                 for (int k = 0; k < 3; ++k)
@@ -1901,9 +2060,22 @@ namespace trlvr
                 // Bar: translucent blue, a lighter filled part to the knob.
                 quad(mid, -half, -0.006f, half, 0.006f,
                      alpha(0x3A7BD5u, 0.45f));
+                // Notches: the preset's default (and centre on the side
+                // bar), where the knob sticks.
+                for (int k = 0; k < s.notches[i]; ++k)
+                    quad(mid, s.notch[i][k] - mid[0] - 0.0012f, -0.010f,
+                         s.notch[i][k] - mid[0] + 0.0012f, 0.010f,
+                         alpha(0xBFD8FFu, 0.8f));
                 const float fill = s.knob[i][0] - mid[0];
-                quad(mid, -half, -0.006f, fill, 0.006f,
-                     alpha(0x6FB2FFu, 0.55f));
+                if (i < 2)
+                    quad(mid, -half, -0.006f, fill, 0.006f,
+                         alpha(0x6FB2FFu, 0.55f));
+                else
+                {
+                    // Side: filled from the centre (behind her).
+                    quad(mid, fminf(0.0f, fill), -0.006f, fmaxf(0.0f, fill),
+                         0.006f, alpha(0x6FB2FFu, 0.55f));
+                }
                 // Knob.
                 const DWORD knob = s.held[i] ? 0xFFFFFFu
                                  : s.hover[i] ? 0xFFE25Au : 0xF0F0F0u;
@@ -1919,7 +2091,7 @@ namespace trlvr
                     disc(h, 0.0045f, ink);
                     quad(s.icon[i], -0.004f, -0.012f, 0.004f, 0.004f, ink);
                 }
-                else
+                else if (i == 1)
                 {
                     // A magnifier: ring and handle.
                     float g[3] = { s.icon[i][0] - 0.002f,
@@ -1929,6 +2101,43 @@ namespace trlvr
                                     s.icon[i][1] - 0.007f, s.icon[i][2] };
                     disc(hd, 0.0035f, ink);
                 }
+                else
+                {
+                    // A left-right arrow: a bar with a head at each end.
+                    quad(s.icon[i], -0.009f, -0.0015f, 0.009f, 0.0015f, ink);
+                    for (int e = -1; e <= 1; e += 2)
+                    {
+                        float tipc[3] = { s.icon[i][0] + e * 0.009f,
+                                          s.icon[i][1], s.icon[i][2] };
+                        disc(tipc, 0.0035f, ink);
+                    }
+                }
+            }
+            if (s.debug)
+            {
+                // The grab sphere's outline round each knob (green, yellow
+                // when a test point is inside), then the test points: cyan
+                // palm, magenta index tip.
+                for (int i = 0; i < 3; ++i)
+                {
+                    bool inside = false;
+                    for (int p = 0; p < 2; ++p)
+                    {
+                        if (!s.probe_ok[p])
+                            continue;
+                        float d = 0.0f;
+                        for (int k = 0; k < 3; ++k)
+                            d += (s.probe[p][k] - s.knob[i][k]) *
+                                 (s.probe[p][k] - s.knob[i][k]);
+                        inside = inside || d < s.reach * s.reach;
+                    }
+                    ring(s.knob[i], s.reach - 0.002f, s.reach,
+                         alpha(inside ? 0xFFE25Au : 0x40FF60u, 0.9f));
+                }
+                if (s.probe_ok[0])
+                    disc(s.probe[0], 0.008f, alpha(0x30E0FFu, 1.0f));
+                if (s.probe_ok[1])
+                    disc(s.probe[1], 0.008f, alpha(0xFF40FFu, 1.0f));
             }
             draw_head_triangles(back, desc, pts, cols, n);
         }
@@ -2342,6 +2551,51 @@ namespace trlvr
             draw_hand_lines(back, desc, lines, used);
         }
 
+        // body_rear_debug: the rear soft body's regions as wireframes.
+        void draw_rear_debug(IDirect3DSurface9* back)
+        {
+            constexpr int kMax = 512;       // about 483 segments
+            static float seg[kMax][6];
+            static unsigned colours[kMax];
+            const int count = stereo_same_frame_active()
+                ? camera_rear_debug_lines(seg, colours, kMax) : 0;
+            if (count <= 0)
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            const float eye_w = desc.Width * 0.5f;
+            static DebugLineVertex lines[2 * kMax * 2];
+            unsigned used = 0;
+            for (int eye_index = 0; eye_index < 2; ++eye_index)
+            {
+                const Eye eye = eye_index ? EyeRight : EyeLeft;
+                for (int i = 0; i < count; ++i)
+                {
+                    float uv[2][2]{};
+                    bool ok = true;
+                    for (int e = 0; e < 2 && ok; ++e)
+                        ok = vr_project_head_point(eye, seg[i][e * 3],
+                            seg[i][e * 3 + 1], seg[i][e * 3 + 2],
+                            &uv[e][0], &uv[e][1]) &&
+                            uv[e][0] > -0.5f && uv[e][0] < 1.5f &&
+                            uv[e][1] > -0.5f && uv[e][1] < 1.5f;
+                    if (!ok)
+                        continue;
+                    float ca[2] = { uv[0][0], uv[0][1] };
+                    float cb[2] = { uv[1][0], uv[1][1] };
+                    if (!clip_eye_segment(ca, cb))
+                        continue;
+                    lines[used++] = { eye_w * (eye_index + ca[0]),
+                        desc.Height * ca[1], 0.0f, 1.0f, colours[i] };
+                    lines[used++] = { eye_w * (eye_index + cb[0]),
+                        desc.Height * cb[1], 0.0f, 1.0f, colours[i] };
+                }
+            }
+            draw_hand_lines(back, desc, lines, used);
+        }
+
         // Pouch items as outlines: the medipack (white box, red cross) on the
         // chest and the grenade/flare (olive canister) on the belt, or in
         // the hand that holds one. Axis-aligned to the head frame (X right,
@@ -2643,6 +2897,274 @@ namespace trlvr
             }
             state->Apply();
             state->Release();
+        }
+
+        // The settings overlay (proxy/overlay.cpp) in the headset: a square
+        // panel world-locked in the room, placed in front of the head (from
+        // [vr] overlay_vr_*) when it opens, at a recentre, or when one of
+        // those settings changes (so a slider shows its effect where you
+        // look), and left there so it can be read by leaning and looking
+        // round. Drawn over everything, both eyes, perspective-correct.
+        struct SettingsPanel
+        {
+            bool placed = false;
+            unsigned open_count = 0;
+            unsigned recentre = 0;
+            float distance = 0.0f, yaw = 0.0f, pitch = 0.0f;
+            MenuPanelPose pose{};
+        };
+        SettingsPanel g_settings_panel;
+
+        // eye_count 2: side by side, one half each; 1: the whole surface
+        // seen through the left eye's projection (mono).
+        // eye_count 2: side by side; 1: the whole surface is first_eye's
+        // (mono uses the left; the alternating path the eye just drawn).
+        void draw_settings_panel(IDirect3DSurface9* back, int eye_count,
+                                 int first_eye = 0)
+        {
+            if (!g_device || !back || !overlay_open())
+                return;
+            D3DSURFACE_DESC desc{};
+            if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
+                !desc.Height)
+                return;
+            SettingsPanel& panel = g_settings_panel;
+            const Config& c = config();
+            float head[3]{}, fx = 0.0f, fz = 0.0f;
+            if (vr_head_tracking_level(head, &fx, &fz) &&
+                (!panel.placed || panel.open_count != overlay_open_count() ||
+                 panel.recentre != vr_recenter_generation() ||
+                 panel.distance != c.overlay_vr_distance ||
+                 panel.yaw != c.overlay_vr_yaw_degrees ||
+                 panel.pitch != c.overlay_vr_pitch_degrees))
+            {
+                if (menu_panel_place(head, fx, fz, c.overlay_vr_distance,
+                                     c.overlay_vr_yaw_degrees,
+                                     c.overlay_vr_pitch_degrees, &panel.pose))
+                {
+                    panel.placed = true;
+                    panel.open_count = overlay_open_count();
+                    panel.recentre = vr_recenter_generation();
+                    panel.distance = c.overlay_vr_distance;
+                    panel.yaw = c.overlay_vr_yaw_degrees;
+                    panel.pitch = c.overlay_vr_pitch_degrees;
+                }
+            }
+            if (!panel.placed)
+                return;
+            float corner[4][3];
+            const float half = menu_panel_half_size(c.overlay_vr_distance,
+                                                    c.overlay_vr_width_degrees);
+            menu_panel_corners(panel.pose, half, corner);
+
+            // The pointer (1.1.0): the main hand's forward ray (-z of its
+            // pose) onto the panel's plane; the hit goes to the overlay as
+            // its mouse, the trigger as its button.
+            const bool main_left = config().left_handed;
+            float ray_from[3]{}, ray_to[3]{};
+            bool ray = false, hit = false;
+            {
+                float pos[3], rot[9];
+                if (vr_controller_tracking_pose(main_left, pos, rot))
+                {
+                    const float d[3] = { -rot[2], -rot[5], -rot[8] };
+                    const float* r = panel.pose.right;
+                    const float* u = panel.pose.up;
+                    const float n[3] = { r[1] * u[2] - r[2] * u[1],
+                                         r[2] * u[0] - r[0] * u[2],
+                                         r[0] * u[1] - r[1] * u[0] };
+                    const float denom = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        ray_from[k] = pos[k];
+                        ray_to[k] = pos[k] + d[k] * 0.6f;
+                    }
+                    ray = true;
+                    if (fabsf(denom) > 1e-4f)
+                    {
+                        const float* ctr = panel.pose.centre;
+                        const float t = ((ctr[0] - pos[0]) * n[0] +
+                                         (ctr[1] - pos[1]) * n[1] +
+                                         (ctr[2] - pos[2]) * n[2]) / denom;
+                        if (t > 0.0f)
+                        {
+                            float p[3], l[3];
+                            for (int k = 0; k < 3; ++k)
+                            {
+                                p[k] = pos[k] + d[k] * t;
+                                l[k] = p[k] - ctr[k];
+                            }
+                            const float pu = 0.5f + (l[0] * r[0] + l[1] * r[1] +
+                                                     l[2] * r[2]) / (2.0f * half);
+                            const float pv = 0.5f - (l[0] * u[0] + l[1] * u[1] +
+                                                     l[2] * u[2]) / (2.0f * half);
+                            if (pu >= 0.0f && pu <= 1.0f && pv >= 0.0f &&
+                                pv <= 1.0f)
+                            {
+                                hit = true;
+                                for (int k = 0; k < 3; ++k)
+                                    ray_to[k] = p[k];
+                                OverlayPointer pointer{};
+                                pointer.u = pu;
+                                pointer.v = pv;
+                                pointer.down = xr_input_trigger(main_left ? 0 : 1) > 0.6f;
+                                overlay_set_pointer(pointer);
+                            }
+                        }
+                    }
+                }
+            }
+
+            IDirect3DTexture9* texture = overlay_vr_texture();
+            if (!texture)
+                return;
+
+            const float eye_w = (float)desc.Width / (float)eye_count;
+            IDirect3DStateBlock9* state = nullptr;
+            if (FAILED(g_device->CreateStateBlock(D3DSBT_ALL, &state)) ||
+                !state)
+                return;
+            state->Capture();
+            IDirect3DSurface9* old_target = nullptr;
+            IDirect3DSurface9* old_depth = nullptr;
+            g_device->GetRenderTarget(0, &old_target);
+            g_device->GetDepthStencilSurface(&old_depth);
+            if (SUCCEEDED(g_device->SetRenderTarget(0, back)))
+            {
+                g_device->SetDepthStencilSurface(nullptr);
+                const D3DVIEWPORT9 viewport = { 0, 0, desc.Width,
+                                                desc.Height, 0.0f, 1.0f };
+                g_device->SetViewport(&viewport);
+                g_device->SetVertexShader(nullptr);
+                g_device->SetPixelShader(nullptr);
+                g_device->SetFVF(D3DFVF_XYZRHW | D3DFVF_DIFFUSE |
+                                 D3DFVF_TEX1);
+                g_device->SetRenderState(D3DRS_ZENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE,
+                                         FALSE);
+                // The panel is premultiplied (overlay.cpp render_to).
+                g_device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+                g_device->SetRenderState(D3DRS_DESTBLEND,
+                                         D3DBLEND_INVSRCALPHA);
+                g_device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+                g_device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_LIGHTING, FALSE);
+                g_device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+                g_device->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+                g_device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+                g_device->SetRenderState(D3DRS_COLORWRITEENABLE, 0x7);
+                g_device->SetSamplerState(0, D3DSAMP_MINFILTER,
+                                          D3DTEXF_LINEAR);
+                g_device->SetSamplerState(0, D3DSAMP_MAGFILTER,
+                                          D3DTEXF_LINEAR);
+                g_device->SetSamplerState(0, D3DSAMP_MIPFILTER,
+                                          D3DTEXF_NONE);
+                g_device->SetSamplerState(0, D3DSAMP_ADDRESSU,
+                                          D3DTADDRESS_CLAMP);
+                g_device->SetSamplerState(0, D3DSAMP_ADDRESSV,
+                                          D3DTADDRESS_CLAMP);
+                g_device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+                g_device->SetTextureStageState(0, D3DTSS_COLOROP,
+                                               D3DTOP_SELECTARG1);
+                g_device->SetTextureStageState(0, D3DTSS_COLORARG1,
+                                               D3DTA_TEXTURE);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAOP,
+                                               D3DTOP_SELECTARG1);
+                g_device->SetTextureStageState(0, D3DTSS_ALPHAARG1,
+                                               D3DTA_TEXTURE);
+                g_device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+                g_device->SetTextureStageState(0,
+                    D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_COLOROP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTextureStageState(1, D3DTSS_ALPHAOP,
+                                               D3DTOP_DISABLE);
+                g_device->SetTexture(0, texture);
+                for (DWORD s = 1; s < 8; ++s)
+                    g_device->SetTexture(s, nullptr);
+                if (SUCCEEDED(g_device->BeginScene()))
+                {
+                    const float tex[4][2] = {
+                        { 0.0f, 0.0f }, { 1.0f, 0.0f },
+                        { 0.0f, 1.0f }, { 1.0f, 1.0f } };
+                    for (int eye_index = 0; eye_index < eye_count;
+                         ++eye_index)
+                    {
+                        const Eye eye = (eye_index + first_eye) ? EyeRight
+                                                                : EyeLeft;
+                        BadgeVertex quad[4]{};
+                        bool ok = true;
+                        for (int k = 0; k < 4 && ok; ++k)
+                        {
+                            float u = 0.0f, v = 0.0f, depth = 0.0f;
+                            // Pre-transformed vertices are not clipped at
+                            // the near plane: a corner behind the eye would
+                            // fold the quad over, so that eye goes without.
+                            ok = vr_project_tracking_point(eye, corner[k],
+                                     &u, &v, &depth) && depth > 0.05f;
+                            // rhw = 1 / depth: perspective-correct texture
+                            // across a panel seen at an angle.
+                            quad[k] = { eye_width_px(eye_w, eye_index, u),
+                                desc.Height * v, 0.0f, 1.0f / depth,
+                                0xFFFFFFFFu, tex[k][0], tex[k][1] };
+                        }
+                        if (!ok)
+                            continue;
+                        const RECT scissor = {
+                            (LONG)(eye_w * eye_index), 0,
+                            (LONG)(eye_w * (eye_index + 1)),
+                            (LONG)desc.Height };
+                        g_device->SetScissorRect(&scissor);
+                        g_device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2,
+                            quad, sizeof(BadgeVertex));
+                    }
+                    g_device->EndScene();
+                }
+            }
+            if (old_target)
+            {
+                g_device->SetRenderTarget(0, old_target);
+                old_target->Release();
+            }
+            g_device->SetDepthStencilSurface(old_depth);
+            if (old_depth)
+                old_depth->Release();
+            state->Apply();
+            state->Release();
+            // The laser, from the main hand to the panel (or 0.6 m out).
+            if (ray)
+            {
+                static DebugLineVertex lines[2 * 2 * 2];
+                unsigned used = 0;
+                const DWORD colour = hit ? 0xFF60E0FFu : 0xFF6080A0u;
+                for (int eye_index = 0; eye_index < eye_count; ++eye_index)
+                {
+                    const Eye eye = (eye_index + first_eye) ? EyeRight : EyeLeft;
+                    float uv[2][2], depth = 0.0f;
+                    if (!vr_project_tracking_point(eye, ray_from, &uv[0][0],
+                                                   &uv[0][1], &depth) ||
+                        depth <= 0.05f ||
+                        !vr_project_tracking_point(eye, ray_to, &uv[1][0],
+                                                   &uv[1][1], &depth) ||
+                        depth <= 0.05f || !clip_eye_segment(uv[0], uv[1]))
+                        continue;
+                    for (int offset = 0; offset < 2; ++offset)
+                    {
+                        lines[used++] = { eye_width_px(eye_w, eye_index, uv[0][0]) +
+                                          offset, desc.Height * uv[0][1], 0.0f,
+                                          1.0f, colour };
+                        lines[used++] = { eye_width_px(eye_w, eye_index, uv[1][0]) +
+                                          offset, desc.Height * uv[1][1], 0.0f,
+                                          1.0f, colour };
+                    }
+                }
+                if (used)
+                    draw_hand_lines(back, desc, lines, used);
+            }
         }
 
         void draw_gear_tuning_panel(IDirect3DSurface9* back)
@@ -3511,6 +4033,24 @@ namespace trlvr
             g_device->StretchRect(overlay, &src, panel, nullptr,
                                   D3DTEXF_LINEAR);
             overlay->Release();
+            // The settings overlay open: its own pointer is in use, so no
+            // hand panel meanwhile (TR7-Menu-Hook's options are in it).
+            if (overlay_open())
+            {
+                if (g_imgui_trigger_was)
+                {
+                    g_imgui_trigger_was = false;
+                    POINT p{};
+                    GetCursorPos(&p);
+                    D3DDEVICE_CREATION_PARAMETERS cp{};
+                    if (SUCCEEDED(g_device->GetCreationParameters(&cp)) &&
+                        cp.hFocusWindow)
+                        ScreenToClient(cp.hFocusWindow, &p);
+                    imgui_mouse(p, false, true);
+                }
+                panel->Release();
+                return;
+            }
 
             // Where: over the off hand, facing the eye.
             const float metre = tune_world_scale();
@@ -3988,48 +4528,61 @@ namespace trlvr
             return true;
         }
 
-        // Split deliberately into two halves.
+        // OpenXR swapchain images belong to the runtime, so a finished frame
+        // is copied into one rather than handed over in place. The copy is
+        // recorded by DXVK itself (CopySurfaceToImage), in order with the
+        // frame it reads.
         //
-        // prepare_surface flushes DXVK's command stream and waits for the GPU.
-        // It must NOT be called while the submission queue is locked: DXVK's
-        // own submit thread needs that lock to push work to the queue, so
-        // waiting for GPU work while holding it deadlocks the process. That is
-        // not hypothetical -- it hung on the first stereo frame, every thread
-        // waiting, when these two were briefly a single function.
+        // The locking rule is the one this file has always had: DXVK's own
+        // submit thread needs the submission queue to push work to the GPU,
+        // so nothing may wait for the GPU while holding it. That deadlock is
+        // not hypothetical -- it hung on the first stereo frame, every
+        // thread waiting, when the two halves were briefly one function.
         //
-        // So: prepare both eyes first, then take the lock only around the
-        // Submit calls, which are quick and do not wait on anything.
-        struct EyeSubmission
-        {
-            vr::VRVulkanTextureData_t vk;
-            bool ok;
-        };
+        // So the queue is held only round the OpenXR calls that may use the
+        // VkQueue themselves (swapchain creation, acquire, release and
+        // xrEndFrame), and the copy, which may wait, happens between them
+        // with the queue free.
+        //
+        // Set when there was no frame to submit into: the session is not
+        // running (headset off, still starting), which is not a failure.
+        bool g_no_frame = false;
 
-        EyeSubmission prepare_surface(IDirect3DSurface9* surface)
+        bool surface_size(IDirect3DSurface9* surface, UINT* w, UINT* h)
         {
-            EyeSubmission out{};
-            out.ok = false;
+            D3DSURFACE_DESC d{};
+            if (!surface || FAILED(surface->GetDesc(&d)) || !d.Width ||
+                !d.Height)
+                return false;
+            *w = d.Width;
+            *h = d.Height;
+            return true;
+        }
+
+        // OpenVR (1.1.0 fallback backend): the surface goes to the SteamVR
+        // compositor in place, as 1.0.0 did. TransferSurface flushes and
+        // waits for the GPU, so it must not run under the submission queue
+        // lock (DXVK's submit thread needs it -- this deadlocked once); only
+        // the Submit calls are locked.
+        bool prepare_openvr(IDirect3DSurface9* surface, OvrImage* out)
+        {
             if (!surface)
-                return out;
-
+                return false;
             log_set_activity("DXVK TransferSurface");
-            const bool transferred =
-                SUCCEEDED(g_vr->TransferSurface(surface, TRUE));
+            const bool transferred = SUCCEEDED(g_vr->TransferSurface(surface, TRUE));
             log_set_activity(nullptr);
             if (!transferred)
-                return out;
-
+                return false;
             D3D9_TEXTURE_VR_DESC desc{};
             log_set_activity("DXVK GetVRDesc");
             const bool described = SUCCEEDED(g_vr->GetVRDesc(surface, &desc));
             log_set_activity(nullptr);
-            if (!described)
-                return out;
             // Never hand the compositor an incomplete description (SiN VR
             // 1.0.1 lesson): every handle set, a real size, one sample.
-            if (!desc.Image || !desc.Device || !desc.PhysicalDevice ||
-                !desc.Instance || !desc.Queue || !desc.Width ||
-                !desc.Height || !desc.Format || desc.SampleCount != 1)
+            if (!described || !desc.Image || !desc.Device ||
+                !desc.PhysicalDevice || !desc.Instance || !desc.Queue ||
+                !desc.Width || !desc.Height || !desc.Format ||
+                desc.SampleCount != 1)
             {
                 static bool reported = false;
                 if (!reported)
@@ -4038,86 +4591,160 @@ namespace trlvr
                     log("submit: incomplete surface description (image %llX, "
                         "%ux%u, format %u, samples %u) -- frame skipped",
                         (unsigned long long)desc.Image, desc.Width,
-                        desc.Height, (unsigned)desc.Format,
-                        desc.SampleCount);
+                        desc.Height, (unsigned)desc.Format, desc.SampleCount);
                 }
-                return out;
+                return false;
             }
-
-            out.vk.m_nImage            = desc.Image;
-            out.vk.m_pDevice           = (VkDevice_T*)desc.Device;
-            out.vk.m_pPhysicalDevice   = (VkPhysicalDevice_T*)desc.PhysicalDevice;
-            out.vk.m_pInstance         = (VkInstance_T*)desc.Instance;
-            out.vk.m_pQueue            = (VkQueue_T*)desc.Queue;
-            out.vk.m_nQueueFamilyIndex = desc.QueueFamilyIndex;
-            out.vk.m_nWidth            = desc.Width;
-            out.vk.m_nHeight           = desc.Height;
-            out.vk.m_nFormat           = (uint32_t)desc.Format;
-            out.vk.m_nSampleCount      = desc.SampleCount;
-            out.ok = true;
-            return out;
+            out->image = desc.Image;
+            out->instance = desc.Instance;
+            out->physical_device = desc.PhysicalDevice;
+            out->device = desc.Device;
+            out->queue = desc.Queue;
+            out->queue_family = desc.QueueFamilyIndex;
+            out->width = desc.Width;
+            out->height = desc.Height;
+            out->format = (uint32_t)desc.Format;
+            out->samples = desc.SampleCount;
+            return true;
         }
 
-        bool submit_prepared(vr::EVREye eye, EyeSubmission& s,
-                             const vr::VRTextureBounds_t* bounds = nullptr)
+        bool submit_openvr(IDirect3DSurface9* first, IDirect3DSurface9* second,
+                           bool side_by_side)
         {
-            if (!s.ok)
+            g_no_frame = !xr_frame_begun();
+            if (g_no_frame)
+                return false;
+            OvrImage l{}, r{};
+            bool ok = prepare_openvr(first, &l);
+            if (ok)
+            {
+                if (second)
+                    ok = prepare_openvr(second, &r);
+                else
+                    r = l;
+            }
+            float lb[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+            float rb[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+            if (side_by_side && !second)
+            {
+                lb[2] = 0.5f;
+                rb[0] = 0.5f;
+                if (tune_swap_eyes())
+                {
+                    lb[0] = 0.5f; lb[2] = 1.0f;
+                    rb[0] = 0.0f; rb[2] = 0.5f;
+                }
+            }
+            g_vr->LockSubmissionQueue();
+            if (ok)
+                ok = ovr_submit(l, lb, r, rb);
+            xr_frame_end(nullptr, nullptr);
+            g_vr->UnlockSubmissionQueue();
+            return ok;
+        }
+
+        // One surface holding both eyes side by side, one surface shown to
+        // both eyes (mono), or a surface per eye (second != null).
+        bool submit_surfaces(IDirect3DSurface9* first, IDirect3DSurface9* second,
+                             bool side_by_side)
+        {
+            if (vr_backend() == VrBackendOpenVr)
+                return submit_openvr(first, second, side_by_side);
+            g_no_frame = !xr_frame_begun();
+            if (g_no_frame)
                 return false;
 
-            vr::Texture_t tex{};
-            tex.handle      = &s.vk;
-            tex.eType       = vr::TextureType_Vulkan;
-            tex.eColorSpace = vr::ColorSpace_Auto;
+            UINT w = 0, h = 0;
+            bool ok = surface_size(first, &w, &h) && xr_frame_should_render();
+            const unsigned total_w = second ? w * 2 : w;
 
-            // Bounds are how a double-wide surface becomes two eyes without
-            // a copy: the same image is submitted twice, each time naming
-            // the half that belongs to that eye.
-            log_set_activity(eye == vr::Eye_Left
-                ? "IVRCompositor::Submit (left eye)"
-                : "IVRCompositor::Submit (right eye)");
-            const bool ok = g_comp->Submit(eye, &tex, bounds,
-                                           vr::Submit_Default) ==
-                            vr::VRCompositorError_None;
-            log_set_activity(nullptr);
-            return ok;
+            if (ok && !xr_swapchain_matches(total_w, h))
+            {
+                // DXVK's wrappers for the old images go first, and wait for
+                // the GPU, so not under the queue lock.
+                log_set_activity("DXVK ReleaseExternalImages");
+                g_vr->ReleaseExternalImages();
+                log_set_activity(nullptr);
+                g_vr->LockSubmissionQueue();
+                ok = xr_swapchain_create(total_w, h);
+                g_vr->UnlockSubmissionQueue();
+            }
+
+            uint64_t image = 0;
+            bool acquired = false;
+            if (ok)
+            {
+                g_vr->LockSubmissionQueue();
+                acquired = ok = xr_swapchain_acquire(&image);
+                g_vr->UnlockSubmissionQueue();
+            }
+
+            if (ok)
+            {
+                D3D9_VR_EXTERNAL_IMAGE dst{};
+                dst.Image = image;
+                dst.Format = (VkFormat)xr_swapchain_format();
+                dst.Width = total_w;
+                dst.Height = h;
+                const BOOL wait = config().xr_copy_wait ? TRUE : FALSE;
+                log_set_activity("DXVK CopySurfaceToImage");
+                ok = SUCCEEDED(g_vr->CopySurfaceToImage(first, &dst, 0, 0,
+                                                        second ? FALSE : wait));
+                if (ok && second)
+                    ok = SUCCEEDED(g_vr->CopySurfaceToImage(second, &dst,
+                                                            (INT)w, 0, wait));
+                log_set_activity(nullptr);
+                if (!ok)
+                {
+                    static bool reported = false;
+                    if (!reported)
+                    {
+                        reported = true;
+                        log("submit: DXVK could not copy the %ux%u frame into "
+                            "the %ux%u swapchain image (multisampled, or the "
+                            "wrong size)", w, h, total_w, h);
+                    }
+                }
+            }
+
+            // Each eye is a rectangle of the one image.
+            XrRect left{ 0, 0, (int)total_w, (int)h };
+            XrRect right = left;
+            if (second || side_by_side)
+            {
+                left.width = right.width = (int)(total_w / 2);
+                right.x = left.width;
+                // Inverted stereo is hard to put into words and instant to
+                // recognise, so it is a key rather than a rebuild. A pair of
+                // surfaces is already swapped by the caller.
+                if (side_by_side && tune_swap_eyes())
+                {
+                    const XrRect t = left;
+                    left = right;
+                    right = t;
+                }
+            }
+
+            // The frame is always ended, with no layer if anything above
+            // failed: a frame begun and never ended stalls the session.
+            g_vr->LockSubmissionQueue();
+            if (acquired)
+                xr_swapchain_release();
+            const bool ended = xr_frame_end(ok ? &left : nullptr,
+                                            ok ? &right : nullptr);
+            g_vr->UnlockSubmissionQueue();
+            return ok && ended;
         }
 
         // Both eyes from one double-wide surface.
         bool submit_side_by_side(IDirect3DSurface9* surface)
         {
-            EyeSubmission s = prepare_surface(surface);
-            if (!s.ok)
-                return false;
-
-            vr::VRTextureBounds_t left{ 0.0f, 0.0f, 0.5f, 1.0f };
-            vr::VRTextureBounds_t right{ 0.5f, 0.0f, 1.0f, 1.0f };
-            if (tune_swap_eyes())
-            {
-                const vr::VRTextureBounds_t t = left;
-                left = right;
-                right = t;
-            }
-
-            g_vr->LockSubmissionQueue();
-            const bool ok = submit_prepared(vr::Eye_Left, s, &left)
-                         && submit_prepared(vr::Eye_Right, s, &right);
-            g_vr->UnlockSubmissionQueue();
-            return ok;
+            return submit_surfaces(surface, nullptr, true);
         }
 
-        // Prepare both, then lock only for the submits.
         bool submit_pair(IDirect3DSurface9* left, IDirect3DSurface9* right)
         {
-            EyeSubmission l = prepare_surface(left);
-            EyeSubmission r = (right == left) ? l : prepare_surface(right);
-            if (!l.ok || !r.ok)
-                return false;
-
-            g_vr->LockSubmissionQueue();
-            const bool ok = submit_prepared(vr::Eye_Left, l)
-                         && submit_prepared(vr::Eye_Right, r);
-            g_vr->UnlockSubmissionQueue();
-            return ok;
+            return submit_surfaces(left, right == left ? nullptr : right, false);
         }
         // The game's FSAA (launcher "EnableFSAA", 2026-10-04) makes the back
         // buffer multisampled, which the compositor cannot take. It is
@@ -4223,19 +4850,8 @@ namespace trlvr
         }
         if (g_ready)
             return true;
-        if (!real_device || !vr_ready())
+        if (!real_device || !vr_ready() || !config().vr_submit)
             return false;
-
-        g_comp = (vr::IVRCompositor*)vr_compositor_raw();
-        if (!g_comp)
-        {
-            log("submit: no IVRCompositor -- the session is not a Scene application");
-            return false;
-        }
-        // The mod's pose maths, recentring and holster/gesture frames are all
-        // in seated space. WaitGetPoses returns poses in the compositor's
-        // space (standing by default), and those poses now drive rendering.
-        g_comp->SetTrackingSpace(vr::TrackingUniverseSeated);
 
         // Direct3DCreateVR9 only exists in our DXVK fork. On stock DXVK or on
         // Windows' d3d9 it is simply absent, and we stay mono-on-screen.
@@ -4255,17 +4871,71 @@ namespace trlvr
             return false;
         }
 
-        g_device = real_device;
-        const HRESULT hr = create(real_device, &g_vr);
-        if (FAILED(hr) || !g_vr)
+        IDirect3DVR9* created = nullptr;
+        const HRESULT hr = create(real_device, &created);
+        if (FAILED(hr) || !created)
         {
             log("submit: Direct3DCreateVR9 failed (0x%08lX)", hr);
             return false;
         }
+        // The interface grew for OpenXR and its IID changed with it, so a
+        // d3d9_dxvk.dll from an older release is refused here rather than
+        // called through a vtable it does not have.
+        IDirect3DVR9* checked = nullptr;
+        if (FAILED(created->QueryInterface(__uuidof(IDirect3DVR9),
+                                           (void**)&checked)) || !checked)
+        {
+            created->Release();
+            log("submit: d3d9_dxvk.dll is from an older release (no OpenXR "
+                "interop) -- install the one built with this d3d9.dll");
+            return false;
+        }
+        checked->Release();
 
+        D3D9_VR_DEVICE_DESC desc{};
+        if (FAILED(created->GetDeviceDesc(&desc)) || !desc.Instance ||
+            !desc.PhysicalDevice || !desc.Device)
+        {
+            created->Release();
+            log("submit: DXVK did not describe its Vulkan device");
+            return false;
+        }
+
+        XrVulkanHandles vk{};
+        vk.instance = desc.Instance;
+        vk.physical_device = desc.PhysicalDevice;
+        vk.device = desc.Device;
+        vk.queue_family = desc.QueueFamilyIndex;
+        vk.queue_index = desc.QueueIndex;
+        // The runtime may use the queue while it sets the session up.
+        created->LockSubmissionQueue();
+        const bool session = xr_session_create(vk);
+        created->UnlockSubmissionQueue();
+        if (!session)
+        {
+            created->Release();
+            log("submit: no OpenXR session -- the game runs flat");
+            return false;
+        }
+
+        g_device = real_device;
+        g_vr = created;
         g_ready = true;
-        log("submit: Vulkan interop up; submitting mono to both eyes");
+        log("submit: Vulkan interop and VR session up");
         return true;
+    }
+
+    void vr_submit_device_closing(IDirect3DDevice9* real_device)
+    {
+        // The session and its swapchain live on this device's VkDevice, so
+        // they go while it is still there.
+        if (!g_vr || real_device != g_device || !xr_session_exists())
+            return;
+        log("submit: the device is being released; ending the VR session");
+        g_vr->ReleaseExternalImages();
+        g_vr->LockSubmissionQueue();
+        xr_session_destroy();
+        g_vr->UnlockSubmissionQueue();
     }
 
     void vr_submit_shutdown()
@@ -4285,25 +4955,20 @@ namespace trlvr
         }
         g_device = nullptr;
         g_ready = false;
-        g_comp = nullptr;
     }
 
     // Performance line every 5 s (user, 2026-10-05: the water area ran at
-    // about 30 against 55 elsewhere). From SteamVR's own frame timing:
-    // the GPU time of our scene, the compositor's, how often a frame was
-    // reprojected or dropped; plus the time between frames, how long
-    // WaitGetPoses blocked (long = waiting for the headset, so the game
-    // was fast enough) and the game's draw calls per frame.
+    // about 30 against 55 elsewhere): the time between frames, how long
+    // xrWaitFrame blocked (long = waiting for the headset, so the game was
+    // fast enough), how many frames the runtime asked not to be drawn, and
+    // the game's draw calls per frame. OpenXR has no frame-timing query, so
+    // the GPU and reprojection figures SteamVR used to give are gone.
     namespace
     {
         volatile LONG g_perf_draws = 0;
         LARGE_INTEGER g_perf_qpf{}, g_perf_last_frame{}, g_perf_window{};
-        unsigned g_perf_frames = 0, g_perf_reprojected = 0;
-        unsigned g_perf_cpu_late = 0, g_perf_gpu_late = 0;
-        unsigned g_perf_throttled = 0;
-        unsigned g_perf_dropped = 0, g_perf_timed = 0;
-        double g_perf_wait_ms = 0.0, g_perf_scene_gpu_ms = 0.0;
-        double g_perf_compositor_gpu_ms = 0.0, g_perf_frame_ms_max = 0.0;
+        unsigned g_perf_frames = 0, g_perf_not_rendered = 0;
+        double g_perf_wait_ms = 0.0, g_perf_frame_ms_max = 0.0;
         LONG g_perf_draw_total = 0;
 
         double perf_ms(const LARGE_INTEGER& a, const LARGE_INTEGER& b)
@@ -4313,8 +4978,7 @@ namespace trlvr
                   double(g_perf_qpf.QuadPart) : 0.0;
         }
 
-        void perf_frame(const LARGE_INTEGER& before,
-                        const LARGE_INTEGER& after)
+        void perf_frame(const LARGE_INTEGER& after)
         {
             if (!g_perf_qpf.QuadPart)
             {
@@ -4328,57 +4992,68 @@ namespace trlvr
             if (frame > g_perf_frame_ms_max && frame < 1000.0)
                 g_perf_frame_ms_max = frame;
             ++g_perf_frames;
-            g_perf_wait_ms += perf_ms(before, after);
+            g_perf_wait_ms += xr_frame_wait_ms();
+            if (!xr_frame_should_render())
+                ++g_perf_not_rendered;
             g_perf_draw_total += InterlockedExchange(&g_perf_draws, 0);
-
-            vr::Compositor_FrameTiming timing{};
-            timing.m_nSize = sizeof(timing);
-            if (g_comp->GetFrameTiming(&timing, 1))
-            {
-                ++g_perf_timed;
-                g_perf_scene_gpu_ms += timing.m_flPreSubmitGpuMs;
-                g_perf_compositor_gpu_ms += timing.m_flCompositorRenderGpuMs;
-                const uint32_t flags = timing.m_nReprojectionFlags;
-                if (flags & (vr::VRCompositor_ReprojectionReason_Cpu |
-                             vr::VRCompositor_ReprojectionReason_Gpu))
-                    ++g_perf_reprojected;
-                if (flags & vr::VRCompositor_ReprojectionReason_Cpu)
-                    ++g_perf_cpu_late;
-                if (flags & vr::VRCompositor_ReprojectionReason_Gpu)
-                    ++g_perf_gpu_late;
-                if (flags & vr::VRCompositor_ThrottleMask)
-                    ++g_perf_throttled;
-                g_perf_dropped += timing.m_nNumDroppedFrames;
-            }
 
             const double window = perf_ms(g_perf_window, after);
             if (window >= 5000.0 && g_perf_frames)
             {
                 const double n = g_perf_frames;
-                const double timed = g_perf_timed ? g_perf_timed : 1.0;
                 log("perf: %.0f fps (frame %.1f ms avg, %.0f worst; "
-                    "WaitGetPoses %.1f ms), GPU scene %.1f ms, compositor "
-                    "%.1f ms, reprojected %.0f%% (CPU late %.0f%%, GPU late "
-                    "%.0f%%, throttled %.0f%%), dropped %u, %.0f draws/frame",
+                    "xrWaitFrame %.1f ms), %u frames not drawn at the "
+                    "runtime's request, %.0f draws/frame",
                     n * 1000.0 / window, window / n, g_perf_frame_ms_max,
-                    g_perf_wait_ms / n, g_perf_scene_gpu_ms / timed,
-                    g_perf_compositor_gpu_ms / timed,
-                    100.0 * g_perf_reprojected / timed,
-                    100.0 * g_perf_cpu_late / timed,
-                    100.0 * g_perf_gpu_late / timed,
-                    100.0 * g_perf_throttled / timed, g_perf_dropped,
+                    g_perf_wait_ms / n, g_perf_not_rendered,
                     g_perf_draw_total / n);
                 perf_cpu_report(g_perf_frames);
                 camera_perf_instance_report(g_perf_frames);
                 g_perf_window = after;
-                g_perf_frames = g_perf_reprojected = g_perf_dropped = 0;
-                g_perf_cpu_late = g_perf_gpu_late = g_perf_throttled = 0;
-                g_perf_timed = 0;
-                g_perf_wait_ms = g_perf_scene_gpu_ms = 0.0;
-                g_perf_compositor_gpu_ms = g_perf_frame_ms_max = 0.0;
+                g_perf_frames = g_perf_not_rendered = 0;
+                g_perf_wait_ms = g_perf_frame_ms_max = 0.0;
                 g_perf_draw_total = 0;
             }
         }
+    }
+
+    void vr_submit_set_game_ramp(const void* ramp_data)
+    {
+        const D3DGAMMARAMP* ramp = static_cast<const D3DGAMMARAMP*>(ramp_data);
+        if (!ramp)
+            return;
+        // The best straight line through it (least squares on the mean of
+        // the three channels): brightness and contrast are what the game's
+        // sliders make of a ramp, so a line is all it holds.
+        double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+        for (int i = 0; i < 256; ++i)
+        {
+            const double x = i / 255.0;
+            const double y = (ramp->red[i] + ramp->green[i] + ramp->blue[i]) /
+                             (3.0 * 65535.0);
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+        }
+        const double n = 256.0;
+        const double var = sxx - sx * sx / n;
+        if (!(var > 1e-9))
+            return;
+        const double c = (sxy - sx * sy / n) / var;
+        const double k = (sy - c * sx) / n;
+        if (!std::isfinite(c) || !std::isfinite(k) || c <= 0.05)
+            return;
+        const bool changed = !g_ramp_seen || fabs(c - g_ramp_c) > 0.01 ||
+                             fabs(k - g_ramp_k) > 0.005;
+        g_ramp_c = (float)c;
+        g_ramp_k = (float)k;
+        g_ramp_seen = true;
+        if (changed)
+            log("picture: the game set its gamma ramp -- contrast %.2f, "
+                "offset %+.3f%s", c, k, config().picture_follow_game
+                ? "; applied to the headset"
+                : " (ignored: picture_follow_game = 0)");
     }
 
     void vr_submit_notice(const wchar_t* title, const wchar_t* body)
@@ -4417,22 +5092,24 @@ namespace trlvr
             return;
 
         log_install_crash_handler();
-        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
-        LARGE_INTEGER before{}, after{};
-        QueryPerformanceCounter(&before);
-        log_set_activity("IVRCompositor::WaitGetPoses");
-        const bool posed = g_comp->WaitGetPoses(poses,
-            vr::k_unMaxTrackedDeviceCount, nullptr, 0) ==
-            vr::VRCompositorError_None;
-        log_set_activity(nullptr);
-        QueryPerformanceCounter(&after);
-        if (posed)
+        // A frame the submit path did not end (no back buffer, an early
+        // return) is ended empty before the next one is begun.
+        if (xr_frame_begun())
         {
-            vr_set_render_poses(poses, vr::k_unMaxTrackedDeviceCount);
-            log_set_activity("IVRCompositor::GetFrameTiming");
-            perf_frame(before, after);
-            log_set_activity(nullptr);
+            g_vr->LockSubmissionQueue();
+            xr_frame_end(nullptr, nullptr);
+            g_vr->UnlockSubmissionQueue();
         }
+
+        XrFrame frame{};
+        if (!xr_frame_wait(&frame))
+            return;
+        LARGE_INTEGER after{};
+        QueryPerformanceCounter(&after);
+        if (frame.eyes_valid)
+            vr_set_eye_views(frame.eyes);
+        vr_set_render_poses(frame.poses, kPoseCount);
+        perf_frame(after);
     }
 
     void vr_submit_frame(IDirect3DSurface9* back_buffer)
@@ -4447,11 +5124,13 @@ namespace trlvr
         // Mono: one image, both eyes, no copy.
         if (!config().stereo)
         {
+            draw_settings_panel(back_buffer, 1);
+            draw_picture_adjust(back_buffer);
             const bool ok = submit_pair(back_buffer, back_buffer);
 
             if (!ok)
             {
-                if (g_failures++ == 0)
+                if (!g_no_frame && g_failures++ == 0)
                     log("submit: the compositor would not take the frame -- reporting once");
                 return;
             }
@@ -4487,18 +5166,23 @@ namespace trlvr
             draw_finger_debug(back_buffer);
             draw_tp_sliders(back_buffer);
             draw_pluck_ring(back_buffer);
+            draw_rear_debug(back_buffer);
             draw_comfort_vignette(back_buffer, camera_comfort_vignette());
             draw_aim_crosshair(back_buffer);
+            // The settings overlay, over the game and the mod's own drawing.
+            draw_settings_panel(back_buffer, 2);
             // Nothing flips the eye on this path, so anything that misses the
             // per-pass substitution would otherwise keep whichever eye happened
             // to be current when the mode started. Centre is the honest answer
             // for a draw with no eye of its own.
             vr_set_current_eye(EyeCenter);
-        
+            // Last, so it covers the game, its HUD and the mod's own drawing.
+            draw_picture_adjust(back_buffer);
+
             IDirect3DSurface9* submitted = resolved_back_buffer(back_buffer);
             if (!submitted || !submit_side_by_side(submitted))
             {
-                if (g_failures++ == 0)
+                if (!g_no_frame && g_failures++ == 0)
                     log("submit: the compositor would not take the side-by-side "
                         "frame -- reporting once");
                 return;
@@ -4515,6 +5199,8 @@ namespace trlvr
         // was being drawn. Keep it, so the other eye still has something to
         // show while it waits its turn.
         const int drawn = (vr_current_eye() == EyeRight) ? 1 : 0;
+        draw_settings_panel(back_buffer, 1, drawn);
+        draw_picture_adjust(back_buffer);
         HRESULT hr = g_device->StretchRect(back_buffer, nullptr,
                                            g_eye[drawn], nullptr, D3DTEXF_NONE);
         if (FAILED(hr))
@@ -4549,7 +5235,7 @@ namespace trlvr
 
         if (!ok)
         {
-            if (g_failures++ == 0)
+            if (!g_no_frame && g_failures++ == 0)
                 log("submit: the compositor would not take the frame -- reporting once");
             return;
         }

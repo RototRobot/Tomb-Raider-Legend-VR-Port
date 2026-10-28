@@ -2,12 +2,15 @@
 #include "gpu_profile.h"
 #include "../vr/perf_cpu.h"
 #include "window.h"
+#include "overlay.h"
 #include "../vr/vr_session.h"
 #include "../vr/vr_submit.h"
 #include "../vr/tune.h"
 #include "../vr/vr_input.h"
 #include "../vr/input_labels.h"
 #include "../vr/camera_head.h"
+#include "../vr/menu_watermark.h"
+#include "../vr/tr7_menu_hook.h"
 
 #include "../common/config.h"
 #include "../common/log.h"
@@ -57,6 +60,11 @@ namespace trlvr
             input_labels_update();
         }
 
+        // The version / runtime line on the main menu (game font, queued
+        // for the next frame's flush).
+        menu_watermark_frame();
+        // TR7-Menu-Hook actions asked for in the settings overlay.
+        tr7_menu_hook_frame();
         gpu_profile_mark("mod: VR submit (resolve, overlays, hands)");
         if (vr_submit_ready())
         {
@@ -75,6 +83,10 @@ namespace trlvr
 
         else
             gpu_profile_frame_end();
+
+        // After the frame has gone to the headset, so the settings overlay
+        // is on the desktop window only.
+        overlay_frame(_chain);
 
         const HRESULT hr = _chain->Present(pSourceRect, pDestRect, hDestWindowOverride, pDirtyRegion, dwFlags);
         perf_cpu_present_end();

@@ -52,14 +52,11 @@ rem original is never touched, so Steam's integrity check has nothing to undo.
 if exist "!ROOT!dist\trlvr_launcher.exe" (
     copy /y "!ROOT!dist\trlvr_launcher.exe" "!GAME!\trlvr_launcher.exe" >nul
 
-rem The controller mapping. Named trlvr_actions.json beside the game so the
-rem bindings files it names sit next to it -- SteamVR resolves those relative
-rem to the manifest. Anyone can rebind these in SteamVR s own bindings UI
-rem without touching the mod.
-for %%F in (actions.json bindings_hpmotioncontroller.json bindings_holographic_controller.json bindings_oculus_touch.json bindings_knuckles.json) do (
-    if exist "!ROOT!input\%%F" copy /y "!ROOT!input\%%F" "!GAME!\%%F" >nul
-)
-if exist "!GAME!\actions.json" move /y "!GAME!\actions.json" "!GAME!\trlvr_actions.json" >nul
+rem OpenVR (the fallback backend, 1.1.0): the SteamVR action manifest and
+rem its bindings sit beside the game -- SteamVR resolves the bindings files
+rem relative to the manifest. OpenXR's bindings are built into d3d9.dll.
+if exist "!ROOT!input\actions.json" copy /y "!ROOT!input\actions.json" "!GAME!\trlvr_actions.json" >nul
+for %%F in ("!ROOT!input\bindings_*.json") do copy /y "%%~F" "!GAME!\%%~nxF" >nul
 
 rem The XInput proxy stopped shipping when the controllers moved to keyboard
 rem and mouse. Earlier installs left one here -- remove it, but only if it is
@@ -73,13 +70,10 @@ if exist "!GAME!\xinput9_1_0.dll" (
     echo WARNING: trlvr_launcher.exe not built; the game stays limited to 2 GB.
 )
 
-rem OpenVR is loaded by name at runtime, so it has to sit beside the game.
-rem Without it the mod logs why and the game still runs, just flat.
-if exist "!ROOT!third_party\openvr\bin\win32\openvr_api.dll" (
-    copy /y "!ROOT!third_party\openvr\bin\win32\openvr_api.dll" "!GAME!\openvr_api.dll" >nul
-) else (
-    echo WARNING: openvr_api.dll ^(win32^) not found; VR will stay disabled.
-)
+rem Both VR runtimes' loaders sit beside the game (1.1.0): openxr_loader.dll
+rem (OpenXR, the default; delete it to fall back) and openvr_api.dll.
+copy /y "!ROOT!third_party\openxr\bin\win32\openxr_loader.dll" "!GAME!\openxr_loader.dll" >nul
+copy /y "!ROOT!third_party\openvr\bin\win32\openvr_api.dll" "!GAME!\openvr_api.dll" >nul
 
 if /i "%~1"=="dxvk" (
     rem Our fork first -- it is the one with Direct3DCreateVR9, which the VR
@@ -105,7 +99,8 @@ echo Installed into:
 echo   !GAME!
 echo.
 echo   d3d9.dll          the proxy
-echo   openvr_api.dll    OpenVR runtime interface
+echo   openxr_loader.dll OpenXR ^(the default; delete it to use OpenVR^)
+echo   openvr_api.dll    OpenVR / SteamVR ^(the fallback^)
 echo   trlvr_launcher.exe  starts the game with a 4 GB address space
 echo.
 echo Steam ^> Properties ^> Launch Options:
@@ -121,6 +116,7 @@ exit /b 0
 del /q "!GAME!\d3d9.dll" 2>nul
 del /q "!GAME!\d3d9_dxvk.dll" 2>nul
 del /q "!GAME!\openvr_api.dll" 2>nul
+del /q "!GAME!\openxr_loader.dll" 2>nul
 del /q "!GAME!\trlvr_launcher.exe" 2>nul
 if exist "!GAME!\xinput9_1_0.dll" (
     findstr /m /c:"/actions/gameplay" "!GAME!\xinput9_1_0.dll" >nul 2>&1

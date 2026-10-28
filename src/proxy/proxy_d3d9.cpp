@@ -107,9 +107,9 @@ namespace trlvr
                                     D3DPRESENT_PARAMETERS* pPresentationParameters,
                                     IDirect3DDevice9** ppReturnedDeviceInterface)
     {
-        // Before the device, not after: the headset's eye shape decides what
-        // size back buffer to ask for, and that has to be known now.
-        vr_init();
+        // The headset's eye shape decides what size back buffer to ask for,
+        // and that has to be known before the device exists. The session was
+        // brought up in Direct3DCreate9 (dllmain.cpp), ahead of the backend.
 
         // Install the engine hooks once, before the game draws anything.
         static bool engine_init_done = false;
@@ -165,8 +165,8 @@ namespace trlvr
                 pPresentationParameters->FullScreen_RefreshRateInHz = 0;
             }
 
-            // SteamVR's recommended size already includes its global and
-            // per-application resolution setting. Ask once before device creation;
+            // The runtime's recommended size already includes its resolution
+            // setting. Ask once before device creation;
             // changing it therefore takes effect the next time the game starts.
             bool sized_from_headset = false;
             if (vr_ready())
@@ -175,7 +175,7 @@ namespace trlvr
                 vr_render_target_size(&rw, &rh);
                 if (rw && rh)
                 {
-                    log("  back buffer %ux%u per eye from SteamVR's recommended render size",
+                    log("  back buffer %ux%u per eye from the runtime's recommended render size",
                         rw, rh);
                     pPresentationParameters->BackBufferWidth = rw & ~1u;
                     pPresentationParameters->BackBufferHeight = rh & ~1u;

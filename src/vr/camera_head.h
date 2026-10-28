@@ -44,11 +44,20 @@ namespace trlvr
     // called every frame keeps it up. For the radial gear menu.
     void camera_show_retail_gear_cross();
     // The chosen view: first_person in trlvr.ini at start, switched live
-    // (user request 2026-10-06) by camera_toggle_view -- right stick long
-    // press with immersive controls, or \ on the keyboard. First person is
-    // only *active* in gameplay; this is what the player picked.
+    // (user request 2026-10-06) by camera_toggle_view -- the right stick's
+    // long press with immersive controls, or \ on the keyboard. First person is only
+    // *active* in gameplay; this
+    // is what the player picked.
     bool camera_view_first_person();
     void camera_toggle_view(const char* why);
+    // A view switch is still gliding (or about to become first person).
+    bool camera_view_tween_active();
+    // Third person: that controller hand is on Lara's body right now (its
+    // trigger and grip then belong to the touch, not the game).
+    bool camera_hand_touching_lara(bool left);
+    // Each hand's grab this frame, for the third-person soft-part hold: the
+    // grip button, or with [vr] god_grab_pose the hand's pinch / fist.
+    void camera_set_hand_grips(bool left, bool right);
     // The third-person preset in use (0 classic, 1 shoulder, 2 board):
     // third_person_mode at start; with third_person_mode = all the view
     // switch steps through every preset and first person in turn.
@@ -66,9 +75,17 @@ namespace trlvr
     bool camera_tp_view_available();
     float camera_tp_scale();
     float camera_tp_zoom();
-    void camera_set_tp_view(float scale, float zoom, bool save);
+    // Sideways seat offset, metres at Lara's size (+ right, - left).
+    float camera_tp_side();
+    void camera_set_tp_view(float scale, float zoom, float side, bool save);
+    // The current preset's defaults (the palm sliders' notches).
+    void camera_tp_defaults(float* scale, float* zoom, float* side);
     // How much a drawn third-person hand's palm faces up (-2 unknown).
     float camera_palm_up(int hand);
+    // A third-person hand's index fingertip as drawn (Lara's bone, or the
+    // index's last joint when the fingers are not posed), head frame, game
+    // units. False in first person or when that hand was not drawn lately.
+    bool camera_hand_index_tip_head(bool left, float out[3]);
     // Main camera to Lara after the head pose, world units (world-marker
     // stereo depth).
     float camera_marker_depth();
@@ -111,6 +128,10 @@ namespace trlvr
     // pick Lara up, 2 held with floor below (landing spot), 3 held with no
     // floor found (release does nothing).
     int camera_board_pluck_ring(float points[24][3]);
+    // body_rear_debug wireframes: head-space segments (x0 y0 z0 x1 y1 z1)
+    // and a colour each; returns the count (0 when off or stale).
+    int camera_rear_debug_lines(float (*seg)[6], unsigned* colours,
+                                int max_segments);
     // A cutscene is playing (retail cinematic or resident cinematic).
     bool camera_cinematic_playing();
 

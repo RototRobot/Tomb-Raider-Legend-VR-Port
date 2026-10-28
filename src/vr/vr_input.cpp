@@ -39,19 +39,22 @@
 #include "vr_input.h"
 #include "lang.h"
 #include "../proxy/window.h"
+#include "../proxy/overlay.h"
+#include "menu_panel.h"
 
 #include "camera_head.h"
 #include "hud_capture.h"
 #include "ui_space.h"
 #include "tune.h"
 #include "vr_gesture.h"
+#include "finger_input.h"
 #include "vr_session.h"
 #include "vr_submit.h"
 
 #include "../common/config.h"
 #include "../common/log.h"
 
-#include <openvr.h>
+#include "xr_runtime.h"
 
 #include <cmath>
 #include <cstdint>
@@ -59,6 +62,7 @@
 #include <cstring>
 #include <cwchar>
 #include <windows.h>
+#include <xinput.h>     // XINPUT_GAMEPAD_* bits for the overlay's pad only
 
 namespace trlvr
 {
@@ -71,7 +75,7 @@ namespace trlvr
             const char*          path;
             Output               out;
             WORD                 vk;
-            vr::VRActionHandle_t handle;
+            int                  handle;   // logical action id + 1
             bool                 was;      // for the edge-triggered recentre
         };
 
@@ -106,17 +110,24 @@ namespace trlvr
             GameGearTuning, GamePda
         };
 
-        vr::IVRInput*  g_input = nullptr;
-        vr::IVRSystem* g_system = nullptr;
+        // Logical actions: one per g_game entry, then the held flick. A
+        // handle is the id plus one, so zero still means "none".
+        const int kLogicalFlick = kGameButtons;
+        // The left stick held in, as it is: the radial gear menu is open
+        // for as long as it is.
+        const int kLogicalStickHeld = kGameButtons + 1;
+        const int kLogicalCount = kGameButtons + 2;
+        const int kMoveHandle = kLogicalCount + 1;
+        const int kLookHandle = kLogicalCount + 2;
+        bool g_logical[kLogicalCount]{};
 
-        vr::VRActionSetHandle_t g_set_game = vr::k_ulInvalidActionSetHandle;
-        vr::VRActionHandle_t g_move = 0;
-        vr::VRActionHandle_t g_look = 0;
+        int g_move = kMoveHandle;
+        int g_look = kLookHandle;
         // Y held as a plain button (beside its click/long-press bindings):
         // the board-mode finger flick. The long-press "light" output only
         // pulses, so it could not hold the flick loaded (test 2026-10-03).
-        vr::VRActionHandle_t g_flick_action = 0;
-        vr::VRActionHandle_t g_handhold_haptic[2] = { 0, 0 };
+        int g_flick_action = kLogicalFlick + 1;
+        bool g_handhold_haptic[2] = { true, true };
         // Grip buttons as last sampled by vr_input_update (left, right).
         bool g_grip_held[2] = { false, false };
         // Snap turning: the right stick must return near centre between steps.
@@ -126,11 +137,8 @@ namespace trlvr
         ULONGLONG g_physical_stand_at = 0;
         // Physical triggers (left, right), as last sampled in gameplay.
         bool g_trigger_held[2] = { false, false };
-        // /actions/gameplay/in/hand_left|right, bound to /pose/grip.
-        vr::VRActionHandle_t g_hand_pose[2] = { 0, 0 };
         // SteamVR skeletal input (finger tracking, 2026-10-10): per hand,
         // the finger curls and splays read after each UpdateActionState.
-        vr::VRActionHandle_t g_skeleton[2] = { 0, 0 };
         struct FingerState
         {
             bool valid = false;
@@ -149,17 +157,27 @@ namespace trlvr
             float palm_sign = 0.0f;    // which side of the knuckles is palm
             bool reported_on = false;
             bool reported_off = false;
+            FingerCurls eased;         // finger_input's eased curls
         };
         FingerState g_fingers[2];
+        // God mode: each hand's grab from its finger pose (finger_grabbing;
+        // pinch or fist), physical hands (left, right). False while the
+        // finger data is off (vr_input_hand_grab falls back to the grip).
+        bool g_pose_grab[2] = { false, false };
+        // God mode's claim on each physical hand (as Underworld's
+        // update_claims): a grip / trigger press made while the hand is the
+        // mod's (near or on table-Lara) stays withheld from the game until
+        // it is released, wherever the hand goes. g_god_claim_was: last
+        // frame's claim, which keeps that hand off the gear cross.
+        bool g_claim_grip[2] = { false, false };
+        bool g_claim_trig[2] = { false, false };
+        bool g_god_claim_was[2] = { false, false };
         // finger_debug: SteamVR's bone positions (model space, metres,
         // without the controller) and its animation-side curls.
         float g_finger_bones[2][31][3];
         bool g_finger_bones_valid[2] = { false, false };
         ULONGLONG g_finger_debug_logged = 0;
         unsigned g_grip_samples[2] = { 0, 0 };
-        vr::TrackedDeviceIndex_t g_grip_device[2] = {
-            vr::k_unTrackedDeviceIndexInvalid,
-            vr::k_unTrackedDeviceIndexInvalid };
         bool g_grip_missing_reported[2] = { false, false };
         bool g_handhold_haptic_error_reported[2] = { false, false };
 
@@ -289,7 +307,6 @@ namespace trlvr
         int      g_last_index = -2;
         short    g_last_screen = -2;
         unsigned g_frames_in_set = 0;
-        bool     g_reported_bindings = false;
         bool     g_first_output = false;
         bool     g_light_grip_was = false;
         // Third-person immersive: a left grip that toggled the chest light
@@ -549,8 +566,10 @@ namespace trlvr
         // Hover and grab on the third-person gear cross. A grip press on a
         // hovered icon pulses that item's game key for 120 ms and claims
         // the grip (no grapple / lock-on key) until it is released.
+        // blocked: hands that are god mode's (near or on table-Lara, last
+        // frame's claim): they neither hover nor grab an icon.
         void update_gear_cross(bool active, bool left_grip, bool right_grip,
-                               ULONGLONG now)
+                               ULONGLONG now, const bool blocked[2])
         {
             const bool grips[2] = { left_grip, right_grip };
             gear_cross_load();
@@ -631,6 +650,13 @@ namespace trlvr
                         gear_cross_save();
                     }
                     nearest = 0.0f;
+                    continue;
+                }
+                // A hand at table-Lara (god mode): hers, not the cross's.
+                if (blocked && blocked[hand])
+                {
+                    g_gear_hover[hand] = -1;
+                    g_gear_handle_hover[hand] = -1;
                     continue;
                 }
                 float centre[3];
@@ -766,9 +792,6 @@ namespace trlvr
         ULONGLONG g_profile_next_check = 0;
         // The A press that skipped the last calibration step is not a jump.
         bool     g_cal_jump_hold = false;
-        // View switch: right stick long press (the binoculars action, free
-        // in both immersive views) and the \ key.
-        bool     g_view_button_was = false;
         // A recentre a moment after the view switch (user 2026-10-06), once
         // the new camera has settled.
         ULONGLONG g_view_recenter_at = 0;
@@ -780,7 +803,7 @@ namespace trlvr
         const uintptr_t kPlayerInvEndCombatMode = 0x005AC4B0;
         const uintptr_t kPlayerCombatAllowed = 0x005A52D0;
 
-        bool digital(vr::VRActionHandle_t h);
+        bool digital(int h);
         bool movie_active();
 
         // Weapon selection (playerInvProcess 0x005B1DA4..0x005B1DDA):
@@ -1973,15 +1996,9 @@ namespace trlvr
             return (v < 0.0f ? -1.0f : 1.0f) * s * s;
         }
 
-        bool digital(vr::VRActionHandle_t h)
+        bool digital(int h)
         {
-            if (!h)
-                return false;
-            vr::InputDigitalActionData_t d{};
-            return g_input->GetDigitalActionData(h, &d, sizeof(d),
-                                                 vr::k_ulInvalidInputValueHandle)
-                       == vr::VRInputError_None
-                && d.bActive && d.bState;
+            return h > 0 && h <= kLogicalCount && g_logical[h - 1];
         }
 
         // A real gamepad's right stick, for first-person turning when the
@@ -2054,78 +2071,348 @@ namespace trlvr
             return 0.0f;
         }
 
-        void analog(vr::VRActionHandle_t h, float* x, float* y)
+        void analog(int h, float* x, float* y)
         {
             *x = *y = 0.0f;
-            if (!h)
-                return;
-            vr::InputAnalogActionData_t a{};
-            if (g_input->GetAnalogActionData(h, &a, sizeof(a),
-                                             vr::k_ulInvalidInputValueHandle)
-                    != vr::VRInputError_None || !a.bActive)
-                return;
-            *x = a.x;
-            *y = a.y;
+            if (h == kMoveHandle)
+                xr_input_stick(0, x, y);
+            else if (h == kLookHandle)
+                xr_input_stick(1, x, y);
         }
 
-        // Which bindings file SteamVR reaches for is decided by the controller
-        // type, and guessing it wrong fails silently -- the G2's controllers
-        // are "hpmotioncontroller", not the older "holographic_controller",
-        // and nothing reports the mismatch. So say.
+        // SteamVR's bindings used to turn one button into a click, a double
+        // click and a long press. OpenXR only reports the button, so that
+        // lives here, with the same 0.65 s long press. Each result is a
+        // short pulse on its action, as SteamVR's was.
+        const ULONGLONG kLongPressMs = 650;
+        const ULONGLONG kDoubleClickMs = 350;
+        const ULONGLONG kPulseMs = 120;
+
+        struct ComplexButton
+        {
+            bool down = false;
+            bool long_fired = false;
+            bool click_pending = false;
+            ULONGLONG pressed_at = 0;
+            ULONGLONG released_at = 0;
+        };
+        // Per hand: stick click, and the button that carries grenade / light.
+        ComplexButton g_complex_stick[2];
+        ComplexButton g_complex_face;
+        ULONGLONG g_pulse_until[kLogicalCount]{};
+        bool g_trigger_down[2] = { false, false };
+        bool g_squeeze_down[2] = { false, false };
+        // The right stick's long press (immersive): switch the view.
+        bool g_view_switch_request = false;
+
+        // The settings overlay (proxy/overlay.cpp) from the controllers:
+        // the menu button's hold-to-open (menu_panel.h), and, once the
+        // overlay has closed, the game kept from the controllers until
+        // every button is let go (the press that closed it is not the
+        // game's).
+        MenuHold g_menu_hold;
+        bool g_overlay_until_release = false;
+        // Both sticks clicked in together (1.1.0): held kBothSticksMs it opens
+        // or closes the settings overlay where the left menu button is not
+        // the game's (SteamVR keeps it on the G2 / WMR; Index has none).
+        // Until both are let go afterwards the sticks are nothing else -- no
+        // pause, view switch, weapon click or radial menu.
+        const ULONGLONG kBothSticksMs = 600;
+        ULONGLONG g_both_sticks_since = 0;
+        bool g_both_sticks_latched = false;
+        bool g_overlay_was_open = false;
+
+        void pulse(int logical, ULONGLONG now)
+        {
+            if (logical >= 0 && logical < kLogicalCount)
+                g_pulse_until[logical] = now + kPulseMs;
+        }
+
+        // single / twice / held: logical ids, -1 for none.
+        void complex_update(ComplexButton& c, bool down, ULONGLONG now,
+                            int single, int twice, int held)
+        {
+            if (down && !c.down)
+            {
+                c.pressed_at = now;
+                c.long_fired = false;
+            }
+            if (down && held >= 0 && !c.long_fired &&
+                now - c.pressed_at >= kLongPressMs)
+            {
+                c.long_fired = true;
+                c.click_pending = false;
+                pulse(held, now);
+            }
+            if (!down && c.down && !c.long_fired)
+            {
+                if (twice < 0)
+                    pulse(single, now);
+                else if (c.click_pending &&
+                         now - c.released_at <= kDoubleClickMs)
+                {
+                    c.click_pending = false;
+                    pulse(twice, now);
+                }
+                else
+                {
+                    // A second click too late to be a double: the first one
+                    // was a click of its own.
+                    if (c.click_pending)
+                        pulse(single, now);
+                    c.click_pending = true;
+                    c.released_at = now;
+                }
+            }
+            // A click waits out the double-click window before it counts.
+            if (!down && c.click_pending &&
+                now - c.released_at > kDoubleClickMs)
+            {
+                c.click_pending = false;
+                pulse(single, now);
+            }
+            c.down = down;
+        }
+
+        // Analogue to button, with a gap between press and release so a
+        // finger resting at the threshold does not chatter.
+        bool threshold(bool was, float value, float press, float release)
+        {
+            return was ? value > release : value >= press;
+        }
+
+        // The physical inputs of this frame as the game's actions. This is
+        // the table the SteamVR bindings_*.json files used to hold.
+        void update_logical_actions()
+        {
+            const ULONGLONG now = GetTickCount64();
+            bool held[kLogicalCount]{};
+            if (!xr_input_active())
+            {
+                // Not focused (headset off, system menu open): nothing is
+                // held and no half-finished click survives.
+                for (int i = 0; i < kLogicalCount; ++i)
+                {
+                    g_logical[i] = false;
+                    g_pulse_until[i] = 0;
+                }
+                g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
+                g_complex_face = ComplexButton{};
+                g_trigger_down[0] = g_trigger_down[1] = false;
+                g_squeeze_down[0] = g_squeeze_down[1] = false;
+                g_menu_hold = MenuHold{};
+                return;
+            }
+
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                g_trigger_down[hand] = threshold(g_trigger_down[hand],
+                    xr_input_trigger(hand), 0.30f, 0.20f);
+                g_squeeze_down[hand] = threshold(g_squeeze_down[hand],
+                    xr_input_squeeze(hand), 0.50f, 0.35f);
+            }
+            held[GameInteract] = g_trigger_down[0];
+            held[GameFire] = g_trigger_down[1];
+            held[GameGrapple] = g_squeeze_down[0];
+            held[GameLockOn] = g_squeeze_down[1];
+
+            const XrControllerKind left = xr_input_controller(0);
+            const XrControllerKind right = xr_input_controller(1);
+            const bool index = left == XrControllerIndex ||
+                               right == XrControllerIndex;
+
+            // Left stick (user 2026-10-14): a single click does nothing,
+            // a double click recentres, and holding it in opens the radial
+            // gear menu, picked by pushing the stick while it is held. A
+            // hold that pushed the stick is not a click afterwards. Pause
+            // is the menu button where the controller has one (Touch,
+            // Reverb G2); where it has none it stays the long press, unless
+            // the stick was pushed for the radial menu meanwhile.
+            // Not the Reverb G2: SteamVR keeps the WMR menu button for its
+            // dashboard and never passes it on (1.1.0 test, 2026-10-27: no
+            // "menu tapped" in the log, no way to pause) -- pause stays the
+            // left stick's long press there, as in 1.0.0.
+            const bool left_menu = left == XrControllerTouch;
+            bool left_stick = xr_input_button(0, XrButtonStick);
+            {
+                const bool right_click = xr_input_button(1, XrButtonStick);
+                const bool both = left_stick && right_click;
+                if (!left_stick && !right_click)
+                {
+                    g_both_sticks_since = 0;
+                    g_both_sticks_latched = false;
+                }
+                else if (both && !left_menu && !g_both_sticks_latched)
+                {
+                    if (!g_both_sticks_since)
+                        g_both_sticks_since = now;
+                    else if (now - g_both_sticks_since >= kBothSticksMs)
+                    {
+                        g_both_sticks_latched = true;
+                        const bool open = !overlay_open();
+                        if (overlay_request_open(open))
+                        {
+                            log("controls: both sticks held %.1f s: settings "
+                                "overlay %s", kBothSticksMs / 1000.0,
+                                open ? "opened" : "closed");
+                            xr_input_haptic(0, 0.05f, 160.0f, 0.4f);
+                            xr_input_haptic(1, 0.05f, 160.0f, 0.4f);
+                        }
+                    }
+                }
+                if (g_both_sticks_latched)
+                {
+                    g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
+                    left_stick = false;
+                }
+            }
+            {
+                float sx = 0.0f, sy = 0.0f;
+                xr_input_stick(0, &sx, &sy);
+                if (g_complex_stick[0].down && sx * sx + sy * sy > 0.25f)
+                    g_complex_stick[0].long_fired = true;
+            }
+            complex_update(g_complex_stick[0], left_stick, now, -1,
+                           GameRecentre, left_menu ? -1 : GamePause);
+            // Not while both sticks are in (the overlay gesture).
+            held[kLogicalStickHeld] = left_stick &&
+                !(g_both_sticks_since && xr_input_button(1, XrButtonStick));
+            if (left_menu)
+            {
+                // [vr] overlay_vr_open_hold (Underworld's start hold): with
+                // the settings overlay closed the menu button is kept from
+                // the game while down. Let go before the hold time it is a
+                // tap, a short press of pause; held to the hold time the
+                // overlay opens and the game never sees that press (it
+                // stays masked from the overlay too until let go, by
+                // overlay.cpp poll_pad). 0 = straight to the game. Index /
+                // WMR pause is the left stick's long press (above), left
+                // alone for now: there Insert still opens the overlay.
+                bool to_game = false;
+                const MenuHoldEvent event = menu_hold_update(g_menu_hold,
+                    xr_input_button(0, XrButtonMenu), now,
+                    config().overlay_vr_open_hold,
+                    overlay_open() || g_overlay_until_release, &to_game);
+                held[GamePause] = to_game;
+                if (event == MenuHoldTap)
+                {
+                    pulse(GamePause, now);
+                    log("controls: menu tapped: pause");
+                }
+                else if (event == MenuHoldOpen)
+                {
+                    release_all();
+                    if (overlay_request_open(true))
+                    {
+                        log("controls: menu held %.1f s: settings overlay "
+                            "opened", (double)config().overlay_vr_open_hold);
+                        xr_input_haptic(0, 0.05f, 160.0f, 0.4f);
+                    }
+                    else
+                        log("controls: menu held, but the settings overlay "
+                            "is not up yet");
+                }
+            }
+            // Right stick (1.0.0 layout): click weapon switch, double
+            // click PDA, long press binoculars -- in immersive play the long
+            // press switches the view instead (binoculars are on the gear
+            // cross). The Index has trackpads for the long-press actions.
+            if (config().immersive_controls)
+            {
+                ComplexButton& s = g_complex_stick[1];
+                const bool r3 = xr_input_button(1, XrButtonStick) &&
+                                !g_both_sticks_latched;
+                if (s.down && !s.long_fired && r3 &&
+                    now - s.pressed_at >= kLongPressMs)
+                {
+                    s.long_fired = true;
+                    g_view_switch_request = true;
+                }
+                complex_update(s, r3, now, GameWeapon, GamePda, -1);
+            }
+            else
+                complex_update(g_complex_stick[1],
+                    xr_input_button(1, XrButtonStick) && !g_both_sticks_latched,
+                    now, GameWeapon, GamePda, index ? -1 : GameBinoculars);
+
+            bool face = false;      // the grenade / light / flick button
+            if (left == XrControllerWmr || right == XrControllerWmr)
+            {
+                // No face buttons: trackpad presses and the menu buttons.
+                held[GameJump] = xr_input_button(1, XrButtonTrackpad);
+                held[GameDive] = xr_input_button(0, XrButtonTrackpad);
+                held[GameAim] = xr_input_button(0, XrButtonMenu);
+                face = xr_input_button(1, XrButtonMenu);
+            }
+            else
+            {
+                // Touch, Reverb G2 and Index: A / B on the right, X / Y (or
+                // the left A / B) on the left.
+                held[GameJump] = xr_input_button(1, XrButtonPrimary);
+                held[GameDive] = xr_input_button(1, XrButtonSecondary);
+                held[GameAim] = xr_input_button(0, XrButtonPrimary);
+                face = xr_input_button(0, XrButtonSecondary);
+                if (index)
+                {
+                    held[GameMedkit] = xr_input_button(0, XrButtonTrackpad);
+                    held[GameBinoculars] = xr_input_button(1, XrButtonTrackpad);
+                }
+            }
+            held[kLogicalFlick] = face;
+            complex_update(g_complex_face, face, now, GameGrenade, -1,
+                           GameLight);
+            // The settings menu has the controllers: no click counted there
+            // fires into the game later (a view switch, a grenade).
+            if (overlay_open() || g_overlay_until_release)
+            {
+                g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
+                g_complex_face = ComplexButton{};
+                g_view_switch_request = false;
+                for (int i = 0; i < kLogicalCount; ++i)
+                    g_pulse_until[i] = 0;
+            }
+
+            for (int i = 0; i < kLogicalCount; ++i)
+                g_logical[i] = held[i] || now < g_pulse_until[i];
+        }
+
+        const char* controller_type_name(XrControllerKind kind)
+        {
+            switch (kind)
+            {
+            case XrControllerTouch:    return "oculus_touch";
+            case XrControllerIndex:    return "knuckles";
+            case XrControllerWmr:      return "holographic_controller";
+            case XrControllerHpReverb: return "hpmotioncontroller";
+            case XrControllerSimple:   return "simple_controller";
+            default:                   return "";
+            }
+        }
+
+        // Which controller the runtime says each hand is. Decides the button
+        // layout above and the face-button names in the tutorial labels.
+        XrControllerKind g_logged_kind[2] = { XrControllerNone, XrControllerNone };
+
         void log_controllers()
         {
-            if (!g_system)
-                return;
-            int found = 0;
-            for (vr::TrackedDeviceIndex_t i = 0; i < vr::k_unMaxTrackedDeviceCount; ++i)
+            for (int hand = 0; hand < 2; ++hand)
             {
-                if (g_system->GetTrackedDeviceClass(i) != vr::TrackedDeviceClass_Controller)
+                const XrControllerKind kind = xr_input_controller(hand);
+                if (kind == g_logged_kind[hand])
                     continue;
-                ++found;
-                char type[128]{};
-                vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-                g_system->GetStringTrackedDeviceProperty(
-                    i, vr::Prop_ControllerType_String, type, sizeof(type), &err);
-                const vr::ETrackedControllerRole role =
-                    g_system->GetControllerRoleForTrackedDeviceIndex(i);
-                if (_stricmp(type, "knuckles") == 0)
+                g_logged_kind[hand] = kind;
+                if (kind == XrControllerIndex)
                     g_controller_style = VrControllerIndex;
-                else if (_stricmp(type, "holographic_controller") == 0)
+                else if (kind == XrControllerWmr)
                     g_controller_style = VrControllerWmr;
-                const char* hand = role == vr::TrackedControllerRole_LeftHand  ? "left"
-                                 : role == vr::TrackedControllerRole_RightHand ? "right"
-                                 : "unassigned";
-                log("controls: %s hand is a \"%s\" -- SteamVR will use "
-                    "bindings_%s.json", hand, type[0] ? type : "?",
-                    type[0] ? type : "?");
+                else if (kind != XrControllerNone)
+                    g_controller_style = VrControllerTouch;
+                log("controls: %s hand is a \"%s\" (%s)",
+                    hand == 0 ? "left" : "right",
+                    kind == XrControllerNone ? "?" : controller_type_name(kind),
+                    xr_input_profile(hand)[0] ? xr_input_profile(hand)
+                                              : "no controller yet");
             }
-            if (!found)
-                log("controls: no controllers switched on yet -- they are "
-                    "picked up whenever they appear");
-        }
-
-        // An action with a handle but no binding reports inactive for ever,
-        // which looks exactly like a controller that is switched off. Count
-        // them once per set, a moment after the set first goes live.
-        void report_bound()
-        {
-            int bound = 0;
-            for (int i = 0; i < kGameButtons; ++i)
-            {
-                vr::InputDigitalActionData_t d{};
-                if (g_game[i].handle &&
-                    g_input->GetDigitalActionData(g_game[i].handle, &d, sizeof(d),
-                                                  vr::k_ulInvalidInputValueHandle)
-                        == vr::VRInputError_None && d.bActive)
-                    ++bound;
-            }
-            log("controls: %d of %d controller actions are bound", bound,
-                kGameButtons);
-            if (bound == 0)
-                log("controls:   nothing is bound -- SteamVR did not match a "
-                    "bindings file to these controllers. The lines above say "
-                    "which type it is looking for; SteamVR > Settings > "
-                    "Controllers > Manage Controller Bindings fixes it by hand.");
         }
 
         bool connect()
@@ -2134,86 +2421,17 @@ namespace trlvr
                 return true;
             if (g_given_up || !vr_ready())
                 return false;
-
-            g_input  = (vr::IVRInput*)vr_get_interface(vr::IVRInput_Version);
-            g_system = (vr::IVRSystem*)vr_get_interface(vr::IVRSystem_Version);
-            if (!g_input)
-            {
-                log("controls: no %s -- the controllers will not reach the game",
-                    vr::IVRInput_Version);
-                g_given_up = true;
+            // The actions belong to the OpenXR session, which the submit
+            // path creates with the device.
+            if (!vr_submit_ready())
                 return false;
-            }
 
-            wchar_t wide[MAX_PATH]{};
-            swprintf_s(wide, L"%strlvr_actions.json", exe_dir());
-            char path[MAX_PATH * 3]{};
-            WideCharToMultiByte(CP_UTF8, 0, wide, -1, path, (int)sizeof(path),
-                                nullptr, nullptr);
-
-            const vr::EVRInputError merr = g_input->SetActionManifestPath(path);
-            if (merr != vr::VRInputError_None)
-            {
-                log("controls: SetActionManifestPath(%s) failed, EVRInputError %d",
-                    path, (int)merr);
-                g_given_up = true;
-                return false;
-            }
-
-            if (g_input->GetActionSetHandle("/actions/gameplay", &g_set_game)
-                    != vr::VRInputError_None)
-            {
-                log("controls: the manifest has no gameplay action set");
-                g_given_up = true;
-                return false;
-            }
-
-            struct Named { const char* path; vr::VRActionHandle_t* h; };
-            const Named sticks[] = {
-                { "/actions/gameplay/in/move", &g_move },
-                { "/actions/gameplay/in/look", &g_look },
-                { "/actions/gameplay/in/flick", &g_flick_action },
-            };
-            for (const Named& s : sticks)
-                if (g_input->GetActionHandle(s.path, s.h) != vr::VRInputError_None || !*s.h)
-                    log("controls: action %s did not resolve", s.path);
-            for (Button& b : g_game)
-                if (g_input->GetActionHandle(b.path, &b.handle) != vr::VRInputError_None || !b.handle)
-                    log("controls: action %s did not resolve", b.path);
-            const char* haptic_paths[2] = {
-                "/actions/gameplay/out/haptic_left",
-                "/actions/gameplay/out/haptic_right"
-            };
-            for (int hand = 0; hand < 2; ++hand)
-                if (g_input->GetActionHandle(haptic_paths[hand],
-                        &g_handhold_haptic[hand]) != vr::VRInputError_None ||
-                    !g_handhold_haptic[hand])
-                    log("controls: optional action %s did not resolve",
-                        haptic_paths[hand]);
-            const char* pose_paths[2] = {
-                "/actions/gameplay/in/hand_left",
-                "/actions/gameplay/in/hand_right"
-            };
-            for (int hand = 0; hand < 2; ++hand)
-                if (g_input->GetActionHandle(pose_paths[hand],
-                        &g_hand_pose[hand]) != vr::VRInputError_None ||
-                    !g_hand_pose[hand])
-                    log("controls: optional action %s did not resolve",
-                        pose_paths[hand]);
-            const char* skeleton_paths[2] = {
-                "/actions/gameplay/in/skeleton_left",
-                "/actions/gameplay/in/skeleton_right"
-            };
-            for (int hand = 0; hand < 2; ++hand)
-                if (g_input->GetActionHandle(skeleton_paths[hand],
-                        &g_skeleton[hand]) != vr::VRInputError_None ||
-                    !g_skeleton[hand])
-                    log("controls: optional action %s did not resolve",
-                        skeleton_paths[hand]);
+            for (int i = 0; i < kGameButtons; ++i)
+                g_game[i].handle = i + 1;
             QueryPerformanceFrequency(&g_qpf);
             QueryPerformanceCounter(&g_last);
 
-            log("controls: connected -- %s", path);
+            log("controls: connected -- OpenXR actions");
             if (config().immersive_controls)
                 log("controls: immersive gestures enabled -- chest + left "
                     "grip toggles the personal light; either grip picks "
@@ -2361,129 +2579,70 @@ namespace trlvr
         // controllers, full with hand tracking.
         void read_fingers()
         {
+            // Finger poses from the controller's own sensors (user
+            // 2026-10-14), as SteamVR's estimated skeleton made them for
+            // Touch and Index: OpenXR has no skeleton in its core, but it
+            // does report the trigger and grip values and whether a finger
+            // rests on the trigger or the thumb on the stick, a face button
+            // or the thumb rest. Index: off the trigger it points, resting
+            // on it it is part curled, and the trigger's pull curls it the
+            // rest of the way. Middle, ring and pinky: the grip. Thumb: down
+            // on the controller while it touches anything, up otherwise.
+            // Controllers without touch sensors use the pulls alone. Eased
+            // over 50 ms so a sensor flicking does not snap a finger.
+            // The curls come from finger_input (shared with the Underworld
+            // mod), which also counts a real trigger pull as the finger on
+            // it when the touch sensor drops out at full press.
+            static ULONGLONG last_ms = 0;
+            const ULONGLONG now_ms = GetTickCount64();
+            const float step = last_ms && now_ms - last_ms < 250
+                ? (float)(now_ms - last_ms) / 1000.0f : 1.0f;
+            last_ms = now_ms;
             for (int hand = 0; hand < 2; ++hand)
             {
                 FingerState& f = g_fingers[hand];
-                const bool was = f.valid;
-                f.valid = false;
-                if (!config().finger_tracking || !g_skeleton[hand])
-                    continue;
-                vr::InputSkeletalActionData_t data{};
-                vr::VRSkeletalSummaryData_t summary{};
-                if (g_input->GetSkeletalActionData(g_skeleton[hand], &data,
-                        sizeof(data)) != vr::VRInputError_None ||
-                    !data.bActive ||
-                    g_input->GetSkeletalSummaryData(g_skeleton[hand],
-                        vr::VRSummaryType_FromDevice, &summary) !=
-                        vr::VRInputError_None)
+                f.spread_valid = false;
+                f.thumb_valid = false;
+                g_finger_bones_valid[hand] = false;
+                if (!config().finger_tracking || !xr_input_active() ||
+                    xr_input_controller(hand) == XrControllerNone)
                 {
-                    if (was)
-                        log("fingers: %s hand skeleton lost (active %d) -- "
-                            "switching between controllers and hand "
-                            "tracking, or SteamVR paused the input; the "
-                            "game's own hand pose until it returns",
-                            hand == 0 ? "left" : "right", (int)data.bActive);
-                    else if (!f.reported_off && !f.reported_on &&
-                             g_frames_in_set > 300)
-                    {
-                        f.reported_off = true;
-                        log("fingers: %s hand has no skeleton from SteamVR "
-                            "(active %d) -- the game's own hand pose is "
-                            "kept. A custom SteamVR binding without the "
-                            "\"%s hand fingers\" skeleton causes this.",
-                            hand == 0 ? "left" : "right", (int)data.bActive,
-                            hand == 0 ? "Left" : "Right");
-                    }
+                    f.valid = false;
+                    finger_curls_reset(f.eased);
+                    g_pose_grab[hand] = false;
                     continue;
                 }
-                vr::EVRSkeletalTrackingLevel level =
-                    vr::VRSkeletalTracking_Estimated;
-                g_input->GetSkeletalTrackingLevel(g_skeleton[hand], &level);
-                bool finite = true;
+                const XrControllerKind kind = xr_input_controller(hand);
+                FingerInput in;
+                in.has_sensors = kind == XrControllerTouch ||
+                                 kind == XrControllerIndex;
+                in.trigger = xr_input_trigger(hand);
+                in.grip = xr_input_squeeze(hand);
+                in.touch_trigger = xr_input_button(hand, XrTouchTrigger);
+                in.touch_thumb = xr_input_button(hand, XrTouchThumb);
+                in.thumb_button = xr_input_button(hand, XrButtonPrimary) ||
+                                  xr_input_button(hand, XrButtonSecondary) ||
+                                  xr_input_button(hand, XrButtonStick);
+                // 0.9 is a full curl (a real fist, see pose_fingers).
+                finger_curls_step(f.eased, in, 0.0f, step);
                 for (int i = 0; i < 5; ++i)
-                {
-                    const float c = summary.flFingerCurl[i];
-                    finite = finite && std::isfinite(c);
-                    f.curl[i] = c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c;
-                }
+                    f.curl[i] = f.eased.curl[i];
                 for (int i = 0; i < 4; ++i)
-                {
-                    const float s = summary.flFingerSplay[i];
-                    finite = finite && std::isfinite(s);
-                    f.splay[i] = s < 0.0f ? 0.0f : s > 1.0f ? 1.0f : s;
-                }
-                if (!finite)
-                    continue;
+                    f.splay[i] = f.eased.spread[i];
+                // God mode's grab: a pinch (trigger + thumb down) or a fist
+                // (trigger + grip), from the player's own fingers, with
+                // hysteresis so a flickering trigger does not drop her.
+                g_pose_grab[hand] = finger_grabbing(f.curl, g_pose_grab[hand]);
                 f.valid = true;
-                if (!f.reported_on || f.level != (int)level)
+                f.level = 1;
+                if (!f.reported_on)
                 {
                     f.reported_on = true;
-                    log("fingers: %s hand skeleton active, tracking level "
-                        "%s", hand == 0 ? "left" : "right",
-                        level == vr::VRSkeletalTracking_Full
-                            ? "full (hand tracking)"
-                            : level == vr::VRSkeletalTracking_Partial
-                            ? "partial (controller finger sensors)"
-                            : "estimated (controller buttons)");
+                    log("fingers: %s hand follows the controller's %s",
+                        hand == 0 ? "left" : "right",
+                        in.has_sensors ? "touch sensors, trigger and grip"
+                                : "trigger and grip (no touch sensors)");
                 }
-                f.level = (int)level;
-            }
-            // finger_debug: the skeleton itself, and once a second both
-            // summaries (device = what the fingers use, animation = what
-            // SteamVR's own hand shows).
-            const bool debug = tune_finger_debug();
-            const bool log_now = debug &&
-                GetTickCount64() - g_finger_debug_logged >= 1000;
-            if (log_now)
-                g_finger_debug_logged = GetTickCount64();
-            for (int hand = 0; hand < 2; ++hand)
-            {
-                g_finger_bones_valid[hand] = false;
-                g_fingers[hand].spread_valid = false;
-                g_fingers[hand].thumb_valid = false;
-                vr::VRBoneTransform_t bones[31]{};
-                if (g_fingers[hand].valid && g_skeleton[hand] &&
-                    g_input->GetSkeletalBoneData(g_skeleton[hand],
-                        vr::VRSkeletalTransformSpace_Model,
-                        vr::VRSkeletalMotionRange_WithoutController, bones,
-                        31) == vr::VRInputError_None)
-                {
-                    for (int b = 0; b < 31; ++b)
-                        for (int k = 0; k < 3; ++k)
-                            g_finger_bones[hand][b][k] =
-                                bones[b].position.v[k];
-                    g_finger_bones_valid[hand] = true;
-                    g_fingers[hand].spread_valid = finger_spread_from_bones(
-                        g_finger_bones[hand], g_fingers[hand].spread);
-                    g_fingers[hand].thumb_valid = thumb_from_bones(
-                        g_finger_bones[hand], g_fingers[hand].curl[2],
-                        g_fingers[hand].palm_sign,
-                        g_fingers[hand].thumb);
-                }
-                if (!log_now)
-                    continue;
-                vr::VRSkeletalSummaryData_t anim{};
-                const bool have_anim = g_input->GetSkeletalSummaryData(
-                    g_skeleton[hand], vr::VRSummaryType_FromAnimation,
-                    &anim) == vr::VRInputError_None;
-                const FingerState& f = g_fingers[hand];
-                log("finger debug: %s level %d device %s curl %.2f %.2f %.2f "
-                    "%.2f %.2f splay %.2f %.2f %.2f %.2f | animation %s curl "
-                    "%.2f %.2f %.2f %.2f %.2f | bones %s, spread from the "
-                    "middle %s index %+.0f ring %+.0f pinky %+.0f deg | "
-                    "thumb tip %s (%.2f, %.2f, %.2f) spans, pinch %.2f",
-                    hand == 0 ? "L" : "R", f.level,
-                    f.valid ? "ok" : "NONE", f.curl[0], f.curl[1], f.curl[2],
-                    f.curl[3], f.curl[4], f.splay[0], f.splay[1], f.splay[2],
-                    f.splay[3], have_anim ? "ok" : "NONE",
-                    anim.flFingerCurl[0], anim.flFingerCurl[1],
-                    anim.flFingerCurl[2], anim.flFingerCurl[3],
-                    anim.flFingerCurl[4],
-                    g_finger_bones_valid[hand] ? "ok" : "NONE",
-                    f.spread_valid ? "" : "(none)",
-                    f.spread[0] * 57.29578f, f.spread[2] * 57.29578f,
-                    f.spread[3] * 57.29578f, f.thumb_valid ? "ok" : "NONE",
-                    f.thumb[0], f.thumb[1], f.thumb[2], f.thumb[3]);
             }
             // finger_record: numpad / starts and stops a recording of both
             // hands' poses (20 per second) into trlvr_finger_poses.csv --
@@ -2571,77 +2730,34 @@ namespace trlvr
                 }
         }
 
+        // The hand poses the session tracks are already OpenXR grip poses,
+        // so the grip is the tracked pose itself: an identity offset, set
+        // once that hand's controller is first seen.
         void measure_grip_offsets()
         {
-            if (!g_input || !g_system || config().hand_model != 2)
+            if (config().hand_model != 2)
                 return;
-            vr::TrackedDevicePose_t raw[vr::k_unMaxTrackedDeviceCount]{};
-            g_system->GetDeviceToAbsoluteTrackingPose(
-                vr::TrackingUniverseSeated, 0.0f, raw,
-                vr::k_unMaxTrackedDeviceCount);
             for (int hand = 0; hand < 2; ++hand)
             {
-                if (!g_hand_pose[hand])
+                if (g_grip_samples[hand])
                     continue;
-                vr::InputPoseActionData_t pose{};
-                const vr::EVRInputError error =
-                    g_input->GetPoseActionDataRelativeToNow(
-                        g_hand_pose[hand], vr::TrackingUniverseSeated, 0.0f,
-                        &pose, sizeof(pose),
-                        vr::k_ulInvalidInputValueHandle);
-                vr::InputOriginInfo_t origin{};
-                const bool have_origin = error == vr::VRInputError_None &&
-                    pose.bActive && pose.pose.bPoseIsValid &&
-                    g_input->GetOriginTrackedDeviceInfo(
-                        pose.activeOrigin, &origin, sizeof(origin)) ==
-                        vr::VRInputError_None &&
-                    origin.trackedDeviceIndex < vr::k_unMaxTrackedDeviceCount;
-                if (!have_origin ||
-                    !raw[origin.trackedDeviceIndex].bPoseIsValid)
+                float position[3], rotation[9];
+                if (!vr_controller_tracking_pose(hand == 0, position, rotation))
                 {
                     if (!g_grip_missing_reported[hand] &&
-                        g_frames_in_set > 300 && !g_grip_samples[hand])
+                        g_frames_in_set > 300)
                     {
                         g_grip_missing_reported[hand] = true;
-                        log("controls: no %s grip pose from SteamVR (error %d, "
-                            "active %d) -- that hand keeps the original "
-                            "placement. A custom SteamVR binding without the "
-                            "\"%s hand grip pose\" action causes this.",
-                            hand == 0 ? "left" : "right", (int)error,
-                            (int)pose.bActive, hand == 0 ? "Left" : "Right");
+                        log("controls: no %s grip pose from the runtime yet "
+                            "-- that hand keeps the original placement until "
+                            "its controller is tracked",
+                            hand == 0 ? "left" : "right");
                     }
                     continue;
                 }
-                if (origin.trackedDeviceIndex != g_grip_device[hand])
-                {
-                    g_grip_device[hand] = origin.trackedDeviceIndex;
-                    g_grip_samples[hand] = 0;
-                }
-                if (g_grip_samples[hand] >= 30)
-                    continue; // locked: the offset is rigid
-                // Engine convention, metres: P = device -> world.
-                const Mat4 grip_view = view_from_pose(
-                    &pose.pose.mDeviceToAbsoluteTracking.m[0][0], 1.0f);
-                const Mat4 raw_view = view_from_pose(
-                    &raw[origin.trackedDeviceIndex]
-                        .mDeviceToAbsoluteTracking.m[0][0], 1.0f);
-                // grip-local -> raw-local = P_grip * inv(P_raw).
-                const Mat4 offset = rigid_inverse(grip_view) * raw_view;
-                bool finite = true;
-                for (int r = 0; r < 4; ++r)
-                    for (int k = 0; k < 4; ++k)
-                        finite = finite && std::isfinite(offset.m[r][k]);
-                if (!finite)
-                    continue;
-                if (++g_grip_samples[hand] == 30)
-                {
-                    vr_set_controller_grip_offset(hand == 0, offset);
-                    log("controls: %s grip pose locked: offset (%+.3f, "
-                        "%+.3f, %+.3f) m from the raw pose; forward axis "
-                        "(%+.2f, %+.2f, %+.2f)", hand == 0 ? "left" : "right",
-                        offset.m[3][0], offset.m[3][1], offset.m[3][2],
-                        offset.m[2][0], offset.m[2][1], offset.m[2][2]);
-                }
+                g_grip_samples[hand] = 1;
+                vr_set_controller_grip_offset(hand == 0, Mat4::identity());
+                log("controls: %s grip pose live", hand == 0 ? "left" : "right");
             }
         }
     }
@@ -2649,21 +2765,18 @@ namespace trlvr
     void vr_input_handhold_haptic(bool left)
     {
         const int hand = left ? 0 : 1;
-        if (!g_ready || !g_input || !g_handhold_haptic[hand] ||
+        if (!g_ready || !g_handhold_haptic[hand] ||
             !config().immersive_controls || !game_has_focus())
             return;
 
         // One short tactile cue per zone entry; the draw hook owns the
         // entry/exit latch and never calls this continuously while inside.
-        const vr::EVRInputError error = g_input->TriggerHapticVibrationAction(
-            g_handhold_haptic[hand], 0.0f, 0.04f, 120.0f, 0.30f,
-            vr::k_ulInvalidInputValueHandle);
-        if (error != vr::VRInputError_None &&
+        if (!xr_input_haptic(hand, 0.04f, 120.0f, 0.30f) &&
             !g_handhold_haptic_error_reported[hand])
         {
             g_handhold_haptic_error_reported[hand] = true;
-            log("controls: %s handhold haptic failed, EVRInputError %d",
-                left ? "left" : "right", (int)error);
+            log("controls: %s handhold haptic failed",
+                left ? "left" : "right");
         }
     }
 
@@ -2684,13 +2797,18 @@ namespace trlvr
         // bar: the view changes live (camera_set_tp_view) and is saved on
         // release. Turning the palm down (0.4 s) closes them. Scale runs
         // 1x-25x (Lara life size to ~7 cm), zoom 0.3x-3.5x, both on a log
-        // scale along the 20 cm bars.
+        // scale along the 20 cm bars; the third (2026-10-28) moves the
+        // camera sideways, -1 m (over her left shoulder) to +1 m, linear,
+        // centre = behind her.
         struct TpSliderState
         {
             bool open = false;
             ULONGLONG up_since = 0, down_since = 0, opened_at = 0;
             int grabbed = -1;               // slider held, -1 none
             int grab_hand = -1;
+            int grab_probe = 0;             // 0 palm, 1 index tip
+            int in_notch = -1;              // notch the held knob sits in
+            float grab_offset = 0.0f;       // probe x minus knob x, metres
             bool grip_was[2] = { false, false };
             VrTpSliders draw;
         };
@@ -2698,6 +2816,27 @@ namespace trlvr
         const float kSliderHalf = 0.10f;    // metres
         const float kScaleMin = 1.0f, kScaleMax = 25.0f;
         const float kZoomMin = 0.3f, kZoomMax = 3.5f;
+        const float kSideMax = 1.0f;        // metres at Lara's size
+        const int kSliders = 3;             // scale, zoom, side
+        // Half-width of a notch, as a fraction of the bar (8 mm).
+        const float kNotchHalf = 0.04f;
+        const float kKnobReach = 0.045f;    // metres, palm or tip to knob
+
+        bool slider_debug()
+        {
+            static int on = -1;
+            if (on < 0)
+            {
+                wchar_t path[MAX_PATH]{};
+                swprintf_s(path, L"%strlvr.ini", exe_dir());
+                on = GetPrivateProfileIntW(L"developer", L"slider_debug", 0,
+                                           path) != 0 ? 1 : 0;
+                if (on)
+                    log("view: slider debug on -- grab spheres and the "
+                        "palm / index-tip test points drawn");
+            }
+            return on != 0;
+        }
 
         float slider_fraction(float value, float lo, float hi)
         {
@@ -2739,9 +2878,10 @@ namespace trlvr
                         s.opened_at = now;
                         s.down_since = 0;
                         vr_input_handhold_haptic(off == 0);
-                        log("view: scale / zoom sliders open on the %s palm "
-                            "(scale x%.2f, zoom x%.2f)", off == 0 ? "left"
-                            : "right", camera_tp_scale(), camera_tp_zoom());
+                        log("view: scale / zoom / side sliders open on the "
+                            "%s palm (scale x%.2f, zoom x%.2f, side %+.2f m)",
+                            off == 0 ? "left" : "right", camera_tp_scale(),
+                            camera_tp_zoom(), camera_tp_side());
                     }
                 }
                 else
@@ -2772,18 +2912,47 @@ namespace trlvr
                 return;
             }
             s.draw.opacity = fminf(1.0f, (now - s.opened_at) / 250.0f);
-            const float values[2] = { camera_tp_scale(), camera_tp_zoom() };
-            const float lows[2] = { kScaleMin, kZoomMin };
-            const float highs[2] = { kScaleMax, kZoomMax };
-            for (int i = 0; i < 2; ++i)
+            const float values[kSliders] = { camera_tp_scale(),
+                camera_tp_zoom(), camera_tp_side() };
+            const float lows[kSliders] = { kScaleMin, kZoomMin, -kSideMax };
+            const float highs[kSliders] = { kScaleMax, kZoomMax, kSideMax };
+            // Scale and zoom are logarithmic, side linear.
+            const auto fraction = [&](int i, float v) {
+                if (i < 2)
+                    return slider_fraction(v, lows[i], highs[i]);
+                const float t = (v - lows[i]) / (highs[i] - lows[i]);
+                return t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+            };
+            const auto value_at = [&](int i, float t) {
+                if (i < 2)
+                    return slider_value(t, lows[i], highs[i]);
+                t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+                return lows[i] + (highs[i] - lows[i]) * t;
+            };
+            // Notches: each bar's preset default, and centre on the side
+            // bar (user 2026-10-28), as fractions along it.
+            float defaults[kSliders];
+            camera_tp_defaults(&defaults[0], &defaults[1], &defaults[2]);
+            float notch_t[kSliders][2]{};
+            int notch_n[kSliders]{};
+            for (int i = 0; i < kSliders; ++i)
+            {
+                notch_t[i][notch_n[i]++] = fraction(i, defaults[i]);
+                if (i == 2 && fabsf(defaults[i]) > 1e-3f)
+                    notch_t[i][notch_n[i]++] = fraction(i, 0.0f);
+            }
+            for (int i = 0; i < kSliders; ++i)
             {
                 const float y = palm[1] + 0.07f + 0.06f * i;
+                s.draw.notches[i] = notch_n[i];
+                for (int k = 0; k < notch_n[i]; ++k)
+                    s.draw.notch[i][k] = palm[0] - kSliderHalf +
+                                         2.0f * kSliderHalf * notch_t[i][k];
                 s.draw.start[i][0] = palm[0] - kSliderHalf;
                 s.draw.end[i][0] = palm[0] + kSliderHalf;
                 s.draw.start[i][1] = s.draw.end[i][1] = y;
                 s.draw.start[i][2] = s.draw.end[i][2] = palm[2];
-                const float t = slider_fraction(values[i], lows[i],
-                                                highs[i]);
+                const float t = fraction(i, values[i]);
                 s.draw.knob[i][0] = palm[0] - kSliderHalf +
                                     2.0f * kSliderHalf * t;
                 s.draw.knob[i][1] = y;
@@ -2798,18 +2967,67 @@ namespace trlvr
             const bool have_hand = vr_hand_palm_body_position(
                 other == 0, &hand[0], &hand[1], &hand[2]);
             int knob_near = -1;
+            int probe_near = 0;
             float tip[3]{};
             const bool have_tip = vr_hand_fingertip_body_position(
                 other == 0, &tip[0], &tip[1], &tip[2]);
-            if (have_hand)
+            s.draw.debug = slider_debug();
+            s.draw.reach = kKnobReach;
+            s.draw.probe_ok[0] = have_hand;
+            s.draw.probe_ok[1] = have_tip;
+            memcpy(s.draw.probe[0], hand, sizeof(hand));
+            memcpy(s.draw.probe[1], tip, sizeof(tip));
+            // Where the test points are against the knobs, at most once a
+            // second while the sliders are open (60 lines a run).
             {
-                float best = 0.045f * 0.045f;
-                for (int i = 0; i < 2; ++i)
+                static ULONGLONG last = 0;
+                static int lines = 0;
+                if (lines < 60 && now - last >= 1000)
                 {
-                    float d = 0.0f;
-                    for (int k = 0; k < 3; ++k)
-                        d += (hand[k] - s.draw.knob[i][k]) *
-                             (hand[k] - s.draw.knob[i][k]);
+                    last = now;
+                    ++lines;
+                    float d[2][2];
+                    for (int p = 0; p < 2; ++p)
+                        for (int i = 0; i < 2; ++i)
+                        {
+                            const float* q = p ? tip : hand;
+                            float t = 0.0f;
+                            for (int k = 0; k < 3; ++k)
+                                t += (q[k] - s.draw.knob[i][k]) *
+                                     (q[k] - s.draw.knob[i][k]);
+                            d[p][i] = sqrtf(t) * 100.0f;
+                        }
+                    log("view: sliders -- %s palm %s (%+.1f, %+.1f, %+.1f) cm "
+                        "from the scale knob, tip %s (%+.1f, %+.1f, %+.1f); "
+                        "distances scale/zoom: palm %.1f/%.1f, tip %.1f/%.1f "
+                        "cm (grab within %.1f)",
+                        other == 0 ? "left" : "right",
+                        have_hand ? "ok" : "MISSING",
+                        (hand[0] - s.draw.knob[0][0]) * 100.0f,
+                        (hand[1] - s.draw.knob[0][1]) * 100.0f,
+                        (hand[2] - s.draw.knob[0][2]) * 100.0f,
+                        have_tip ? "ok" : "MISSING",
+                        (tip[0] - s.draw.knob[0][0]) * 100.0f,
+                        (tip[1] - s.draw.knob[0][1]) * 100.0f,
+                        (tip[2] - s.draw.knob[0][2]) * 100.0f,
+                        d[0][0], d[0][1], d[1][0], d[1][1],
+                        kKnobReach * 100.0f);
+                }
+            }
+            if (have_hand || have_tip)
+            {
+                float best = kKnobReach * kKnobReach;
+                for (int i = 0; i < kSliders; ++i)
+                {
+                    float d = 1.0e9f;
+                    int probe = 0;
+                    if (have_hand)
+                    {
+                        d = 0.0f;
+                        for (int k = 0; k < 3; ++k)
+                            d += (hand[k] - s.draw.knob[i][k]) *
+                                 (hand[k] - s.draw.knob[i][k]);
+                    }
                     // The index fingertip on the knob counts too.
                     if (have_tip)
                     {
@@ -2817,12 +3035,17 @@ namespace trlvr
                         for (int k = 0; k < 3; ++k)
                             t += (tip[k] - s.draw.knob[i][k]) *
                                  (tip[k] - s.draw.knob[i][k]);
-                        d = fminf(d, t);
+                        if (t < d)
+                        {
+                            d = t;
+                            probe = 1;
+                        }
                     }
                     if (d < best)
                     {
                         best = d;
                         knob_near = i;
+                        probe_near = probe;
                     }
                 }
             }
@@ -2831,26 +3054,52 @@ namespace trlvr
             {
                 s.grabbed = knob_near;
                 s.grab_hand = other;
+                // The point that took the knob drags it, from where it
+                // touched (no jump to the palm).
+                s.grab_probe = probe_near;
+                s.grab_offset = (probe_near ? tip[0] : hand[0]) -
+                                s.draw.knob[knob_near][0];
+                s.in_notch = -1;
+                static const char* const names[kSliders] = { "scale",
+                                                             "zoom", "side" };
+                log("view: %s slider taken by the %s", names[knob_near],
+                    probe_near ? "index tip" : "palm");
                 vr_input_handhold_haptic(other == 0);
             }
-            if (s.grabbed >= 0 && (!grip || !have_hand))
+            const bool have_probe = s.grab_probe ? have_tip : have_hand;
+            if (s.grabbed >= 0 && (!grip || !have_probe))
             {
-                camera_set_tp_view(camera_tp_scale(), camera_tp_zoom(), true);
+                camera_set_tp_view(camera_tp_scale(), camera_tp_zoom(),
+                                   camera_tp_side(), true);
                 s.grabbed = -1;
             }
             if (s.grabbed >= 0)
             {
                 const int i = s.grabbed;
-                const float t = (hand[0] - (palm[0] - kSliderHalf)) /
-                                (2.0f * kSliderHalf);
-                const float value = slider_value(t, lows[i], highs[i]);
-                if (i == 0)
-                    camera_set_tp_view(value, camera_tp_zoom(), false);
-                else
-                    camera_set_tp_view(camera_tp_scale(), value, false);
+                const float x = (s.grab_probe ? tip[0] : hand[0]) -
+                                s.grab_offset;
+                float t = (x - (palm[0] - kSliderHalf)) /
+                           (2.0f * kSliderHalf);
+                // Within a notch the knob sticks to it; a tick on the way in.
+                int notch = -1;
+                for (int k = 0; k < notch_n[i]; ++k)
+                    if (fabsf(t - notch_t[i][k]) < kNotchHalf)
+                    {
+                        t = notch_t[i][k];
+                        notch = k;
+                        break;
+                    }
+                if (notch >= 0 && notch != s.in_notch)
+                    vr_input_handhold_haptic(other == 0);
+                s.in_notch = notch;
+                const float value = notch >= 0 && notch_t[i][notch] ==
+                    fraction(i, defaults[i]) ? defaults[i] : value_at(i, t);
+                float v[kSliders] = { camera_tp_scale(), camera_tp_zoom(),
+                                      camera_tp_side() };
+                v[i] = value;
+                camera_set_tp_view(v[0], v[1], v[2], false);
                 s.draw.knob[i][0] = palm[0] - kSliderHalf +
-                    2.0f * kSliderHalf *
-                    slider_fraction(value, lows[i], highs[i]);
+                    2.0f * kSliderHalf * fraction(i, value);
                 s.draw.held[i] = true;
                 claim[other] = true;
             }
@@ -2976,20 +3225,27 @@ namespace trlvr
         return g_ready && g_grip_held[left ? 0 : 1];
     }
 
+    bool vr_input_hand_grab(int hand)
+    {
+        if (!g_ready || hand < 0 || hand > 1)
+            return false;
+        if (config().god_grab_pose && g_fingers[hand].valid)
+            return g_pose_grab[hand];
+        return g_grip_held[hand];
+    }
+
     void vr_input_weapon_haptic(bool left, float strength)
     {
         const int hand = left ? 0 : 1;
-        if (!g_ready || !g_input || !g_handhold_haptic[hand] ||
+        if (!g_ready || !g_handhold_haptic[hand] ||
             !config().weapon_haptics || !game_has_focus())
             return;
         // A short, sharp pulse per shot; strength 0..1 scales amplitude and
         // length (pistol lighter, long guns heavier).
         const float s = strength < 0.0f ? 0.0f : strength > 1.0f ? 1.0f
                                                                   : strength;
-        g_input->TriggerHapticVibrationAction(
-            g_handhold_haptic[hand], 0.0f, 0.03f + 0.04f * s,
-            180.0f - 60.0f * s, 0.45f + 0.55f * s,
-            vr::k_ulInvalidInputValueHandle);
+        xr_input_haptic(hand, 0.03f + 0.04f * s, 180.0f - 60.0f * s,
+                        0.45f + 0.55f * s);
     }
 
     // The game's own rumble, as it would drive a pad (user 2026-10-09:
@@ -3016,16 +3272,14 @@ namespace trlvr
             const float low = g_motor[0], high = g_motor[1];
             const float amplitude = fmaxf(low, high);
             if (amplitude < 0.02f || now < g_rumble_next || !g_ready ||
-                !g_input || !game_has_focus())
+                !game_has_focus())
                 return;
             g_rumble_next = now + 25;
             const float frequency = (low * 55.0f + high * 170.0f) /
                                     (low + high);
             for (int hand = 0; hand < 2; ++hand)
                 if (g_handhold_haptic[hand])
-                    g_input->TriggerHapticVibrationAction(
-                        g_handhold_haptic[hand], 0.0f, 0.05f, frequency,
-                        amplitude, vr::k_ulInvalidInputValueHandle);
+                    xr_input_haptic(hand, 0.05f, frequency, amplitude);
         }
     }
 
@@ -3115,22 +3369,87 @@ namespace trlvr
             }
         }
 
-        vr::VRActiveActionSet_t active{};
-        active.ulActionSet = g_set_game;
-        log_set_activity("IVRInput::UpdateActionState");
-        const bool updated = g_input->UpdateActionState(&active,
-            sizeof(active), 1) == vr::VRInputError_None;
-        log_set_activity(nullptr);
-        if (!updated)
-            return;
+        // xrSyncActions already ran with the frame's poses (xr_frame_wait).
+        update_logical_actions();
+        log_controllers();
 
-        if (++g_frames_in_set == 30 && !g_reported_bindings)
-        {
-            g_reported_bindings = true;
-            report_bound();
-        }
+        ++g_frames_in_set;
         measure_grip_offsets();
         read_fingers();
+
+        // The settings overlay open (held menu button or Insert): the
+        // controllers are its gamepad and the game gets nothing. Closed, the
+        // game stays cut off until every button is let go, so the press that
+        // closed it (or one still held) does not land in the game.
+        {
+            const bool open = overlay_open();
+            if (open != g_overlay_was_open)
+            {
+                g_overlay_was_open = open;
+                if (open)
+                    log("controls: settings overlay open -- the controllers "
+                        "drive it, the game gets nothing");
+                else
+                    g_overlay_until_release = true;
+            }
+            if (g_overlay_until_release && !open)
+            {
+                bool any = false;
+                for (int hand = 0; hand < 2 && !any; ++hand)
+                {
+                    any = xr_input_trigger(hand) > 0.20f ||
+                          xr_input_squeeze(hand) > 0.35f;
+                    // Buttons only: the capacitive sensors after them read
+                    // a resting finger.
+                    for (int b = 0; b < XrTouchTrigger && !any; ++b)
+                        any = xr_input_button(hand, (XrButton)b);
+                }
+                if (!any)
+                {
+                    g_overlay_until_release = false;
+                    log("controls: settings overlay closed and the "
+                        "controllers let go; the game has them again");
+                }
+            }
+            if (open || g_overlay_until_release)
+            {
+                if (open)
+                {
+                    OverlayPad pad{};
+                    const bool wmr = xr_input_controller(0) == XrControllerWmr ||
+                                     xr_input_controller(1) == XrControllerWmr;
+                    struct { bool on; WORD bit; } map[] = {
+                        { xr_input_button(1, wmr ? XrButtonTrackpad
+                                                 : XrButtonPrimary),
+                          XINPUT_GAMEPAD_A },
+                        { xr_input_button(1, XrButtonSecondary) ||
+                          (wmr && xr_input_button(0, XrButtonTrackpad)),
+                          XINPUT_GAMEPAD_B },
+                        { xr_input_button(0, XrButtonPrimary),
+                          XINPUT_GAMEPAD_X },
+                        { xr_input_button(0, XrButtonSecondary),
+                          XINPUT_GAMEPAD_Y },
+                        { xr_input_squeeze(0) > 0.5f,
+                          XINPUT_GAMEPAD_LEFT_SHOULDER },
+                        { xr_input_squeeze(1) > 0.5f,
+                          XINPUT_GAMEPAD_RIGHT_SHOULDER },
+                        { xr_input_button(0, XrButtonMenu),
+                          XINPUT_GAMEPAD_START },
+                    };
+                    for (const auto& m : map)
+                        if (m.on)
+                            pad.buttons |= m.bit;
+                    xr_input_stick(0, &pad.lx, &pad.ly);
+                    xr_input_stick(1, &pad.rx, &pad.ry);
+                    overlay_set_pad(pad);
+                }
+                release_all();
+                g_holster_grip_was[0] = digital(g_game[GameGrapple].handle);
+                g_holster_grip_was[1] = digital(g_game[GameLockOn].handle);
+                g_light_grip_was = g_holster_grip_was[0];
+                return;
+            }
+        }
 
         if (!game_has_focus())
         {
@@ -3406,25 +3725,19 @@ namespace trlvr
         // Tuning profile by controller type (2026-10-08): oculus_touch gets
         // the Quest tester's hand/aim/holster defaults, anything else the
         // Reverb G2 ones. Checked every 2 s until a controller reports.
-        if (!g_profile_decided && g_system &&
+        if (!g_profile_decided &&
             GetTickCount64() >= g_profile_next_check)
         {
             g_profile_next_check = GetTickCount64() + 2000;
-            for (vr::TrackedDeviceIndex_t i = 0;
-                 i < vr::k_unMaxTrackedDeviceCount && !g_profile_decided; ++i)
+            XrControllerKind kind = xr_input_controller(1);
+            if (kind == XrControllerNone)
+                kind = xr_input_controller(0);
+            if (kind != XrControllerNone)
             {
-                if (g_system->GetTrackedDeviceClass(i) !=
-                    vr::TrackedDeviceClass_Controller)
-                    continue;
-                char type[128]{};
-                vr::ETrackedPropertyError err = vr::TrackedProp_Success;
-                g_system->GetStringTrackedDeviceProperty(i,
-                    vr::Prop_ControllerType_String, type, sizeof(type), &err);
-                if (!type[0])
-                    continue;
+                const char* type = controller_type_name(kind);
                 g_profile_decided = true;
                 tune_set_controller_profile(
-                    _stricmp(type, "oculus_touch") == 0 ? 1 : 0, type);
+                    kind == XrControllerTouch ? 1 : 0, type);
                 g_gear_loaded = false;   // the gear cross re-reads too
             }
         }
@@ -3433,12 +3746,10 @@ namespace trlvr
         // menus, setups or calibration; guns and held gear are put away
         // first so neither view inherits the other's hand state.
         {
-            const bool view_down = config().immersive_controls &&
-                digital(g_game[GameBinoculars].handle);
             const bool view_key = (GetAsyncKeyState(VK_OEM_5) & 1) != 0;
-            const bool pressed = (view_down && !g_view_button_was) ||
-                                 view_key;
-            g_view_button_was = view_down;
+            const bool pressed = (config().immersive_controls &&
+                                  g_view_switch_request) || view_key;
+            g_view_switch_request = false;
             if (pressed && !menu && !tune_gear_tuning_active() &&
                 !vr_hand_calibration_active() && !ui_loading_screen_active() &&
                 !camera_cinematic_playing())
@@ -3449,7 +3760,10 @@ namespace trlvr
                                             : "right stick long press");
                 g_view_recenter_at = GetTickCount64() + 250;
             }
-            if (g_view_recenter_at && GetTickCount64() >= g_view_recenter_at)
+            // Once the glide has landed: a recentre in mid-flight would
+            // jerk the heading.
+            if (g_view_recenter_at && GetTickCount64() >= g_view_recenter_at &&
+                !camera_view_tween_active())
             {
                 g_view_recenter_at = 0;
                 if (!menu)
@@ -3690,23 +4004,51 @@ namespace trlvr
         // Not with first person on: between levels and in loads the
         // first-person view is not active yet, which read as third person
         // and showed the cross (user, 2026-10-04).
+        // A hand god mode claimed last frame (at table-Lara) neither hovers
+        // nor grabs the cross (it sits waist-high, where she often is).
         update_gear_cross(tp_gameplay && !camera_view_first_person() &&
                           !radial_gear_menu_enabled(), left_grip,
-                          right_grip, gear_now);
-        // Board mode: a grip around the tiny Lara picks her up (after the
-        // gear cross, which keeps any grip on or hovering it).
+                          right_grip, gear_now, g_god_claim_was);
+        // Board mode: a grab around the tiny Lara picks her up (after the
+        // gear cross, which keeps any grip on or hovering it). The grab is
+        // the hand's pose with god_grab_pose (pinch or fist; the grip
+        // alone only points and presses), else the grip button.
         bool pluck_claim[2] = { false, false };
+        const bool grab[2] = {
+            config().god_grab_pose ? vr_input_hand_grab(0) : left_grip,
+            config().god_grab_pose ? vr_input_hand_grab(1) : right_grip };
+        camera_set_hand_grips(grab[0], grab[1]);
         {
             const bool pluck_grip[2] = {
-                left_grip && !g_gear_grip_claim[0] && g_gear_hover[0] < 0 &&
+                grab[0] && !g_gear_grip_claim[0] && g_gear_hover[0] < 0 &&
                     g_gear_handle_hover[0] < 0,
-                right_grip && !g_gear_grip_claim[1] && g_gear_hover[1] < 0 &&
+                grab[1] && !g_gear_grip_claim[1] && g_gear_hover[1] < 0 &&
                     g_gear_handle_hover[1] < 0 };
             camera_board_pluck_update(tp_gameplay, pluck_grip, pluck_claim);
             // Y long press (light, freed in third-person immersive): the
             // board-mode finger flick on the left hand.
             camera_board_flick_update(tp_gameplay,
                 g_flick_action && digital(g_flick_action));
+        }
+        // God mode's claims latch per physical hand (as Underworld): a grip
+        // or trigger pressed while claimed stays the mod's until released.
+        // Cleared in menus and first person.
+        {
+            const bool live = tp_gameplay && !camera_view_first_person();
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                const bool claim = live && pluck_claim[hand];
+                g_god_claim_was[hand] = claim;
+                // Held until the game's own grip lets go (0.35, not the
+                // 0.5 press): a relaxed grip must not grapple on the way out.
+                g_claim_grip[hand] = live &&
+                    (xr_input_squeeze(hand) > 0.5f ||
+                     (g_claim_grip[hand] && g_squeeze_down[hand])) &&
+                    (g_claim_grip[hand] || claim);
+                g_claim_trig[hand] = live &&
+                    xr_input_trigger(hand) > 0.05f &&
+                    (g_claim_trig[hand] || claim);
+            }
         }
 
         bool want[256] = { false };
@@ -3769,10 +4111,7 @@ namespace trlvr
                     (i == GameWeapon || i == GameBinoculars ||
                      i == GameMedkit || i == GameLight))
                     continue;
-                // Radial gear menu: the medipack (long press) action is the
-                // pause and the pause (click) action opens the menu (user
-                // 2026-10-12: "hold is pause, single click is the radial
-                // menu"); see the radial block below.
+                // Radial gear menu: it picks the medipack itself.
                 if (i == GameMedkit && radial_gear_menu_enabled())
                     continue;
                 if (i == GamePause && g_pause_hold)
@@ -3788,11 +4127,57 @@ namespace trlvr
                 // A grip that grabbed from the gear cross, or holds Lara.
                 if ((i == GameGrapple && (g_gear_grip_claim[0] ||
                                           pluck_claim[0] ||
+                                          g_claim_grip[0] ||
                                           theatre_claim[0])) ||
                     (i == GameLockOn && (g_gear_grip_claim[1] ||
                                          pluck_claim[1] ||
+                                         g_claim_grip[1] ||
                                          theatre_claim[1])))
                     continue;
+                // God mode: the trigger of a hand at table-Lara (or one
+                // pressed there and still held) neither interacts nor
+                // fires -- she would draw her pistols and shoot. Left
+                // trigger = Interact, right = Fire; left_handed swaps.
+                if (i == GameInteract || i == GameFire)
+                {
+                    const int th = (i == GameInteract) != swap_triggers ? 0 : 1;
+                    if (pluck_claim[th] || g_claim_trig[th])
+                        continue;
+                }
+                // A hand on Lara's body (third person): its trigger and grip
+                // are not game buttons while it is (user 2026-10-14). The
+                // god hand's pick-up reads the grips itself and still works.
+                // A press that began (or was held) on her stays hers after
+                // the hand leaves her body: the action waits for a new
+                // press, not the moment the hand comes out (user
+                // 2026-10-14).
+                {
+                    static bool held_back[kGameButtons] = {};
+                    const bool touch_button = i == GameGrapple ||
+                        i == GameLockOn || i == GameInteract || i == GameFire;
+                    if (touch_button)
+                    {
+                        const bool touching =
+                            (i == GameGrapple && camera_hand_touching_lara(true)) ||
+                            (i == GameLockOn && camera_hand_touching_lara(false)) ||
+                            (i == GameInteract &&
+                             camera_hand_touching_lara(!swap_triggers)) ||
+                            (i == GameFire &&
+                             camera_hand_touching_lara(swap_triggers));
+                        const bool pressed = digital(
+                            swap_triggers && i == GameFire
+                                ? g_game[GameInteract].handle
+                            : swap_triggers && i == GameInteract
+                                ? g_game[GameFire].handle
+                                : b.handle);
+                        if (touching && pressed)
+                            held_back[i] = true;
+                        else if (!pressed)
+                            held_back[i] = false;
+                        if (touching || held_back[i])
+                            continue;
+                    }
+                }
                 // While Lara is held she neither jumps nor rolls.
                 // On a palm she may jump and crouch (2026-10-04).
                 if (camera_board_pluck_carried() &&
@@ -3827,8 +4212,6 @@ namespace trlvr
                         ? g_game[GameInteract].handle
                     : swap_triggers && i == GameInteract
                         ? g_game[GameFire].handle
-                    : i == GamePause && radial_gear_menu_enabled()
-                        ? g_game[GameMedkit].handle
                         : b.handle);
                 // Single pistols: each drawn pistol's own trigger fires.
                 if (single_pistols_out && i == GameFire)
@@ -4405,12 +4788,18 @@ namespace trlvr
                 }
             }
             {
+                // Open while the left stick is held in (after 150 ms, so a
+                // click or the recentre double click does not flash it);
+                // pushing the stick picks; letting go closes. One pick per
+                // hold.
                 const bool enabled = radial_gear_menu_enabled();
-                const bool button = enabled && !g_pause_hold &&
-                    digital(g_game[GamePause].handle);
+                const bool button = enabled &&
+                    digital(kLogicalStickHeld + 1);
                 const ULONGLONG t = GetTickCount64();
                 const float mx = g_move_raw[0], my = g_move_raw[1];
                 const float reach = mx * mx + my * my;
+                static ULONGLONG held_since = 0;
+                static bool picked = false;
                 const auto close_menu = [&](const char* why)
                 {
                     g_radial_open = false;
@@ -4419,28 +4808,27 @@ namespace trlvr
                 };
                 if (button && !g_radial_button_was)
                 {
-                    if (g_radial_open)
-                        close_menu("button again");
-                    else
-                    {
-                        g_radial_open = true;
-                        g_radial_open_at = t;
-                        vr_input_handhold_haptic(true);
-                        log("controls: radial gear menu open -- left stick "
-                            "up medipack, right binoculars, down weapon, "
-                            "left light");
-                    }
+                    held_since = t;
+                    picked = false;
                 }
                 g_radial_button_was = button;
-                if (g_radial_open && (!enabled || t - g_radial_open_at > 4000))
-                    close_menu(enabled ? "4 s without a pick"
+                if (button && !g_radial_open && !picked &&
+                    t - held_since >= 150)
+                {
+                    g_radial_open = true;
+                    g_radial_open_at = t;
+                    vr_input_handhold_haptic(true);
+                    log("controls: radial gear menu open -- hold the left "
+                        "stick in and push it: up medipack, right "
+                        "binoculars, down weapon, left light");
+                }
+                if (g_radial_open && !button)
+                    close_menu(enabled ? "stick released"
                                        : "gear menu off here");
                 if (g_radial_open)
                 {
                     camera_show_retail_gear_cross();
-                    // The stick that pressed the button may still be off
-                    // centre: a pick needs it pushed well out.
-                    if (reach >= 0.7f * 0.7f && t - g_radial_open_at > 150)
+                    if (reach >= 0.7f * 0.7f)
                     {
                         // Order as kGearKeys: up, right, down, left.
                         const int item = fabsf(mx) > fabsf(my)
@@ -4450,9 +4838,15 @@ namespace trlvr
                         vr_input_handhold_haptic(true);
                         log("controls: radial gear menu -- %s",
                             kGearNames[item]);
+                        picked = true;
                         close_menu("picked");
                     }
                 }
+                // Held in, the stick is for the menu, not for walking --
+                // from the press, not only once the menu shows.
+                if (button)
+                    for (bool& d : g_move_dir)
+                        d = false;
                 if (g_radial_wait_centre && !g_radial_open &&
                     reach < 0.3f * 0.3f)
                     g_radial_wait_centre = false;

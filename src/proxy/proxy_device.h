@@ -17,6 +17,7 @@
 #include "../vr/reflection_stereo.h"
 #include "msaa_cap.h"
 #include "gpu_profile.h"
+#include "overlay.h"
 #include "../vr/perf_cpu.h"
 #include "../common/log.h"
 #include <cstring>
@@ -41,6 +42,8 @@ namespace trlvr
         ~ProxyDevice()
         {
             reflection_stereo_release();
+            vr_submit_device_closing(_device);
+            overlay_device_closing(_device);
             if (_device)
                 _device->Release();
             // CreateDevice took a reference on the wrapper that made us.
@@ -107,7 +110,7 @@ namespace trlvr
         STDMETHOD(GetBackBuffer)(THIS_ UINT iSwapChain, UINT iBackBuffer, D3DBACKBUFFER_TYPE Type, IDirect3DSurface9** ppBackBuffer) { return _device->GetBackBuffer(iSwapChain, iBackBuffer, Type, ppBackBuffer); }
         STDMETHOD(GetRasterStatus)(THIS_ UINT iSwapChain, D3DRASTER_STATUS* pRasterStatus) { return _device->GetRasterStatus(iSwapChain, pRasterStatus); }
         STDMETHOD(SetDialogBoxMode)(THIS_ BOOL bEnableDialogs) { return _device->SetDialogBoxMode(bEnableDialogs); }
-        STDMETHOD_(void, SetGammaRamp)(THIS_ UINT iSwapChain, DWORD Flags, CONST D3DGAMMARAMP* pRamp) { _device->SetGammaRamp(iSwapChain, Flags, pRamp); }
+        STDMETHOD_(void, SetGammaRamp)(THIS_ UINT iSwapChain, DWORD Flags, CONST D3DGAMMARAMP* pRamp) { vr_submit_set_game_ramp(pRamp); _device->SetGammaRamp(iSwapChain, Flags, pRamp); }
         STDMETHOD_(void, GetGammaRamp)(THIS_ UINT iSwapChain, D3DGAMMARAMP* pRamp) { _device->GetGammaRamp(iSwapChain, pRamp); }
         STDMETHOD(CreateTexture)(THIS_ UINT Width, UINT Height, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DTexture9** ppTexture, HANDLE* pSharedHandle) { if (Usage & D3DUSAGE_RENDERTARGET) stereo_widen(&Width, Height); return _device->CreateTexture(Width, Height, Levels, Usage, Format, Pool, ppTexture, pSharedHandle); }
         STDMETHOD(CreateVolumeTexture)(THIS_ UINT Width, UINT Height, UINT Depth, UINT Levels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, IDirect3DVolumeTexture9** ppVolumeTexture, HANDLE* pSharedHandle) { return _device->CreateVolumeTexture(Width, Height, Depth, Levels, Usage, Format, Pool, ppVolumeTexture, pSharedHandle); }
@@ -262,8 +265,10 @@ namespace trlvr
                 D3DRS_TWOSIDEDSTENCILMODE };
             DWORD saved_stencil[8]{};
             bool restore_stencil = false;
-            DWORD saved_zfunc = 0;
-            bool restore_zfunc = false;
+            // Diorama: the controller hands are drawn in front of everything
+            // (see below), by depth range, not by switching the depth test
+            // off.
+            bool hands_in_front = false;
             if (vr_dark_room_active() && !camera_first_person_active())
             {
                 const int gpu_hand = camera_first_person_current_gpu_hand();
@@ -301,14 +306,13 @@ namespace trlvr
                     // before reaching the handle): the board world outside
                     // the box still holds depth under the dark room, and a
                     // hand behind it was neither drawn nor marked. There the
-                    // hands are drawn over everything.
-                    if (vr_diorama_active() &&
-                        SUCCEEDED(_device->GetRenderState(D3DRS_ZFUNC,
-                                                          &saved_zfunc)))
-                    {
-                        _device->SetRenderState(D3DRS_ZFUNC, D3DCMP_ALWAYS);
-                        restore_zfunc = true;
-                    }
+                    // hands are drawn over everything. That was done with the
+                    // depth test off, which also let a hand's far side and
+                    // its fingers show through its near side (user
+                    // 2026-10-14). They are squeezed into the front sliver of
+                    // the depth range instead: nearer than anything else,
+                    // and still sorted against themselves and each other.
+                    hands_in_front = vr_diorama_active();
                 }
             }
 
@@ -318,8 +322,6 @@ namespace trlvr
                     for (int s = 0; s < 8; ++s)
                         _device->SetRenderState(kStencilStates[s],
                                                 saved_stencil[s]);
-                if (restore_zfunc)
-                    _device->SetRenderState(D3DRS_ZFUNC, saved_zfunc);
                 if (restore_clip_planes)
                     _device->SetRenderState(D3DRS_CLIPPLANEENABLE,
                                             saved_clip_planes);
@@ -378,6 +380,17 @@ namespace trlvr
                 for (int p = 0; p < passes; ++p)
                 {
                     stereo_begin_pass(_device, p);
+                    if (hands_in_front)
+                    {
+                        // stereo_end_draw puts the game's viewport back.
+                        D3DVIEWPORT9 front{};
+                        if (SUCCEEDED(_device->GetViewport(&front)))
+                        {
+                            front.MinZ = 0.0f;
+                            front.MaxZ = 0.02f;
+                            _device->SetViewport(&front);
+                        }
+                    }
                     // The right eye's water samples its own reflection.
                     reflection_stereo_eye_textures(_device, p);
                     sample_hand_projection(p == 0 ? EyeLeft : EyeRight);

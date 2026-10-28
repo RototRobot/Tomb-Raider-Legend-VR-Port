@@ -230,9 +230,12 @@ namespace trlvr
             const bool outer_hud = g_drawing_hud;
             const bool outer_world_locked = g_world_locked_hud;
             g_drawing_hud = hud || prompt;
-            g_world_locked_hud = hud && config().menu_world_locked &&
-                                 menu_screen_active() &&
-                                 !pause_screen_active();
+            // Only HUDDrawables under an open menu: the gameplay HUD draws
+            // with no menu on the stack. The pause menu has its own setting.
+            g_world_locked_hud = hud && menu_screen_active() &&
+                                 (pause_screen_active()
+                                      ? config().pause_world_locked
+                                      : config().menu_world_locked);
             const int previous_hand = camera_first_person_gpu_hand_draw(
                 camera_first_person_drawable_hand(self));
             if (have_fields)
@@ -262,7 +265,14 @@ namespace trlvr
                                      have_fields &&
                                      (world_marker_page(texture_page) ||
                                       sprite_type >= 0);
-            g_original(self, pass, previous);
+            // hide_gameplay_hud: the head-locked HUD is not drawn at all.
+            // World markers (sprite types), menus and the binocular view
+            // keep drawing.
+            const bool hidden = config().hide_gameplay_hud && hud &&
+                                sprite_type < 0 && !menu_screen_active() &&
+                                !hud_binocular_view_active();
+            if (!hidden)
+                g_original(self, pass, previous);
             g_drawing_world_marker = outer_marker;
             hud_capture_set_drawable(0, 0, -1);
             camera_first_person_gpu_hand_draw_end(previous_hand);

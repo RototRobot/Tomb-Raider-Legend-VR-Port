@@ -228,6 +228,7 @@ namespace dxvk {
     friend class D3D9UserDefinedAnnotation;
     friend class DxvkLegacyD3DDeviceBridge;
     friend D3D9VkInteropDevice;
+    friend class D3D9VR;
 
     using CbvIndex = D3D9ShaderResourceMapping::CbvIndex;
   public:

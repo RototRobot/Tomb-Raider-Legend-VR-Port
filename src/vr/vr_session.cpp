@@ -14,32 +14,14 @@
 #include <cstring>
 #include <cmath>
 #include <cstdarg>
+#include <cstdio>
 
-#include "openvr.h"
+#include "xr_runtime.h"
 
 namespace trlvr
 {
     namespace
     {
-        // Only the C entry points are imported; everything else is a vtable
-        // call through the interface pointer.
-        typedef uint32_t(__cdecl* PFN_InitInternal2)(vr::EVRInitError*, vr::EVRApplicationType, const char*);
-        typedef void(__cdecl* PFN_ShutdownInternal)();
-        typedef void* (__cdecl* PFN_GetGenericInterface)(const char*, vr::EVRInitError*);
-        typedef bool(__cdecl* PFN_IsInterfaceVersionValid)(const char*);
-        typedef bool(__cdecl* PFN_IsHmdPresent)();
-        typedef const char* (__cdecl* PFN_GetInitErrorAsEnglishDescription)(vr::EVRInitError);
-
-        HMODULE g_dll = nullptr;
-        PFN_InitInternal2 p_InitInternal2 = nullptr;
-        PFN_ShutdownInternal p_ShutdownInternal = nullptr;
-        PFN_GetGenericInterface p_GetGenericInterface = nullptr;
-        PFN_IsInterfaceVersionValid p_IsInterfaceVersionValid = nullptr;
-        PFN_IsHmdPresent p_IsHmdPresent = nullptr;
-        PFN_GetInitErrorAsEnglishDescription p_ErrorText = nullptr;
-
-        vr::IVRSystem* g_system = nullptr;
-        vr::IVRCompositor* g_compositor = nullptr;
         bool g_ready = false;
         char g_status[256] = "not initialised";
 
@@ -118,8 +100,8 @@ namespace trlvr
         bool g_head_position_origin_active = false;
         bool g_head_position_recenter_pending = false;
         bool g_pose_valid = false;
-        vr::TrackedDevicePose_t
-            g_tracked_poses[vr::k_unMaxTrackedDeviceCount]{};
+        TrackedPose
+            g_tracked_poses[kPoseCount]{};
         // Set once vr_set_render_poses has supplied WaitGetPoses results.
         bool g_render_poses_active = false;
 
@@ -182,7 +164,8 @@ namespace trlvr
                                     ? g_main_camera_head : current;
                 g_pause_head_anchor_valid = true;
                 log("menu: frozen scene now follows residual HMD motion; "
-                    "pause HUD head-locked, main menu world-locked");
+                    "pause menu %s", config().pause_world_locked
+                    ? "world-locked" : "head-locked");
             }
             return rigid_inverse(g_pause_head_anchor) * current;
         }
@@ -214,71 +197,23 @@ namespace trlvr
             va_end(args);
         }
 
-        bool load_dll()
+        // Each eye relative to the head, as a pose matrix.
+        Mat34 eye_to_head_matrix(Eye eye)
         {
-            if (g_dll)
-                return true;
-
-            // Beside the game first, so a version we ship wins over anything
-            // else on the search path.
-            wchar_t path[MAX_PATH]{};
-            swprintf_s(path, L"%sopenvr_api.dll", exe_dir());
-            g_dll = LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-            if (!g_dll)
-                g_dll = LoadLibraryW(L"openvr_api.dll");
-            if (!g_dll)
-            {
-                set_status("openvr_api.dll not found beside the game or on the path");
-                return false;
-            }
-
-            p_InitInternal2 = (PFN_InitInternal2)GetProcAddress(g_dll, "VR_InitInternal2");
-            p_ShutdownInternal = (PFN_ShutdownInternal)GetProcAddress(g_dll, "VR_ShutdownInternal");
-            p_GetGenericInterface = (PFN_GetGenericInterface)GetProcAddress(g_dll, "VR_GetGenericInterface");
-            p_IsInterfaceVersionValid = (PFN_IsInterfaceVersionValid)GetProcAddress(g_dll, "VR_IsInterfaceVersionValid");
-            p_IsHmdPresent = (PFN_IsHmdPresent)GetProcAddress(g_dll, "VR_IsHmdPresent");
-            p_ErrorText = (PFN_GetInitErrorAsEnglishDescription)GetProcAddress(g_dll, "VR_GetVRInitErrorAsEnglishDescription");
-
-            if (!p_InitInternal2 || !p_GetGenericInterface || !p_ShutdownInternal)
-            {
-                set_status("openvr_api.dll is missing the entry points we need");
-                return false;
-            }
-            return true;
+            const EyeInfo& info = g_eyes[eye == EyeRight ? EyeRight : EyeLeft];
+            Mat34 out{};
+            for (int row = 0; row < 3; ++row)
+                for (int col = 0; col < 3; ++col)
+                    out.m[row][col] = info.rot[row][col];
+            out.m[0][3] = info.offset_x;
+            out.m[1][3] = info.offset_y;
+            out.m[2][3] = info.offset_z;
+            return out;
         }
 
-        void read_device_info()
+        void log_eyes(const char* source)
         {
-            g_system->GetRecommendedRenderTargetSize(&g_rt_width, &g_rt_height);
-
-            for (int i = 0; i < 2; ++i)
-            {
-                const vr::EVREye e = (i == 0) ? vr::Eye_Left : vr::Eye_Right;
-                EyeInfo& info = g_eyes[i];
-                g_system->GetProjectionRaw(e, &info.tan_left, &info.tan_right,
-                                           &info.tan_top, &info.tan_bottom);
-                const vr::HmdMatrix34_t t = g_system->GetEyeToHeadTransform(e);
-                info.offset_x = t.m[0][3];
-                info.offset_y = t.m[1][3];
-                info.offset_z = t.m[2][3];
-                for (int row = 0; row < 3; ++row)
-                    for (int col = 0; col < 3; ++col)
-                        info.rot[row][col] = t.m[row][col];
-            }
-            g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
-
-            char model[128]{};
-            g_system->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
-                                                     vr::Prop_TrackingSystemName_String,
-                                                     model, sizeof(model), nullptr);
-            char serialish[128]{};
-            g_system->GetStringTrackedDeviceProperty(vr::k_unTrackedDeviceIndex_Hmd,
-                                                     vr::Prop_ModelNumber_String,
-                                                     serialish, sizeof(serialish), nullptr);
-
-            log("vr: headset '%s' / '%s'", model, serialish);
-            log("vr: recommended render target %ux%u per eye", g_rt_width, g_rt_height);
-            log("vr: ipd %.1f mm", g_ipd * 1000.0f);
+            log("vr: ipd %.1f mm (%s)", g_ipd * 1000.0f, source);
             for (int i = 0; i < 2; ++i)
             {
                 const EyeInfo& in = g_eyes[i];
@@ -294,6 +229,40 @@ namespace trlvr
                         i == 0 ? "left " : "right", cant);
             }
         }
+
+        // OpenXR only reports the frusta and the eye offsets once a session
+        // is running, and the session needs the device -- but the back
+        // buffer is sized before the device exists. So start from a
+        // symmetric frustum with the shape of the recommended image, and let
+        // vr_set_eye_views replace it with the real one on the first frame.
+        bool g_eyes_from_runtime = false;
+
+        void read_device_info()
+        {
+            xr_recommended_size(&g_rt_width, &g_rt_height);
+
+            const float aspect = g_rt_height
+                ? (float)g_rt_width / (float)g_rt_height : 1.0f;
+            const float half_v = 1.0f;
+            const float half_h = half_v * aspect;
+            for (int i = 0; i < 2; ++i)
+            {
+                EyeInfo& info = g_eyes[i];
+                info = EyeInfo{};
+                info.tan_left = -half_h;
+                info.tan_right = half_h;
+                info.tan_top = -half_v;
+                info.tan_bottom = half_v;
+                info.offset_x = i == 0 ? -0.032f : 0.032f;
+                info.rot[0][0] = info.rot[1][1] = info.rot[2][2] = 1.0f;
+            }
+            g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
+            g_eyes_from_runtime = false;
+
+            log("vr: headset '%s'", xr_system_name());
+            log("vr: recommended render target %ux%u per eye", g_rt_width, g_rt_height);
+            log_eyes("provisional, until the session reports the real frusta");
+        }
     }
 
     bool vr_init()
@@ -306,92 +275,76 @@ namespace trlvr
             log("vr: %s", g_status);
             return false;
         }
-        if (!load_dll())
+        if (!xr_instance_init())
         {
+            set_status("%s", xr_last_error());
             log("vr: %s", g_status);
             return false;
-        }
-        if (p_IsHmdPresent && !p_IsHmdPresent())
-        {
-            set_status("no headset detected");
-            log("vr: %s", g_status);
-            return false;
-        }
-
-        // Scene when we intend to submit frames -- only a Scene application
-        // gets an IVRCompositor, and only Scene will start SteamVR if it is not
-        // already up. Background is the read-only mode: poses and frusta, no
-        // image, and it attaches to a running SteamVR without disturbing it.
-        const vr::EVRApplicationType appType = config().vr_submit
-            ? vr::VRApplication_Scene
-            : vr::VRApplication_Background;
-
-        vr::EVRInitError err = vr::VRInitError_None;
-        p_InitInternal2(&err, appType, nullptr);
-        if (err != vr::VRInitError_None)
-        {
-            set_status("VR_Init failed: %s",
-                       p_ErrorText ? p_ErrorText(err) : "unknown error");
-            log("vr: %s", g_status);
-            return false;
-        }
-
-        if (p_IsInterfaceVersionValid && !p_IsInterfaceVersionValid(vr::IVRSystem_Version))
-        {
-            p_ShutdownInternal();
-            set_status("runtime is too old for %s", vr::IVRSystem_Version);
-            log("vr: %s", g_status);
-            return false;
-        }
-
-        g_system = (vr::IVRSystem*)p_GetGenericInterface(vr::IVRSystem_Version, &err);
-        if (!g_system || err != vr::VRInitError_None)
-        {
-            p_ShutdownInternal();
-            set_status("could not get %s", vr::IVRSystem_Version);
-            log("vr: %s", g_status);
-            return false;
-        }
-
-        if (config().vr_submit)
-        {
-            g_compositor = (vr::IVRCompositor*)p_GetGenericInterface(
-                vr::IVRCompositor_Version, &err);
-            if (!g_compositor || err != vr::VRInitError_None)
-            {
-                log("vr: no compositor (%s) -- frames cannot be submitted",
-                    vr::IVRCompositor_Version);
-                g_compositor = nullptr;
-            }
-            else
-            {
-                log("vr: compositor ready (%s)", vr::IVRCompositor_Version);
-            }
         }
 
         g_ready = true;
         set_status("ready");
-        log("vr: session up as %s (%s)",
-            config().vr_submit ? "Scene" : "Background", vr::IVRSystem_Version);
+        log("vr: OpenXR instance up");
+        if (!config().vr_submit)
+            log("vr: [vr] submit = 0 -- no session is created, so there is "
+                "no image in the headset and no tracking");
         read_device_info();
         return true;
     }
 
-    void* vr_compositor_raw()
+    void vr_set_eye_views(const XrEyeView eyes[2])
     {
-        return g_compositor;
+        if (!g_ready || !eyes)
+            return;
+        float change = 0.0f;
+        for (int i = 0; i < 2; ++i)
+        {
+            EyeInfo next{};
+            next.tan_left = eyes[i].tan_left;
+            next.tan_right = eyes[i].tan_right;
+            next.tan_top = eyes[i].tan_top;
+            next.tan_bottom = eyes[i].tan_bottom;
+            next.offset_x = eyes[i].eye_to_head.m[0][3];
+            next.offset_y = eyes[i].eye_to_head.m[1][3];
+            next.offset_z = eyes[i].eye_to_head.m[2][3];
+            for (int row = 0; row < 3; ++row)
+                for (int col = 0; col < 3; ++col)
+                    next.rot[row][col] = eyes[i].eye_to_head.m[row][col];
+            const float* a = &next.tan_left;
+            const float* b = &g_eyes[i].tan_left;
+            // The four tangents and three offsets lead the struct.
+            for (int k = 0; k < 7; ++k)
+            {
+                if (!std::isfinite(a[k]))
+                    return;
+                change = fmaxf(change, fabsf(a[k] - b[k]));
+            }
+            if (!(next.tan_right > next.tan_left) ||
+                !(next.tan_bottom > next.tan_top))
+                return;
+            g_eyes[i] = next;
+        }
+        g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
+        // The IPD wheel moves these a fraction of a millimetre at a time.
+        if (!g_eyes_from_runtime || change > 0.0005f)
+        {
+            const float provisional_aspect = g_rt_height
+                ? (float)g_rt_width / (float)g_rt_height : 0.0f;
+            log_eyes(g_eyes_from_runtime ? "changed" : "from the runtime");
+            if (!g_eyes_from_runtime)
+                log("vr: eye frustum aspect %.3f (the back buffer was sized "
+                    "for %.3f)", vr_eye_aspect(), provisional_aspect);
+            g_eyes_from_runtime = true;
+        }
     }
 
     void vr_shutdown()
     {
-        if (g_ready && p_ShutdownInternal)
-            p_ShutdownInternal();
+        if (g_ready)
+            xr_instance_shutdown();
         g_ready = false;
-        g_system = nullptr;
-        g_compositor = nullptr;
         set_status("shut down");
     }
-
     // What the game last uploaded to c0, and what we put there instead.
     //
     // The interface is identified by depth testing being off -- but the game
@@ -841,6 +794,55 @@ namespace trlvr
         }
     }
 
+    // Mission Prep's own pure projection (the game's flat shot), for the
+    // depth terms of its world-view-projection and flat draws: the scene
+    // branch below returns before g_game_proj is updated.
+    static GameProjection g_prep_proj{};
+
+    // Mission Prep: the camera kept the game's flat shot (camera_head), so
+    // every draw there already produces the flat picture. Post-map its clip
+    // coordinates exactly as the world-locked menu does (source * clip
+    // scale * inv(centre frustum) * head rotation * eye frustum), so the 3D
+    // scene, Lara, the 2D backdrop and the menu items stay pinned together
+    // -- same anchor (level, recentred forward), same UI scale. `close`
+    // gives flat draws the menu's own close clip plane: they may sit on the
+    // game's near plane, which the rotation would cut into wedges.
+    static Mat4 mission_prep_pinned(const float* in, const GameProjection& gp,
+                                    Eye eye, bool close)
+    {
+        Mat4 m{};
+        for (int i = 0; i < 4; ++i)
+            for (int k = 0; k < 4; ++k)
+                m.m[k][i] = in[i * 4 + k];
+        if (gp.valid)
+            g_prep_proj = gp;
+        const GameProjection depth = gp.valid ? gp
+            : g_prep_proj.valid ? g_prep_proj
+            : (g_game_proj_known ? g_game_proj : gp);
+        const float near_z = depth.valid && depth.near_z > 0.0f
+            ? depth.near_z : 1.0f;
+        const float far_z = depth.valid && depth.far_z > near_z
+            ? depth.far_z : 100000.0f;
+        const bool flip = depth.valid ? depth.sy < 0.0f : false;
+        const EyeInfo& l = g_eyes[EyeLeft];
+        const EyeInfo& r = g_eyes[EyeRight];
+        const EyeInfo& target = (eye == EyeCenter) ? l : g_eyes[eye];
+        const Mat4 reference = projection_from_tangents(
+            0.5f * (l.tan_left + r.tan_left),
+            0.5f * (l.tan_right + r.tan_right),
+            0.5f * (l.tan_top + r.tan_top),
+            0.5f * (l.tan_bottom + r.tan_bottom),
+            near_z, far_z, flip);
+        const Mat4 panel = projection_from_tangents(
+            target.tan_left, target.tan_right,
+            target.tan_top, target.tan_bottom,
+            close && near_z > 1.0f ? 1.0f : near_z, far_z, flip);
+        const Mat4 source = gp.valid ? projection_from_game(gp) : m;
+        return reproject_ndc_to_world_locked(source, reference, panel,
+                                             vr_head_rotation(),
+                                             tune_ui_scale());
+    }
+
     bool vr_substitute_c0_for_eye(const float* in, float* out, Eye eye)
     {
         if (!g_ready || !in || !out || !config().head_tracking)
@@ -926,7 +928,11 @@ namespace trlvr
                         screen == 0 ? "movie" : "loading screen", screen);
                 }
                 static bool menu_anchor_valid = false;
-                static Mat4 menu_anchor = Mat4::identity();
+                // The pause menu (pause_world_locked) anchors at the heading
+                // the head had when it opened; everything else at forward.
+                static bool menu_anchor_pause = false;
+                static float menu_anchor_yaw = 0.0f;
+                static unsigned menu_anchor_recenter = 0;
                 Mat4 ui{};
                 if (world_locked)
                 {
@@ -945,23 +951,65 @@ namespace trlvr
                         target.tan_top, target.tan_bottom,
                         menu_near, ui_gp.far_z, ui_gp.sy < 0.0f);
                     const Mat4 current = vr_head_rotation();
+                    // A loading screen between the pause menu and the main
+                    // menu stays world-locked, so a change of kind (or a
+                    // recentre) has to re-anchor by itself.
+                    const bool pause = !movie && ui_pause_menu_active();
+                    if (menu_anchor_valid &&
+                        (pause != menu_anchor_pause ||
+                         (pause && menu_anchor_recenter != g_recenter_generation)))
+                        menu_anchor_valid = false;
                     if (!menu_anchor_valid)
                     {
                         // Level and facing forward (SteamVR's forward, or the
                         // recentred one), not the head pose at the moment the
                         // menu opened -- that left menus tilted or off to the
                         // side. vr_head_rotation() is already recentred, so
-                        // forward is the identity.
-                        menu_anchor = Mat4::identity();
+                        // forward is the identity. In a level the player has
+                        // usually turned away from forward, so the pause menu
+                        // takes only the heading at opening, still level.
+                        menu_anchor_pause = pause;
+                        menu_anchor_yaw = pause ? steady_yaw_of(current) : 0.0f;
+                        menu_anchor_recenter = g_recenter_generation;
                         menu_anchor_valid = true;
-                        log("ui: menu anchored level at the recentred forward; "
+                        log("ui: %s anchored level at %s %.0f deg; "
                             "overlay near %.2f replaces game near %.2f",
-                            menu_near, ui_gp.near_z);
+                            pause ? "pause menu" : "menu",
+                            pause ? "the opening heading" : "the recentred forward",
+                            menu_anchor_yaw * 57.29578f, menu_near, ui_gp.near_z);
                     }
-                    const Mat4 relative = rigid_inverse(menu_anchor) * current;
+                    const Mat4 relative = menu_anchor_pause
+                        ? set_yaw(current,
+                                  wrap_pi(yaw_of(current) - menu_anchor_yaw))
+                        : current;
+                    // Movies (user 2026-10-27: the intro looked squished):
+                    // the game stretches its 4:3 Bink videos over the whole
+                    // screen, and in VR the screen is one eye's nearly
+                    // square view, so they came out about 3/4 as wide as
+                    // they should. Widened back to 4:3 here.
+                    Mat4 source = projection_from_game(ui_gp);
+                    if (movie_playing())
+                    {
+                        const float box_aspect =
+                            (centre.tan_right - centre.tan_left) /
+                            (centre.tan_bottom - centre.tan_top);
+                        if (box_aspect > 0.2f && box_aspect < 5.0f)
+                        {
+                            Mat4 widen = Mat4::identity();
+                            widen.m[0][0] = (4.0f / 3.0f) / box_aspect;
+                            source = source * widen;
+                            static bool reported = false;
+                            if (!reported)
+                            {
+                                reported = true;
+                                log("stereo: movie widened x%.3f to 4:3 (the "
+                                    "eye's view is %.3f wide for 1 high)",
+                                    widen.m[0][0], box_aspect);
+                            }
+                        }
+                    }
                     ui = reproject_ndc_to_world_locked(
-                        projection_from_game(ui_gp), reference,
-                        menu_projection, relative, scale);
+                        source, reference, menu_projection, relative, scale);
                 }
                 else
                 {
@@ -1073,7 +1121,8 @@ namespace trlvr
                     }
                     else
                     {
-                        // Pause UI deliberately remains rigidly head-locked.
+                        // The pause menu stays rigidly head-locked unless
+                        // pause_world_locked took it to the branch above.
                         ui = reproject_ndc_to_frustum(
                             projection_from_game(ui_gp), reference,
                             target_projection, scale);
@@ -1106,6 +1155,15 @@ namespace trlvr
                     log("ui: screen wipe had no pure projection; "
                         "mono overlay fallback used");
                 }
+            }
+            // Mission Prep: an interface draw without a pure projection
+            // (a 2D backdrop candidate) rode the view on the mono fallback
+            // below. Pin it with the menu by its full matrix instead.
+            if (prep_menu)
+            {
+                registers_from_matrix(
+                    mission_prep_pinned(in, GameProjection{}, eye, true), out);
+                return true;
             }
             // Unexpected, but safer than putting an unrecognised HUD matrix
             // through the world stereo decomposition. Retain the preceding
@@ -1178,75 +1236,21 @@ namespace trlvr
             return true;
         }
 
-        // Mission Prep: the camera kept the game's flat shot (camera_head),
-        // so every scene draw already produces the flat picture. Post-map
-        // its clip coordinates exactly as the world-locked menu does
-        // (source * clip scale * inv(centre frustum) * head rotation * eye
-        // frustum), so background, Lara and menu stay pinned together.
-        if (config().ui_passthrough && ui_mission_prep_active() &&
-            (gp.valid || is_perspective_registers(in)))
+        // Mission Prep: every draw that is not a menu panel -- the 3D scene,
+        // the staged Lara, and flat (no perspective) draws such as a 2D
+        // backdrop, which used to fall through to the game's own matrix
+        // and ride the view -- is pinned with the world-locked menu.
+        if (config().ui_passthrough && ui_mission_prep_active())
         {
-            Mat4 m{};
-            for (int i = 0; i < 4; ++i)
-                for (int k = 0; k < 4; ++k)
-                    m.m[k][i] = in[i * 4 + k];
-            const GameProjection depth = gp.valid ? gp
-                : (g_game_proj_known ? g_game_proj : gp);
-            const float near_z = depth.valid && depth.near_z > 0.0f
-                ? depth.near_z : 1.0f;
-            const float far_z = depth.valid && depth.far_z > near_z
-                ? depth.far_z : 100000.0f;
-            const bool flip = depth.valid ? depth.sy < 0.0f : false;
-            const EyeInfo& l = g_eyes[EyeLeft];
-            const EyeInfo& r = g_eyes[EyeRight];
-            const EyeInfo& target = (eye == EyeCenter) ? l : g_eyes[eye];
-            const Mat4 reference = projection_from_tangents(
-                0.5f * (l.tan_left + r.tan_left),
-                0.5f * (l.tan_right + r.tan_right),
-                0.5f * (l.tan_top + r.tan_top),
-                0.5f * (l.tan_bottom + r.tan_bottom),
-                near_z, far_z, flip);
-            const Mat4 panel = projection_from_tangents(
-                target.tan_left, target.tan_right,
-                target.tan_top, target.tan_bottom,
-                near_z, far_z, flip);
-            const Mat4 source = gp.valid ? projection_from_game(gp) : m;
-            // The backdrop fills the view (slightly oversized) and turns
-            // after the head with a lag, which reads as a distant backdrop
-            // (user request): its anchor eases toward the current head
-            // rotation, and the mapping counter-rotates by the remaining
-            // difference.
-            static Mat4 anchor = Mat4::identity();
-            static LARGE_INTEGER last{};
-            LARGE_INTEGER now{}, frequency{};
-            QueryPerformanceCounter(&now);
-            QueryPerformanceFrequency(&frequency);
-            const Mat4 current = vr_head_rotation();
-            const double since = last.QuadPart && frequency.QuadPart
-                ? (double)(now.QuadPart - last.QuadPart) /
-                  (double)frequency.QuadPart : 1.0;
-            if (since > 0.5)
-                anchor = current;  // screen (re)opened: start centred
-            else if (since > 0.0)
-            {
-                const float lag = config().mission_prep_backdrop_lag;
-                const float follow = lag > 0.001f
-                    ? 1.0f - expf(-(float)since / lag) : 1.0f;
-                anchor = anchor * rotation_fraction(
-                    rigid_inverse(anchor) * current, follow);
-            }
-            last = now;
-            const float backdrop = config().mission_prep_backdrop_scale;
-            registers_from_matrix(reproject_ndc_to_world_locked(
-                source, reference, panel,
-                rigid_inverse(anchor) * current, backdrop), out);
+            const bool flat = !gp.valid && !is_perspective_registers(in);
+            registers_from_matrix(
+                mission_prep_pinned(in, gp, eye, flat), out);
             static bool reported = false;
             if (!reported)
             {
                 reported = true;
-                log("stereo: Mission Prep backdrop fills the view (scale "
-                    "%.2f) and follows the head with a %.2f s lag",
-                    backdrop, config().mission_prep_backdrop_lag);
+                log("stereo: Mission Prep scene pinned with the world-locked "
+                    "menu (scale %.2f)", tune_ui_scale());
             }
             return true;
         }
@@ -1262,6 +1266,16 @@ namespace trlvr
             // while retaining the game's far distance and the HMD frustum.
             // Do not cache this per-hand depth as the scene projection.
             const int hand = camera_first_person_current_gpu_hand();
+            // The controller hands drawn under the pinned pause menu swung
+            // against the head and sat off their centres (user 2026-10-20);
+            // not drawn there until that is understood.
+            if (hand >= 0 && config().pause_world_locked &&
+                ui_pause_menu_active())
+            {
+                for (int i = 0; i < 16; ++i)
+                    out[i] = 0.0f;
+                return true;
+            }
             // Third-person controller hands in board mode: drawn at their
             // own size at 1/F of the controller distance (camera_head);
             // scaling view space by F about the head puts them on the
@@ -1493,14 +1507,6 @@ namespace trlvr
         g_current_eye = eye;
     }
 
-    void* vr_get_interface(const char* version)
-    {
-        if (!g_ready || !p_GetGenericInterface || !version)
-            return nullptr;
-        vr::EVRInitError err = vr::VRInitError_None;
-        return p_GetGenericInterface(version, &err);
-    }
-
     bool vr_ready() { return g_ready; }
     const char* vr_status() { return g_status; }
     const EyeInfo& vr_eye(Eye eye) { return g_eyes[eye]; }
@@ -1669,7 +1675,7 @@ namespace trlvr
 
         void theatre_anchor()
         {
-            const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+            const float* m = &g_tracked_poses[kPoseHmd]
                                   .mDeviceToAbsoluteTracking.m[0][0];
             g_theatre_origin[0] = m[3];
             g_theatre_origin[1] = m[7];
@@ -1758,7 +1764,7 @@ namespace trlvr
         // anchor: right, up, forward).
         bool theatre_head_in_frame(float out[3])
         {
-            const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+            const float* m = &g_tracked_poses[kPoseHmd]
                                   .mDeviceToAbsoluteTracking.m[0][0];
             float eye_anchor[3];
             theatre_point(0.0f, 0.0f, 0.0f, eye_anchor);
@@ -1806,7 +1812,7 @@ namespace trlvr
             theatre_window_forward(w);
             const Mat4 head = set_yaw(r, wrap_pi(g_head_yaw_raw -
                 raw_yaw_of_forward(w[0], w[1])));
-            const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+            const float* m = &g_tracked_poses[kPoseHmd]
                                   .mDeviceToAbsoluteTracking.m[0][0];
             float eye_anchor[3];
             theatre_point(0.0f, 0.0f, 0.0f, eye_anchor);
@@ -2029,28 +2035,20 @@ namespace trlvr
     bool vr_controller_raw_body_position(bool left, float* right,
                                          float* up, float* forward)
     {
-        if (!g_ready || !g_system || !g_pose_valid ||
+        if (!g_ready || !g_pose_valid ||
             !right || !up || !forward)
             return false;
 
-        const vr::ETrackedControllerRole role = left
-            ? vr::TrackedControllerRole_LeftHand
-            : vr::TrackedControllerRole_RightHand;
-        const vr::TrackedDeviceIndex_t index =
-            g_system->GetTrackedDeviceIndexForControllerRole(role);
-        if (index == vr::k_unTrackedDeviceIndexInvalid ||
-            index >= vr::k_unMaxTrackedDeviceCount)
-            return false;
-
-        const vr::TrackedDevicePose_t& controller = g_tracked_poses[index];
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const unsigned index = left ? kPoseLeft : kPoseRight;
+        const TrackedPose& controller = g_tracked_poses[index];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         if (!controller.bPoseIsValid || !controller.bDeviceIsConnected ||
             !hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
             return false;
 
-        const vr::HmdMatrix34_t& hm = hmd.mDeviceToAbsoluteTracking;
-        const vr::HmdMatrix34_t& cm = controller.mDeviceToAbsoluteTracking;
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
+        const Mat34& cm = controller.mDeviceToAbsoluteTracking;
         const float dx = cm.m[0][3] - hm.m[0][3];
         const float dy = cm.m[1][3] - hm.m[1][3];
         const float dz = cm.m[2][3] - hm.m[2][3];
@@ -2077,20 +2075,13 @@ namespace trlvr
 
     bool vr_controller_tracking_pose(bool left, float pos[3], float rot[9])
     {
-        if (!g_ready || !g_system || !g_pose_valid || !pos || !rot)
+        if (!g_ready || !g_pose_valid || !pos || !rot)
             return false;
-        const vr::ETrackedControllerRole role = left
-            ? vr::TrackedControllerRole_LeftHand
-            : vr::TrackedControllerRole_RightHand;
-        const vr::TrackedDeviceIndex_t index =
-            g_system->GetTrackedDeviceIndexForControllerRole(role);
-        if (index == vr::k_unTrackedDeviceIndexInvalid ||
-            index >= vr::k_unMaxTrackedDeviceCount)
-            return false;
-        const vr::TrackedDevicePose_t& controller = g_tracked_poses[index];
+        const unsigned index = left ? kPoseLeft : kPoseRight;
+        const TrackedPose& controller = g_tracked_poses[index];
         if (!controller.bPoseIsValid || !controller.bDeviceIsConnected)
             return false;
-        const vr::HmdMatrix34_t& cm = controller.mDeviceToAbsoluteTracking;
+        const Mat34& cm = controller.mDeviceToAbsoluteTracking;
         for (int r = 0; r < 3; ++r)
         {
             pos[r] = cm.m[r][3];
@@ -2104,8 +2095,8 @@ namespace trlvr
     {
         if (!g_ready || !g_pose_valid || !fx || !fz)
             return false;
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         if (!hmd.bPoseIsValid)
             return false;
         float x = -hmd.mDeviceToAbsoluteTracking.m[0][2];
@@ -2120,23 +2111,16 @@ namespace trlvr
 
     bool vr_controller_body_forward_speed(bool left, float* speed)
     {
-        if (!speed || !g_ready || !g_system || !g_pose_valid)
+        if (!speed || !g_ready || !g_pose_valid)
             return false;
-        const vr::ETrackedControllerRole role = left
-            ? vr::TrackedControllerRole_LeftHand
-            : vr::TrackedControllerRole_RightHand;
-        const vr::TrackedDeviceIndex_t index =
-            g_system->GetTrackedDeviceIndexForControllerRole(role);
-        if (index == vr::k_unTrackedDeviceIndexInvalid ||
-            index >= vr::k_unMaxTrackedDeviceCount)
-            return false;
-        const vr::TrackedDevicePose_t& controller = g_tracked_poses[index];
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const unsigned index = left ? kPoseLeft : kPoseRight;
+        const TrackedPose& controller = g_tracked_poses[index];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         if (!controller.bPoseIsValid || !controller.bDeviceIsConnected ||
             !hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
             return false;
-        const vr::HmdMatrix34_t& hm = hmd.mDeviceToAbsoluteTracking;
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
         float fx = -hm.m[0][2], fz = -hm.m[2][2];
         const float length = sqrtf(fx * fx + fz * fz);
         if (length < 1.0e-4f)
@@ -2169,18 +2153,11 @@ namespace trlvr
             !std::isfinite(metres) || !vr_controller_body_position(
                 left, right, up, forward))
             return false;
-        const vr::ETrackedControllerRole role = left
-            ? vr::TrackedControllerRole_LeftHand
-            : vr::TrackedControllerRole_RightHand;
-        const vr::TrackedDeviceIndex_t index =
-            g_system->GetTrackedDeviceIndexForControllerRole(role);
-        if (index == vr::k_unTrackedDeviceIndexInvalid ||
-            index >= vr::k_unMaxTrackedDeviceCount)
-            return false;
-        const vr::HmdMatrix34_t& cm =
+        const unsigned index = left ? kPoseLeft : kPoseRight;
+        const Mat34& cm =
             g_tracked_poses[index].mDeviceToAbsoluteTracking;
-        const vr::HmdMatrix34_t& hm =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+        const Mat34& hm =
+            g_tracked_poses[kPoseHmd]
                 .mDeviceToAbsoluteTracking;
         float fx = -hm.m[0][2], fz = -hm.m[2][2];
         const float length = sqrtf(fx * fx + fz * fz);
@@ -2202,14 +2179,14 @@ namespace trlvr
     bool vr_project_body_point(Eye eye, float right, float up, float forward,
                                float* u, float* v)
     {
-        if (!u || !v || eye == EyeCenter || !g_ready || !g_system ||
+        if (!u || !v || eye == EyeCenter || !g_ready ||
             !g_pose_valid)
             return false;
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
             return false;
-        const vr::HmdMatrix34_t& hm = hmd.mDeviceToAbsoluteTracking;
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
         float fx = -hm.m[0][2], fz = -hm.m[2][2];
         const float length = sqrtf(fx * fx + fz * fz);
         if (length < 1.0e-4f)
@@ -2227,8 +2204,7 @@ namespace trlvr
         for (int axis = 0; axis < 3; ++axis)
             for (int row = 0; row < 3; ++row)
                 head[axis] += hm.m[row][axis] * tracking[row];
-        const vr::EVREye e = eye == EyeLeft ? vr::Eye_Left : vr::Eye_Right;
-        const vr::HmdMatrix34_t eye_to_head = g_system->GetEyeToHeadTransform(e);
+        const Mat34 eye_to_head = eye_to_head_matrix(eye);
         const float delta[3] = {
             head[0] - eye_to_head.m[0][3],
             head[1] - eye_to_head.m[1][3],
@@ -2256,7 +2232,7 @@ namespace trlvr
     bool vr_project_head_point(Eye eye, float x, float y, float z,
                                float* u, float* v)
     {
-        if (!u || !v || eye == EyeCenter || !g_ready || !g_system ||
+        if (!u || !v || eye == EyeCenter || !g_ready ||
             !g_pose_valid)
             return false;
         // Controller-to-head translations use world_scale * move_scale.
@@ -2266,9 +2242,7 @@ namespace trlvr
         if (!(scale > 0.0f) || !std::isfinite(scale))
             return false;
         const float head[3] = { x / scale, -y / scale, -z / scale };
-        const vr::EVREye e = eye == EyeLeft ? vr::Eye_Left : vr::Eye_Right;
-        const vr::HmdMatrix34_t eye_to_head =
-            g_system->GetEyeToHeadTransform(e);
+        const Mat34 eye_to_head = eye_to_head_matrix(eye);
         const float delta[3] = {
             head[0] - eye_to_head.m[0][3],
             head[1] - eye_to_head.m[1][3],
@@ -2289,6 +2263,76 @@ namespace trlvr
         *u = (point[0] / depth - projection.tan_left) / dx;
         // Texture v runs down from the up edge, whose tangent OpenVR calls
         // "bottom" (its top/bottom are backwards; see projection_from_tangents).
+        *v = (projection.tan_bottom - point[1] / depth) / dy;
+        return std::isfinite(*u) && std::isfinite(*v);
+    }
+
+    bool vr_head_tracking_level(float position[3], float* forward_x,
+                                float* forward_z)
+    {
+        if (!position || !forward_x || !forward_z || !g_ready ||
+            !g_pose_valid)
+            return false;
+        const TrackedPose& hmd = g_tracked_poses[kPoseHmd];
+        if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+            return false;
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
+        const float fx = -hm.m[0][2], fz = -hm.m[2][2];
+        const float length = sqrtf(fx * fx + fz * fz);
+        if (length < 1.0e-4f)
+            return false;
+        for (int axis = 0; axis < 3; ++axis)
+            position[axis] = hm.m[axis][3];
+        *forward_x = fx / length;
+        *forward_z = fz / length;
+        return std::isfinite(position[0]) && std::isfinite(position[1]) &&
+               std::isfinite(position[2]);
+    }
+
+    bool vr_project_tracking_point(Eye eye, const float point_in[3],
+                                   float* u, float* v, float* depth_out)
+    {
+        if (!point_in || !u || !v || !depth_out || eye == EyeCenter ||
+            !g_ready || !g_pose_valid)
+            return false;
+        const TrackedPose& hmd = g_tracked_poses[kPoseHmd];
+        if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+            return false;
+        // As vr_project_body_point: the offset from the head into the head's
+        // own (pitched and rolled) axes, then into the eye.
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
+        const float tracking[3] = {
+            point_in[0] - hm.m[0][3],
+            point_in[1] - hm.m[1][3],
+            point_in[2] - hm.m[2][3]
+        };
+        float head[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int row = 0; row < 3; ++row)
+                head[axis] += hm.m[row][axis] * tracking[row];
+        const Mat34 eye_to_head = eye_to_head_matrix(eye);
+        const float delta[3] = {
+            head[0] - eye_to_head.m[0][3],
+            head[1] - eye_to_head.m[1][3],
+            head[2] - eye_to_head.m[2][3]
+        };
+        float point[3]{};
+        for (int axis = 0; axis < 3; ++axis)
+            for (int row = 0; row < 3; ++row)
+                point[axis] += eye_to_head.m[row][axis] * delta[row];
+        const float depth = -point[2];
+        *depth_out = depth;
+        if (!std::isfinite(depth))
+            return false;
+        *u = *v = 0.0f;
+        if (depth < 1.0e-4f)
+            return true;
+        const EyeInfo& projection = vr_eye(eye);
+        const float dx = projection.tan_right - projection.tan_left;
+        const float dy = projection.tan_bottom - projection.tan_top;
+        if (dx < 1.0e-4f || dy < 1.0e-4f)
+            return false;
+        *u = (point[0] / depth - projection.tan_left) / dx;
         *v = (projection.tan_bottom - point[1] / depth) / dy;
         return std::isfinite(*u) && std::isfinite(*v);
     }
@@ -2341,7 +2385,7 @@ namespace trlvr
         bool g_cal_locked[2] = { false, false };
         // The pose each hand is held at, fixed in tracking space when
         // calibration starts so it does not follow the head.
-        vr::HmdMatrix34_t g_cal_reference[2]{};
+        Mat34 g_cal_reference[2]{};
         // Locked this pass, not yet saved: rotation then metres.
         float g_cal_pending[2][12]{};
         int g_cal_step = 0;            // 0 hands, 1 pistol aim
@@ -2360,12 +2404,12 @@ namespace trlvr
 
         // A tracking-space pose in the head frame, composed exactly as
         // vr_controller_head_pose composes a controller.
-        bool tracking_pose_to_head(const vr::HmdMatrix34_t& pose, Mat4* out)
+        bool tracking_pose_to_head(const Mat34& pose, Mat4* out)
         {
             if (!g_ready || !g_pose_valid)
                 return false;
-            const vr::TrackedDevicePose_t& hmd =
-                g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+            const TrackedPose& hmd =
+                g_tracked_poses[kPoseHmd];
             if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
                 return false;
             const float scale = tune_world_scale();
@@ -2419,8 +2463,8 @@ namespace trlvr
     {
         if (!x || !z || !g_ready || !g_pose_valid)
             return false;
-        const vr::HmdMatrix34_t& hm =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+        const Mat34& hm =
+            g_tracked_poses[kPoseHmd]
                 .mDeviceToAbsoluteTracking;
         const float fx = -hm.m[0][2], fz = -hm.m[2][2];
         const float length = sqrtf(fx * fx + fz * fz);
@@ -2463,6 +2507,11 @@ namespace trlvr
 
     bool vr_hand_fingertip_head_position(bool left, float out[3])
     {
+        // Lara's drawn index tip where the third-person hands give one; the
+        // guess below (along the grip axis) lands by the thumb's first
+        // joint on a closed hand (user, 2026-10-28).
+        if (out && camera_hand_index_tip_head(left, out))
+            return true;
         Mat4 grip;
         float palm[3];
         if (!out || !vr_hand_palm_head_position(left, palm) ||
@@ -2496,8 +2545,8 @@ namespace trlvr
         if (!head || !right || !up || !forward || !g_ready ||
             !g_pose_valid)
             return false;
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
             return false;
         const float scale = tune_world_scale() * tune_move_scale();
@@ -2508,7 +2557,7 @@ namespace trlvr
         // tracking space.
         const float local[3] = { head[0] / scale, -head[1] / scale,
                                  -head[2] / scale };
-        const vr::HmdMatrix34_t& hm = hmd.mDeviceToAbsoluteTracking;
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
         float d[3];
         for (int row = 0; row < 3; ++row)
             d[row] = hm.m[row][0] * local[0] + hm.m[row][1] * local[1] +
@@ -2553,7 +2602,7 @@ namespace trlvr
         {
             float at[3];
             theatre_point(r, u, f, at);
-            vr::HmdMatrix34_t pose{};
+            Mat34 pose{};
             pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
             pose.m[0][3] = at[0];
             pose.m[1][3] = at[1];
@@ -2660,7 +2709,7 @@ namespace trlvr
         const float bottom = -config().board_diorama_below;
         const float top = bottom + config().board_diorama_height;
         // The eye in the box frame.
-        const float* m = &g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+        const float* m = &g_tracked_poses[kPoseHmd]
                               .mDeviceToAbsoluteTracking.m[0][0];
         float centre[3];
         diorama_point(0.0f, 0.0f, 0.0f, centre);
@@ -2683,7 +2732,7 @@ namespace trlvr
         {
             float at[3];
             diorama_point(r, u, f, at);
-            vr::HmdMatrix34_t pose{};
+            Mat34 pose{};
             pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
             pose.m[0][3] = at[0];
             pose.m[1][3] = at[1];
@@ -2769,7 +2818,7 @@ namespace trlvr
             else
                 diorama_point(l[i - 6][0], l[i - 6][1], -hd - 0.01f, at);
             colours[i] = i < 6 ? bar : size;
-            vr::HmdMatrix34_t pose{};
+            Mat34 pose{};
             pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
             pose.m[0][3] = at[0];
             pose.m[1][3] = at[1];
@@ -2821,8 +2870,7 @@ namespace trlvr
         };
         if (g_theatre_drag >= 0 && g_handle_board != board)
             end_drag();
-        if (!(g_theatre_active || g_diorama_active) || !g_pose_valid ||
-            !g_system)
+        if (!(g_theatre_active || g_diorama_active) || !g_pose_valid)
         {
             end_drag();
             if (g_resize_drag >= 0)
@@ -2863,7 +2911,7 @@ namespace trlvr
                               c ? hh + 0.03f : -hh - 0.03f,
                               config().cutscene_screen_distance,
                               resize_tracking);
-            vr::HmdMatrix34_t resize_pose{};
+            Mat34 resize_pose{};
             resize_pose.m[0][0] = resize_pose.m[1][1] =
                 resize_pose.m[2][2] = 1.0f;
             resize_pose.m[0][3] = resize_tracking[0];
@@ -2907,7 +2955,7 @@ namespace trlvr
         else
             theatre_point(0.0f, -hh - 0.07f,
                           config().cutscene_screen_distance, handle_tracking);
-        vr::HmdMatrix34_t pose{};
+        Mat34 pose{};
         pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
         pose.m[0][3] = handle_tracking[0];
         pose.m[1][3] = handle_tracking[1];
@@ -3001,19 +3049,14 @@ namespace trlvr
                 entered[hand] = true;
             g_theatre_handle_hover[hand] = near_handle;
             // The controller in tracking space, for the drag.
-            const vr::TrackedDeviceIndex_t index =
-                g_system->GetTrackedDeviceIndexForControllerRole(left
-                    ? vr::TrackedControllerRole_LeftHand
-                    : vr::TrackedControllerRole_RightHand);
-            if (index == vr::k_unTrackedDeviceIndexInvalid ||
-                index >= vr::k_unMaxTrackedDeviceCount ||
-                !g_tracked_poses[index].bPoseIsValid)
+            const unsigned index = left ? kPoseLeft : kPoseRight;
+            if (!g_tracked_poses[index].bPoseIsValid)
             {
                 if (g_theatre_drag == hand)
                     end_drag();
                 continue;
             }
-            const vr::HmdMatrix34_t& cm =
+            const Mat34& cm =
                 g_tracked_poses[index].mDeviceToAbsoluteTracking;
             const float at[3] = { cm.m[0][3], cm.m[1][3], cm.m[2][3] };
             // The size handle (before the move bar: the nearer one wins
@@ -3126,7 +3169,7 @@ namespace trlvr
 
     bool vr_head_clip_matrix(Eye eye, float out[4][4])
     {
-        if (!out || eye == EyeCenter || !g_ready || !g_system || !g_pose_valid)
+        if (!out || eye == EyeCenter || !g_ready || !g_pose_valid)
             return false;
         // The same mapping as vr_project_head_point, as one matrix: head
         // game units -> OpenVR head metres -> eye metres -> clip.
@@ -3137,8 +3180,7 @@ namespace trlvr
         a.m[0][0] = 1.0f / s;
         a.m[1][1] = -1.0f / s;
         a.m[2][2] = -1.0f / s;
-        const vr::HmdMatrix34_t eh = g_system->GetEyeToHeadTransform(
-            eye == EyeLeft ? vr::Eye_Left : vr::Eye_Right);
+        const Mat34 eh = eye_to_head_matrix(eye);
         Mat4 b = Mat4::identity();
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
@@ -3203,8 +3245,8 @@ namespace trlvr
         // 10 cm below the eyes), fixed in tracking space.
         void calibration_start_aim()
         {
-            const vr::HmdMatrix34_t& head =
-                g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+            const Mat34& head =
+                g_tracked_poses[kPoseHmd]
                     .mDeviceToAbsoluteTracking;
             float fx = -head.m[0][2], fz = -head.m[2][2];
             const float length = sqrtf(fx * fx + fz * fz);
@@ -3246,7 +3288,7 @@ namespace trlvr
     {
         if (!g_cal_active || g_cal_step != 1 || !head_point)
             return false;
-        vr::HmdMatrix34_t pose{};
+        Mat34 pose{};
         pose.m[0][0] = pose.m[1][1] = pose.m[2][2] = 1.0f;
         for (int i = 0; i < 3; ++i)
             pose.m[i][3] = g_cal_target[i];
@@ -3322,8 +3364,8 @@ namespace trlvr
                     "bindings provide them)", hand ? "right" : "left");
                 return false;
             }
-        const vr::HmdMatrix34_t& head =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+        const Mat34& head =
+            g_tracked_poses[kPoseHmd]
                 .mDeviceToAbsoluteTracking;
         float fx = -head.m[0][2], fz = -head.m[2][2];
         const float length = sqrtf(fx * fx + fz * fz);
@@ -3382,7 +3424,7 @@ namespace trlvr
                 fwd[0] * up[1] - fwd[1] * up[0] };
             const float* local[3] = { right, up, fwd };
             // Turn the grip's right/up/barrel onto body right/up/forward.
-            vr::HmdMatrix34_t& pose = g_cal_reference[hand];
+            Mat34& pose = g_cal_reference[hand];
             for (int i = 0; i < 3; ++i)
                 for (int j = 0; j < 3; ++j)
                     pose.m[i][j] = tilted[0][i] * local[0][j] +
@@ -3470,21 +3512,13 @@ namespace trlvr
 
     bool vr_controller_head_pose(bool left, Mat4* controller_to_head)
     {
-        if (!controller_to_head || !g_ready || !g_system || !g_pose_valid)
+        if (!controller_to_head || !g_ready || !g_pose_valid)
             return false;
 
-        const vr::ETrackedControllerRole role = left
-            ? vr::TrackedControllerRole_LeftHand
-            : vr::TrackedControllerRole_RightHand;
-        const vr::TrackedDeviceIndex_t index =
-            g_system->GetTrackedDeviceIndexForControllerRole(role);
-        if (index == vr::k_unTrackedDeviceIndexInvalid ||
-            index >= vr::k_unMaxTrackedDeviceCount)
-            return false;
-
-        const vr::TrackedDevicePose_t& controller = g_tracked_poses[index];
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const unsigned index = left ? kPoseLeft : kPoseRight;
+        const TrackedPose& controller = g_tracked_poses[index];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         if (!controller.bPoseIsValid || !controller.bDeviceIsConnected ||
             !hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
             return false;
@@ -3507,13 +3541,13 @@ namespace trlvr
     bool vr_body_point_head_position(float right, float up, float forward,
                                      float out[3])
     {
-        if (!out || !g_ready || !g_system || !g_pose_valid)
+        if (!out || !g_ready || !g_pose_valid)
             return false;
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         if (!hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
             return false;
-        const vr::HmdMatrix34_t& hm = hmd.mDeviceToAbsoluteTracking;
+        const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
         float fx = -hm.m[0][2], fz = -hm.m[2][2];
         const float length = sqrtf(fx * fx + fz * fz);
         if (length < 1.0e-4f)
@@ -3524,7 +3558,7 @@ namespace trlvr
         // The inverse of vr_controller_body_position, as a tracking-space
         // pose with no rotation, then the same composition as
         // vr_controller_head_pose so conventions cannot drift apart.
-        vr::HmdMatrix34_t point{};
+        Mat34 point{};
         point.m[0][0] = point.m[1][1] = point.m[2][2] = 1.0f;
         point.m[0][3] = hm.m[0][3] + right * -fz + forward * fx;
         point.m[1][3] = hm.m[1][3] + up;
@@ -3559,8 +3593,8 @@ namespace trlvr
         g_head_yaw = 0.0f;
         ++g_recenter_generation;
         {
-            const vr::HmdMatrix34_t& hm =
-                g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd]
+            const Mat34& hm =
+                g_tracked_poses[kPoseHmd]
                     .mDeviceToAbsoluteTracking;
             const float fx = -hm.m[0][2], fz = -hm.m[2][2];
             const float length = sqrtf(fx * fx + fz * fz);
@@ -3604,13 +3638,13 @@ namespace trlvr
 
     void vr_render_target_size(unsigned* w, unsigned* h)
     {
-        // Asked afresh: it carries SteamVR's resolution setting, which the
-        // user may have changed since start-up (applied on a device reset).
-        if (g_ready && g_system)
+        // Asked afresh: it carries the runtime's resolution setting, which
+        // the user may have changed since start-up (applied on a device
+        // reset).
+        if (g_ready)
         {
-            uint32_t rw = 0, rh = 0;
-            g_system->GetRecommendedRenderTargetSize(&rw, &rh);
-            if (rw && rh)
+            unsigned rw = 0, rh = 0;
+            if (xr_recommended_size(&rw, &rh) && rw && rh)
             {
                 g_rt_width = rw;
                 g_rt_height = rh;
@@ -3654,30 +3688,21 @@ namespace trlvr
                 return;
         }
 
-        // Once the compositor loop is running, the render poses come from
-        // WaitGetPoses (vr_set_render_poses) -- the poses the compositor
-        // assumes each submitted frame was rendered with. Reading our own
-        // un-predicted pose here instead rendered every frame from an older
-        // head position than the compositor expected, so its reprojection
-        // made world-fixed content swim behind head motion.
-        if (g_render_poses_active)
-            return;
-        g_system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseSeated, 0.0f,
-                                                  g_tracked_poses,
-                                                  vr::k_unMaxTrackedDeviceCount);
-        ingest_poses();
+        // The poses come from xrWaitFrame's predicted display time
+        // (vr_set_render_poses), which is the only time OpenXR will locate
+        // anything for. There is nothing to read here.
     }
 
-    void vr_set_render_poses(const void* poses, unsigned count)
+    void vr_set_render_poses(const TrackedPose* poses, unsigned count)
     {
-        if (!g_ready || !poses || count < vr::k_unMaxTrackedDeviceCount)
+        if (!g_ready || !poses || count < kPoseCount)
             return;
         memcpy(g_tracked_poses, poses, sizeof(g_tracked_poses));
         if (!g_render_poses_active)
         {
             g_render_poses_active = true;
-            log("vr: rendering with the compositor's predicted poses "
-                "(WaitGetPoses, seated space)");
+            log("vr: rendering with the runtime's predicted poses "
+                "(xrWaitFrame, LOCAL space)");
         }
         ingest_poses();
     }
@@ -3685,8 +3710,8 @@ namespace trlvr
     static void ingest_poses()
     {
         ++g_head_state_generation;
-        const vr::TrackedDevicePose_t& hmd =
-            g_tracked_poses[vr::k_unTrackedDeviceIndex_Hmd];
+        const TrackedPose& hmd =
+            g_tracked_poses[kPoseHmd];
         g_pose_valid = hmd.bPoseIsValid && hmd.bDeviceIsConnected;
         if (!g_pose_valid)
             return;

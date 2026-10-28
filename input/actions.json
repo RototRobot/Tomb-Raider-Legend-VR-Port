@@ -1,76 +1,180 @@
 {
   "default_bindings": [
-    { "controller_type": "hpmotioncontroller",     "binding_url": "bindings_hpmotioncontroller.json" },
-    { "controller_type": "oculus_touch",           "binding_url": "bindings_oculus_touch.json" },
-    { "controller_type": "holographic_controller", "binding_url": "bindings_holographic_controller.json" },
-    { "controller_type": "knuckles",               "binding_url": "bindings_knuckles.json" }
+    {
+      "controller_type": "hpmotioncontroller",
+      "binding_url": "bindings_hpmotioncontroller.json"
+    },
+    {
+      "controller_type": "oculus_touch",
+      "binding_url": "bindings_oculus_touch.json"
+    },
+    {
+      "controller_type": "knuckles",
+      "binding_url": "bindings_knuckles.json"
+    },
+    {
+      "controller_type": "holographic_controller",
+      "binding_url": "bindings_holographic_controller.json"
+    }
   ],
-
   "actions": [
-    { "name": "/actions/gameplay/in/move",       "type": "vector2" },
-    { "name": "/actions/gameplay/in/look",       "type": "vector2" },
-
-    { "name": "/actions/gameplay/in/jump",       "type": "boolean" },
-    { "name": "/actions/gameplay/in/interact",   "type": "boolean" },
-    { "name": "/actions/gameplay/in/dive",       "type": "boolean" },
-    { "name": "/actions/gameplay/in/fire",       "type": "boolean" },
-    { "name": "/actions/gameplay/in/grapple",    "type": "boolean" },
-    { "name": "/actions/gameplay/in/grenade",    "type": "boolean" },
-    { "name": "/actions/gameplay/in/aim",        "type": "boolean" },
-    { "name": "/actions/gameplay/in/lockon",     "type": "boolean" },
-    { "name": "/actions/gameplay/in/weapon",     "type": "boolean" },
-    { "name": "/actions/gameplay/in/pause",      "type": "boolean" },
-
-    { "name": "/actions/gameplay/in/medkit",     "type": "boolean", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/light",      "type": "boolean", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/flick",      "type": "boolean", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/binoculars", "type": "boolean", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/recentre",   "type": "boolean", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/gear_tuning", "type": "boolean", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/pda",        "type": "boolean", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/hand_left",  "type": "pose", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/hand_right", "type": "pose", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/skeleton_left",  "type": "skeleton", "skeleton": "/skeleton/hand/left", "requirement": "optional" },
-    { "name": "/actions/gameplay/in/skeleton_right", "type": "skeleton", "skeleton": "/skeleton/hand/right", "requirement": "optional" },
-    { "name": "/actions/gameplay/out/haptic_left",  "type": "vibration", "requirement": "optional" },
-    { "name": "/actions/gameplay/out/haptic_right", "type": "vibration", "requirement": "optional" }
+    {
+      "name": "/actions/trlvr/in/stick_left",
+      "type": "vector2"
+    },
+    {
+      "name": "/actions/trlvr/in/trigger_left",
+      "type": "vector1"
+    },
+    {
+      "name": "/actions/trlvr/in/squeeze_left",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/trlvr/in/stick_click_left",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/trlvr/in/primary_left",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/secondary_left",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/trackpad_left",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/menu_left",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/trigger_touch_left",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/thumb_touch_left",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/hand_left",
+      "type": "pose"
+    },
+    {
+      "name": "/actions/trlvr/in/hand_xr_left",
+      "type": "pose",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/out/haptic_left",
+      "type": "vibration",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/stick_right",
+      "type": "vector2"
+    },
+    {
+      "name": "/actions/trlvr/in/trigger_right",
+      "type": "vector1"
+    },
+    {
+      "name": "/actions/trlvr/in/squeeze_right",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/trlvr/in/stick_click_right",
+      "type": "boolean"
+    },
+    {
+      "name": "/actions/trlvr/in/primary_right",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/secondary_right",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/trackpad_right",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/menu_right",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/trigger_touch_right",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/thumb_touch_right",
+      "type": "boolean",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/in/hand_right",
+      "type": "pose"
+    },
+    {
+      "name": "/actions/trlvr/in/hand_xr_right",
+      "type": "pose",
+      "requirement": "optional"
+    },
+    {
+      "name": "/actions/trlvr/out/haptic_right",
+      "type": "vibration",
+      "requirement": "optional"
+    }
   ],
-
   "action_sets": [
-    { "name": "/actions/gameplay", "usage": "single" }
+    {
+      "name": "/actions/trlvr",
+      "usage": "single"
+    }
   ],
-
   "localization": [
     {
       "language_tag": "en_US",
-
-      "/actions/gameplay": "Tomb Raider: Legend",
-
-      "/actions/gameplay/in/move": "Move (W A S D)",
-      "/actions/gameplay/in/look": "Turn the camera (mouse)",
-      "/actions/gameplay/in/jump": "Jump / surface (Space)",
-      "/actions/gameplay/in/interact": "Action / interact / pull grapple (E)",
-      "/actions/gameplay/in/dive": "Dive (F)",
-      "/actions/gameplay/in/fire": "Fire (left mouse)",
-      "/actions/gameplay/in/grapple": "Throw grapple (Q)",
-      "/actions/gameplay/in/grenade": "Grenade / flare (K)",
-      "/actions/gameplay/in/aim": "Accurate aim (Z)",
-      "/actions/gameplay/in/lockon": "Combat lock-on (G)",
-      "/actions/gameplay/in/weapon": "Switch weapons (End)",
-      "/actions/gameplay/in/pause": "Pause (Esc)",
-      "/actions/gameplay/in/medkit": "Health pack (Home)",
-      "/actions/gameplay/in/light": "Personal light (Delete)",
-      "/actions/gameplay/in/flick": "Board finger flick (Y held)",
-      "/actions/gameplay/in/binoculars": "Binoculars (Page Down)",
-      "/actions/gameplay/in/recentre": "Recentre the view",
-      "/actions/gameplay/in/gear_tuning": "Gear placement mode (developer)",
-      "/actions/gameplay/in/pda": "PDA (Tab)",
-      "/actions/gameplay/in/hand_left": "Left hand grip pose",
-      "/actions/gameplay/in/hand_right": "Right hand grip pose",
-      "/actions/gameplay/in/skeleton_left": "Left hand fingers (skeleton)",
-      "/actions/gameplay/in/skeleton_right": "Right hand fingers (skeleton)",
-      "/actions/gameplay/out/haptic_left": "Left handhold cue",
-      "/actions/gameplay/out/haptic_right": "Right handhold cue"
+      "/actions/trlvr": "Tomb Raider: Legend VR",
+      "/actions/trlvr/in/stick_left": "stick left",
+      "/actions/trlvr/in/trigger_left": "trigger left",
+      "/actions/trlvr/in/squeeze_left": "squeeze left",
+      "/actions/trlvr/in/stick_click_left": "stick click left",
+      "/actions/trlvr/in/primary_left": "primary left",
+      "/actions/trlvr/in/secondary_left": "secondary left",
+      "/actions/trlvr/in/trackpad_left": "trackpad left",
+      "/actions/trlvr/in/menu_left": "menu left",
+      "/actions/trlvr/in/trigger_touch_left": "trigger touch left",
+      "/actions/trlvr/in/thumb_touch_left": "thumb touch left",
+      "/actions/trlvr/in/hand_left": "hand left",
+      "/actions/trlvr/in/hand_xr_left": "hand xr left",
+      "/actions/trlvr/out/haptic_left": "haptic left",
+      "/actions/trlvr/in/stick_right": "stick right",
+      "/actions/trlvr/in/trigger_right": "trigger right",
+      "/actions/trlvr/in/squeeze_right": "squeeze right",
+      "/actions/trlvr/in/stick_click_right": "stick click right",
+      "/actions/trlvr/in/primary_right": "primary right",
+      "/actions/trlvr/in/secondary_right": "secondary right",
+      "/actions/trlvr/in/trackpad_right": "trackpad right",
+      "/actions/trlvr/in/menu_right": "menu right",
+      "/actions/trlvr/in/trigger_touch_right": "trigger touch right",
+      "/actions/trlvr/in/thumb_touch_right": "thumb touch right",
+      "/actions/trlvr/in/hand_right": "hand right",
+      "/actions/trlvr/in/hand_xr_right": "hand xr right",
+      "/actions/trlvr/out/haptic_right": "haptic right"
     }
   ]
 }

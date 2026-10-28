@@ -43,6 +43,23 @@ namespace dxvk {
   void DxvkXrProvider::initInstanceExtensions() {
     std::lock_guard<dxvk::mutex> lock(m_mutex);
 
+    // TRL VR: the proxy owns the OpenXR instance and has already asked the
+    // runtime which Vulkan extensions it needs (XR_KHR_vulkan_enable). It
+    // leaves both lists in the process environment before this DLL creates
+    // its instance, so nothing here has to load OpenXR at all.
+    std::string envInstance = env::getEnvVar("TRLVR_XR_VK_INSTANCE_EXTENSIONS");
+    std::string envDevice   = env::getEnvVar("TRLVR_XR_VK_DEVICE_EXTENSIONS");
+
+    if (!envInstance.empty() || !envDevice.empty()) {
+      m_insExtensions = this->parseExtensionList(envInstance);
+      m_devExtensions = this->parseExtensionList(envDevice);
+      m_initializedInsExt = true;
+      m_initializedDevExt = true;
+      Logger::info(str::format("OpenXR: instance extensions from the VR proxy: ", envInstance));
+      Logger::info(str::format("OpenXR: device extensions from the VR proxy: ", envDevice));
+      return;
+    }
+
     if (!m_wineOxr)
       m_wineOxr = this->loadLibrary();
 
@@ -130,13 +147,15 @@ namespace dxvk {
     std::stringstream strstream(str);
     std::string       section;
     
-    while (std::getline(strstream, section, ' '))
-      result.push_back(vk::makeExtension(section.c_str()));
-    
+    while (std::getline(strstream, section, ' ')) {
+      if (!section.empty())
+        result.push_back(vk::makeExtension(section.c_str()));
+    }
+
     return result;
   }
-  
-  
+
+
   void DxvkXrProvider::shutdown() {
     if (m_loadedOxrApi)
       this->freeLibrary();

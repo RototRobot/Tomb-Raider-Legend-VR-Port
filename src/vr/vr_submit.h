@@ -1,15 +1,10 @@
 #pragma once
-// Handing finished frames to the compositor.
+// Handing finished frames to the headset.
 //
-// OpenVR will not take a Direct3D 9 texture. Our DXVK fork exports
-// Direct3DCreateVR9, which gives back the VkImage and the device/queue handles
-// behind any D3D9 surface, so the back buffer the game just drew can go
-// straight to the compositor with no copy.
-//
-// This stage submits the same image to both eyes -- mono. It exists to prove
-// the interop, the Scene session and the compositor timing all work before
-// stereo depends on them.
-
+// OpenXR has no Direct3D 9 binding. Our DXVK fork exports Direct3DCreateVR9,
+// which gives the Vulkan device behind the D3D9 one -- what the OpenXR
+// session is created on -- and copies the back buffer the game just drew
+// into the runtime's swapchain image.
 #include <d3d9.h>
 
 namespace trlvr
@@ -18,6 +13,9 @@ namespace trlvr
     // its argument straight to DXVK's own device type.
     bool vr_submit_init(IDirect3DDevice9* real_device);
     void vr_submit_shutdown();
+    // Before the real device is released: the OpenXR session lives on its
+    // Vulkan device and has to go first.
+    void vr_submit_device_closing(IDirect3DDevice9* real_device);
     bool vr_submit_ready();
 
     // Call with the swap chain's back buffer, before presenting it. In stereo
@@ -25,7 +23,8 @@ namespace trlvr
     // submits both; in mono it submits the one image to both eyes.
     void vr_submit_frame(IDirect3DSurface9* back_buffer);
 
-    // Blocks until the compositor wants the next frame, and refreshes poses.
+    // Blocks until the runtime wants the next frame (xrWaitFrame), begins it
+    // and refreshes the poses.
     // This is what paces the game to the headset.
     void vr_submit_wait();
     // Counts one game draw call for the 5 s performance line.
@@ -42,4 +41,9 @@ namespace trlvr
     // The main hand points at another mod's ImGui menu panel: its trigger
     // is the menu's mouse button, not the game's.
     bool vr_submit_imgui_pointing();
+
+    // The gamma ramp the game asks the device for (its brightness and
+    // contrast sliders): a D3DGAMMARAMP. Windows ignores it in a window,
+    // so the submit path applies it to the frame instead.
+    void vr_submit_set_game_ramp(const void* ramp);
 }

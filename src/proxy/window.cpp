@@ -31,11 +31,53 @@ namespace trlvr
         PFN_SetCursorPos g_real_set_cursor_pos = nullptr;
         bool g_cursor_fix_installed = false;
 
+        // The settings overlay takes the mouse (window_block_game_mouse).
+        // The game does not only get the mouse as messages: it also polls
+        // GetCursorPos for the camera and puts the cursor back with
+        // SetCursorPos, so while blocked its SetCursorPos does nothing and
+        // its GetCursorPos reports the point it last recentred to -- no
+        // movement, as far as it can tell.
+        const uintptr_t kGameGetCursorPosIat = 0x00EFD270;
+        using PFN_GetCursorPos = BOOL(WINAPI*)(LPPOINT);
+        PFN_GetCursorPos g_real_get_cursor_pos = nullptr;
+        bool g_mouse_blocked = false;
+        POINT g_recentre_point = { 0, 0 };
+        bool g_have_recentre_point = false;
+
+        BOOL WINAPI game_get_cursor_pos(LPPOINT point)
+        {
+            if (g_mouse_blocked && point)
+            {
+                if (g_have_recentre_point)
+                {
+                    *point = g_recentre_point;
+                    return TRUE;
+                }
+                // Not recentred yet: hold whatever it first reads.
+                static POINT held{};
+                static bool have_held = false;
+                if (!have_held)
+                    have_held = g_real_get_cursor_pos(&held) != FALSE;
+                *point = held;
+                return TRUE;
+            }
+            return g_real_get_cursor_pos(point);
+        }
+
         BOOL WINAPI game_set_cursor_pos(int x, int y)
         {
             HWND hwnd = g_hwnd;
-            if (_ReturnAddress() == reinterpret_cast<void*>(kRecentreReturn) &&
-                hwnd && IsWindow(hwnd))
+            const bool recentre =
+                _ReturnAddress() == reinterpret_cast<void*>(kRecentreReturn);
+            if (recentre)
+            {
+                g_recentre_point.x = x;
+                g_recentre_point.y = y;
+                g_have_recentre_point = true;
+            }
+            if (g_mouse_blocked)
+                return TRUE;
+            if (recentre && hwnd && IsWindow(hwnd))
             {
                 const POINT centre = { x, y };
                 MONITORINFO mi{ sizeof(mi) };
@@ -88,6 +130,25 @@ namespace trlvr
                 VirtualProtect(slot, sizeof(void*), old, &old);
                 log("window: game mouse recentre redirected to the window's "
                     "own client centre (SetCursorPos import patched)");
+
+                void* real_get = reinterpret_cast<void*>(
+                    GetProcAddress(user32, "GetCursorPos"));
+                void** get_slot =
+                    reinterpret_cast<void**>(kGameGetCursorPosIat);
+                if (real_get && *get_slot == real_get &&
+                    VirtualProtect(get_slot, sizeof(void*), PAGE_READWRITE,
+                                   &old))
+                {
+                    g_real_get_cursor_pos =
+                        reinterpret_cast<PFN_GetCursorPos>(real_get);
+                    *get_slot = reinterpret_cast<void*>(&game_get_cursor_pos);
+                    VirtualProtect(get_slot, sizeof(void*), old, &old);
+                }
+                else
+                {
+                    log("window: game GetCursorPos import not as expected; "
+                        "the settings overlay cannot hold the camera still");
+                }
             }
             __except(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -238,6 +299,16 @@ namespace trlvr
         if (reports++ < 6)
             log("window: cursor was outside the game window at (%ld, %ld); "
                 "moved inside before a click", cursor.x, cursor.y);
+    }
+
+    HWND window_handle()
+    {
+        return g_hwnd;
+    }
+
+    void window_block_game_mouse(bool blocked)
+    {
+        g_mouse_blocked = blocked && g_real_get_cursor_pos;
     }
 
     void window_tick()

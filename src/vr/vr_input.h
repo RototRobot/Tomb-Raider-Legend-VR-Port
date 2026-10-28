@@ -3,9 +3,9 @@
 // The VR controllers, as the keyboard and mouse the game is played with.
 //
 // Actions are named for what they do in the game and each presses a fixed
-// key; which button produces which action lives in input/bindings_*.json and
-// SteamVR's own bindings UI. See vr_input.cpp for why this is keyboard and
-// mouse rather than a gamepad.
+// key; which button produces which action is suggested per controller profile
+// in xr_runtime.cpp (the runtime may be rebound in its own UI). See vr_input.cpp
+// for why this is keyboard and mouse rather than a gamepad.
 
 namespace trlvr
 {
@@ -63,6 +63,11 @@ namespace trlvr
     void vr_input_game_motors(float low, float high);
     // The grip button of one controller, as last sampled.
     bool vr_input_grip_held(bool left);
+    // God mode's grab for one physical hand (0 left, 1 right): with
+    // [vr] god_grab_pose and finger data, a pinch (trigger + thumb down) or
+    // a fist (trigger + grip) from the player's fingers (finger_grabbing);
+    // otherwise the grip button.
+    bool vr_input_hand_grab(int hand);
     // SteamVR skeletal input (finger tracking): each finger's curl, 0
     // straight .. 1 curled (thumb, index, middle, ring, pinky), and the
     // splay between neighbours (0 touching .. 1 apart). False when that
@@ -94,17 +99,26 @@ namespace trlvr
     // flashlight. The centre is a handle that moves the whole cross.
     // Third-person scale / zoom sliders on the off hand's upturned palm
     // (2026-10-10). Body-frame metres (right, up, forward), as
-    // vr_body_point_head_position takes them. Slider 0 is scale, 1 zoom.
+    // vr_body_point_head_position takes them. Slider 0 is scale, 1 zoom,
+    // 2 side.
     struct VrTpSliders
     {
         bool visible = false;
         float opacity = 0.0f;           // 0..1, fading in
-        float start[2][3]{};            // each bar's ends
-        float end[2][3]{};
-        float knob[2][3]{};             // each knob's centre
-        bool hover[2] = { false, false };
-        bool held[2] = { false, false };
-        float icon[2][3]{};             // where each slider's icon sits
+        float start[3][3]{};            // each bar's ends
+        float end[3][3]{};
+        float knob[3][3]{};             // each knob's centre
+        bool hover[3] = { false, false, false };
+        bool held[3] = { false, false, false };
+        float icon[3][3]{};             // where each slider's icon sits
+        int notches[3] = { 0, 0, 0 };   // sticking points per bar
+        float notch[3][2]{};            // their body-frame x
+        // [developer] slider_debug = 1: the grab sphere round each knob
+        // and the other hand's two test points (0 palm, 1 index tip).
+        bool debug = false;
+        float reach = 0.0f;             // metres
+        bool probe_ok[2] = { false, false };
+        float probe[2][3]{};
     };
     bool vr_input_tp_sliders(VrTpSliders* out);
 

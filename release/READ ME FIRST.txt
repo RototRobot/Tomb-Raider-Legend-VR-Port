@@ -1,5 +1,5 @@
 ================================================================
-  Tomb Raider: Legend  --  VR mod                    VERSION 1.0.0
+  Tomb Raider: Legend  --  VR mod                    VERSION 1.1.0
 ================================================================
 
 Please report anything that goes wrong (see REPORTING PROBLEMS at the end)
@@ -8,28 +8,40 @@ Please report anything that goes wrong (see REPORTING PROBLEMS at the end)
 WHAT YOU NEED
 -------------
   * Tomb Raider: Legend for PC -- the Steam or the GOG release
-  * SteamVR and a PC VR headset with tracked controllers
+  * A PC VR headset with tracked controllers, and SteamVR (or another
+    OpenXR runtime that runs 32-bit games)
     (tested on HP Reverb G2; Oculus Touch, Index and WMR bindings included)
 
 The original game files are not modified. The mod adds files beside trl.exe,
 and its launcher writes a separate patched copy named trl_vr.exe.
 
 
-NEW IN 1.0.0
+NEW IN 1.1.0
 ------------
-  * Soft body in third person too (immersive controls, body_soft = 1):
-    her chest moves with her and gives under your hands.
-  * Your whole hand meets Lara's body now -- palm, sides and fingers, not
-    just the fingertip.
-  * Player model mods work: the Lara Remastered Player Model Mod (and other
-    replacement models with many more bones) no longer leave Lara
-    invisible in first person.
-  * TR7-Menu-Hook (the mod loader those mods need) shows its menu on a
-    panel over your off hand. Point your main hand at it -- a laser shows
-    where -- and pull the main trigger to click. While you point at the
-    panel the game does not see that trigger. [vr] imgui_panel = 0 turns
-    the panel off.
-  * [developer] function_keys = 0 frees F1..F9 for other mods' menus.
+  * OpenXR, with OpenVR as the fallback. The mod uses OpenXR by default and
+    falls back to OpenVR / SteamVR if OpenXR cannot start. Delete
+    openxr_loader.dll (or set vr_runtime = openvr) to always use OpenVR.
+    The main menu shows the version and the runtime in use.
+  * A settings panel in the headset: hold both sticks in for 0.6 s
+    (Oculus Touch: hold the left menu button), or press Insert. Point at it
+    with your main hand and pull the trigger, or use the sticks and A / B.
+    Changes apply at once and are saved to trlvr.ini.
+  * TR7-Menu-Hook's options are built into that panel when it is installed:
+    refill health, next outfit, game speed, wireframe, hide UI, debug
+    keypad and its saved settings.
+  * God mode (board view): pinch or make a fist on Lara to pick her up,
+    carry her and throw her by letting go mid-swing.
+  * Body physics: her chest and rear give and bounce in third person, and a
+    hand leaning on her in god mode pushes her body away.
+  * Smooth glide when switching camera style.
+  * Picture brightness and contrast for the headset (settings panel).
+  * The palm sliders gain a third bar that moves the camera left or right
+    (over either shoulder). Each camera style keeps its own size, zoom and
+    side; a notch marks each default and the knob sticks there. Your index
+    fingertip can now grab the knobs as well as your palm.
+  * Movies are shown at their real 4:3 shape.
+  * Smoother play with some player model mods.
+
 
 ------------------------------------------------------------
 1. PREPARE THE GAME
@@ -76,11 +88,11 @@ STEAM: right-click the game > Properties > Launch Options and enter
 
     "C:\Program Files (x86)\Steam\steamapps\common\Tomb Raider Legend\trlvr_launcher.exe" %command%
 
-(adjust the path if the game is elsewhere), then start SteamVR and launch the
-game from Steam as usual.
+(adjust the path if the game is elsewhere), then start SteamVR (or your
+OpenXR runtime) and launch the game from Steam as usual.
 
-GOG: start SteamVR, then run trlvr_launcher.exe from the game folder (make a
-shortcut to it if you like).
+GOG: start SteamVR (or your OpenXR runtime), then run trlvr_launcher.exe from
+the game folder (make a shortcut to it if you like).
 
 The launcher makes trl_vr.exe, a large-address-aware copy of the game: this
 2006 32-bit game otherwise runs out of memory at headset resolution.
@@ -156,9 +168,16 @@ Other camera options (third person, immersive controls on):
 
 Optional body:  first_person_body = full   (whole body instead of hands only)
 
-Third person extras: turn your off hand palm up for two sliders that scale
-the world and zoom the camera (saved per camera style). Walking beside a
-wall with nothing drawn, Lara runs her hand along it (wall_touch).
+Third person extras: turn your off hand palm up for three sliders -- the
+size of the world, the camera nearer or farther, and the camera left or
+right of Lara. Touch a knob with your other palm or index finger, grip and
+slide. Each camera style keeps its own; a notch marks each default. Walking
+beside a wall with nothing drawn, Lara runs her hand along it (wall_touch).
+
+SETTINGS PANEL: hold both sticks in for 0.6 s (Oculus Touch: hold the left
+menu button), or press Insert on the keyboard. Cameras, picture, body
+physics, god mode, theatre, diorama and controls are all there, plus
+TR7-Menu-Hook's options when it is installed.
 
 
 ------------------------------------------------------------
@@ -171,6 +190,9 @@ VR CONTROLLERS (classic layout)
                                (in menus: back)
     Left stick double click    recenter the VR view
     Left stick long press      pause (Esc)
+                               (Oculus Touch: the left menu button)
+    Both sticks held in        settings panel
+                               (Oculus Touch: hold the left menu button)
     Right stick                turn
     Right stick click          switch weapons
     Right stick double click   open the PDA
@@ -186,8 +208,9 @@ VR CONTROLLERS (classic layout)
     Y long press               personal light
 
 A long press is 0.65 seconds. VR CONTROLLER BINDINGS.txt has the per-headset
-details. If SteamVR keeps an old custom binding, open SteamVR > Settings >
-Controllers > Manage Controller Bindings and pick the supplied one.
+details. Under OpenVR, if SteamVR keeps an old custom binding, open SteamVR >
+Settings > Controllers > Manage Controller Bindings and pick the supplied one.
+Under OpenXR the bindings are built into the mod.
 
 Keyboard: F1 recentres the view. The game's own keys still work.
 
@@ -223,7 +246,8 @@ SETTINGS WORTH KNOWING (trlvr.ini)
 Every setting has a short explanation in the file itself. Missing settings
 are added on start-up; values you chose are never replaced.
 
-  [vr]  first_person, first_person_tracked_hands, first_person_body
+  [vr]  vr_runtime              auto / openxr / openvr
+        first_person, first_person_tracked_hands, first_person_body
         third_person_mode       classic / shoulder / board / all
         comfort_vignette        off / jumps / full (darkens the view edge)
         physical_crouch         crouch for real to crouch
@@ -236,6 +260,8 @@ are added on start-up; values you chose are never replaced.
         finger_tracking         Lara's fingers follow yours (Quest, Index)
         first_person_hardcore   the view turns with Lara through flips
         wall_touch              third person: her hand along walls
+        body_rear, body_push    third person / god mode body physics
+        picture_brightness, picture_contrast    the headset image
         depth_of_field, fullscreen_effects, fsaa     off / on / game
   [controls]
         immersive_controls      gestures, holsters, hand climbing
@@ -283,7 +309,8 @@ UNINSTALL
 Clear the Steam launch option (Steam) and remove these files from the game
 folder; GOG: rename D3D9.dll.gog-dxwrapper back to D3D9.dll.
 
-    d3d9.dll   d3d9_dxvk.dll   openvr_api.dll   trlvr_launcher.exe
+    d3d9.dll   d3d9_dxvk.dll   openxr_loader.dll   openvr_api.dll
+    trlvr_launcher.exe
     trlvr_actions.json   bindings_*.json
     trlvr.ini   trlvr.log*   trlvr_crash.dmp*   trl_vr.exe
     trlvr_launcher.log   trl_vr_d3d9.log

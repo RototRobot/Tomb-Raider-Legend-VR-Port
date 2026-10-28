@@ -6,7 +6,9 @@ VR third-person camera, and an optional first-person mode where you climb,
 shoot and swing with your own hands.
 
 It runs as a Direct3D 9 proxy (`d3d9.dll`) beside a small fork of DXVK, with a
-launcher that makes the game large-address-aware.
+launcher that makes the game large-address-aware. It talks to the headset
+through OpenXR, and falls back to OpenVR (SteamVR) when OpenXR is not
+available.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
@@ -15,9 +17,10 @@ launcher that makes the game large-address-aware.
 > about that.
 
 > [!NOTE]
-> **Version 1.0.0.** It is playable from start to finish in third person and
+> **Version 1.1.0.** It is playable from start to finish in third person and
 > most of the way in first person. Bug reports with logs are very welcome; see
-> [Troubleshooting](#troubleshooting).
+> [Troubleshooting](#troubleshooting). What changed is in
+> [`release/RELEASE_NOTES_1.1.0.md`](release/RELEASE_NOTES_1.1.0.md).
 
 > [!IMPORTANT]
 > **Windows may block this mod from running.**
@@ -49,8 +52,9 @@ her shoulder.
 ## Requirements
 
 - **Tomb Raider: Legend** for PC: the Steam or the GOG release
-- A SteamVR-compatible headset with two tracked motion controllers
-- **SteamVR** installed and running
+- A PC VR headset with two tracked motion controllers
+- An **OpenXR runtime** that runs 32-bit games (SteamVR's does), or **SteamVR**
+  for the OpenVR fallback
 - A GPU with Vulkan support (DXVK translates the game's Direct3D 9 to Vulkan)
 - Windows
 
@@ -58,6 +62,11 @@ Developed and tested on an **HP Reverb G2**. Bindings ship for Oculus Touch,
 Valve Index, WMR and Reverb G2 controllers. Nothing is specific to one headset:
 field of view, IPD and render resolution are all read from the runtime at
 start-up.
+
+**OpenXR or OpenVR.** `vr_runtime = auto` (the default) uses OpenXR and falls
+back to OpenVR / SteamVR if OpenXR cannot start. Delete `openxr_loader.dll`, or
+set `vr_runtime = openvr`, to always use OpenVR. The hands sit in the same
+place under both. The main menu shows the version and the runtime in use.
 
 ---
 
@@ -76,8 +85,12 @@ start-up.
   and nothing behind you is drawn for nothing.
 - **Level horizon.** The game camera's pitch and roll stay out of your view;
   only your head moves it.
-- **A stable compositor hand-off.** The image given to SteamVR is pinned in
-  video memory (the lesson from the SiN VR mod's NVIDIA crash).
+- **A stable compositor hand-off.** The image given to the headset is pinned
+  in video memory (the lesson from the SiN VR mod's NVIDIA crash).
+- **Picture controls**: brightness and contrast for the headset image, which
+  follow the game's own brightness setting by default.
+- **Movies at their real shape**: the 4:3 movies are no longer squeezed on the
+  movie screen.
 
 
 ### Third person (default)
@@ -86,9 +99,19 @@ start-up.
   auto-centring or shake), `shoulder` (close behind Lara at life size) and
   `board` (Lara a few inches tall on a tabletop world).
 - **Camera collision** keeps the view out of rock and walls.
-- **Scale and zoom by hand**: turn your off hand palm up to bring out two
-  sliders that resize the world and move the camera in or out, saved per
-  camera style. Lara's VR hands scale with it.
+- **Smooth view changes**: switching between the camera styles and first
+  person glides instead of cutting (`view_transition_seconds`).
+- **Scale, zoom and side by hand**: turn your off hand palm up to bring out
+  three sliders: the size of the world, the camera nearer or farther, and the
+  camera to the left or right of Lara (over either shoulder). Touch a knob
+  with your other palm or index finger, grip and slide. Each camera style
+  keeps its own; a small notch marks each default, and the knob sticks there
+  with a click. Lara's VR hands scale with it.
+- **God mode** (`board`): pinch or make a fist on Lara to pick her up, carry
+  her, and throw her by letting go mid-swing. She falls and lands with the
+  game's own physics. A hand leaning on her pushes her body away.
+- **Body physics**: her chest and rear give and bounce as she moves and when
+  your hands touch them.
 - **Board diorama** (`board_diorama = 1`): in `board` the tabletop world sits
   in an open box in a dark room; grab the bar on its edge to move it.
 - **Theatre mode**: cutscenes, and optionally third-person play, are shown
@@ -155,6 +178,12 @@ start-up.
   button instead of the keyboard key, including for left-handed play.
 - **Smooth or snap turning**, an optional comfort vignette, and movies and
   loading screens shown on a world-locked screen.
+- **Settings panel in the headset**: hold both sticks in for 0.6 s (Oculus
+  Touch: hold the left menu button) or press Insert on the keyboard. It floats
+  in front of you; point at it with your main hand and pull the trigger, or use
+  the sticks and A / B. Every change applies at once and is saved to
+  `trlvr.ini`: cameras, picture, body physics, god mode, theatre, diorama and
+  controls.
 - **VR settings in the pause menu** (immersive controls, during a level):
   *Display* becomes *VR Settings*, and its entries change VR options on the spot
   and save them to `trlvr.ini`. Press an entry to step through its choices:
@@ -174,11 +203,12 @@ start-up.
   is what counts.
 - **Five languages**: the mod's own text follows the game's language (English,
   French, German, Italian, Spanish).
-- **Other mods' menus**: TR7-Menu-Hook's menu (the loader the Lara Remastered
-  Player Model Mod needs) is shown on a panel over your off hand. Point your
-  main hand at it and pull the main trigger to click; while you point at it the
-  game does not see that trigger. `imgui_panel = 0` turns it off. Player model
-  mods with many more bones work in first person.
+- **TR7-Menu-Hook built in**: with TR7-Menu-Hook installed (the loader the Lara
+  Remastered Player Model Mod needs), its options appear in the settings panel
+  as an ordinary section: refill health, next outfit, game speed, wireframe,
+  hide UI, the debug keypad, and its saved settings. "Open its full menu"
+  still shows its own window. Player model mods with many more bones work in
+  first person and third person.
 
 ---
 
@@ -212,7 +242,8 @@ C:\Program Files (x86)\Steam\steamapps\common\Tomb Raider Legend\
 |---|---|
 | `d3d9.dll` | The mod (a Direct3D 9 proxy the game loads) |
 | `d3d9_dxvk.dll` | The DXVK fork that renders through Vulkan |
-| `openvr_api.dll` | OpenVR, 32-bit |
+| `openxr_loader.dll` | OpenXR, 32-bit (the default runtime; delete it to use OpenVR) |
+| `openvr_api.dll` | OpenVR, 32-bit (the fallback) |
 | `trlvr_launcher.exe` | The launcher (see below) |
 | `trlvr_actions.json`, `bindings_*.json` | The SteamVR action manifest and controller bindings |
 
@@ -232,7 +263,8 @@ C:\Program Files (x86)\Steam\steamapps\common\Tomb Raider Legend\
 
 Adjust the path if your library is elsewhere, then launch from Steam as usual.
 
-**GOG:** start SteamVR, then run `trlvr_launcher.exe` from the game folder.
+**GOG:** start your VR runtime (SteamVR), then run `trlvr_launcher.exe` from
+the game folder.
 
 #### Why a launcher?
 
@@ -255,7 +287,8 @@ Touch-style controllers (Reverb G2, Quest, Rift):
 | Control | Action |
 |---|---|
 | Left stick | Move |
-| Left stick click / double click / hold | Gear menu / recentre the view / pause |
+| Left stick click / double click / hold | Gear menu / recentre the view / pause (Oculus Touch: the left menu button) |
+| Both sticks held in | Settings panel (Oculus Touch: hold the left menu button) |
 | Right stick | Turn |
 | Right stick click / double click / hold | Switch weapons / PDA / binoculars |
 | Left trigger | Action, interact, pull the grapple |
@@ -378,6 +411,13 @@ first and third person at any time in gameplay.
 | `terrain_culling` | `frustum` | `open` draws every terrain strip of a visible room |
 | `depth_of_field` | `off` | `on` or `game` (keep the launcher's setting) |
 | `world_scale` | `291` | Game units per metre. Raise to feel smaller, lower to feel larger |
+| `vr_runtime` | `auto` | `openxr`, `openvr`, or `auto` (OpenXR, falling back to OpenVR) |
+| `picture_brightness` / `picture_contrast` | `0` / `1` | The headset image; `picture_follow_game = 1` also follows the game's brightness |
+| `view_transition_seconds` | `0.3` | How long switching camera style glides (`0` cuts) |
+| `body_rear` | `1` | Third person: her rear gives and bounces |
+| `body_push` | `1` | God mode: a hand leaning on her pushes her body away |
+| `board_god_hand` | `1` | `board`: pick Lara up, carry and throw her |
+| `god_throw` | `1` | Letting go mid-swing throws her (`god_throw_strength`) |
 
 ### Performance
 
@@ -407,7 +447,10 @@ and the costliest objects. It says why an area is slow.
 - The **Vulkan SDK** installed under `C:\VulkanSDK` (headers and
   `glslangValidator`).
 - **Python 3** with **meson** and **ninja**: `py -3 -m pip install meson ninja`.
-- OpenVR is included in [`third_party/openvr`](third_party/openvr).
+- OpenXR (headers and loader) is included in
+  [`third_party/openxr`](third_party/openxr), OpenVR in
+  [`third_party/openvr`](third_party/openvr) and Dear ImGui in
+  [`third_party/imgui`](third_party/imgui).
 
 Everything is built **32-bit**: `trl.exe` is a 32-bit process.
 
@@ -430,7 +473,7 @@ package.bat                          :: the drag-and-drop release in %USERPROFIL
 ```
 
 The DXVK fork (`dxvk-trlvr/`) adds `Direct3DCreateVR9` (`src/d3d9/d3d9_vr.*`),
-which hands the Vulkan image behind a Direct3D 9 surface to OpenVR, and a DXVK
+which hands the Vulkan image behind a Direct3D 9 surface to the VR runtime, and a DXVK
 profile for `trl_vr.exe`. The shipped `d3d9_dxvk.dll` is a **modified** DXVK
 build; report problems with it here, not upstream.
 
@@ -442,11 +485,15 @@ build; report problems with it here, not upstream.
 | `src/vr` | VR session and submit, cameras and first person, culling, input and gestures, UI, water |
 | `src/common` | `trlvr.ini` settings and the log |
 | `src/launcher` | `trlvr_launcher.exe` |
+| `src/vr/physics` | Body physics: soft chest, rear, body push and volumes |
+| `src/vr/godmode` | God mode: pick-up, carry and throw |
 | `src/test` | Maths and proxy tests |
 | `input` | SteamVR action manifest and controller bindings |
 | `release` | Player documentation shipped in the package |
 | `dxvk-trlvr` | DXVK fork |
+| `third_party/openxr` | OpenXR headers and loader |
 | `third_party/openvr` | OpenVR header and runtime |
+| `third_party/imgui` | Dear ImGui, for the settings panel |
 
 ---
 
@@ -472,7 +519,7 @@ build; report problems with it here, not upstream.
 Clear the Steam launch option, then delete from the game folder:
 
 ```
-d3d9.dll   d3d9_dxvk.dll   openvr_api.dll   trlvr_launcher.exe
+d3d9.dll   d3d9_dxvk.dll   openxr_loader.dll   openvr_api.dll   trlvr_launcher.exe
 trlvr_actions.json   bindings_*.json
 trlvr.ini   trlvr.log*   trlvr_crash.dmp*   trl_vr.exe
 trlvr_launcher.log   trl_vr_d3d9.log
@@ -490,15 +537,17 @@ in the Setup dialog afterwards; set them back there if you want.
 **The game runs on the monitor but nothing appears in the headset.**
 Check `trlvr.log` beside the game. It records the headset, every hook and the
 controllers, and says plainly when something fails. Make sure the game was
-started through `trlvr_launcher.exe` and that SteamVR was running.
+started through `trlvr_launcher.exe` and that your VR runtime was running.
+If OpenXR is the problem, try OpenVR: `vr_runtime = openvr` in `trlvr.ini`.
 
 **The view is offset or facing the wrong way.**
 Double-click the left stick (or press F1) to recentre.
 
 **Controller buttons do nothing, or the wrong thing.**
-SteamVR may have kept an older or custom binding. Open SteamVR → Settings →
-Controllers → Manage Controller Bindings and select the supplied Tomb Raider:
-Legend VR binding.
+Under OpenVR, SteamVR may have kept an older or custom binding. Open SteamVR →
+Settings → Controllers → Manage Controller Bindings and select the supplied
+Tomb Raider: Legend VR binding. Under OpenXR the bindings are built into the
+mod.
 
 **Performance is poor.**
 See [Performance](#performance). The `perf:` lines in `trlvr.log` show whether
@@ -508,7 +557,7 @@ it is the GPU or the CPU and which objects cost the most.
 Send the files beside the game: `trlvr.log` and `trlvr_crash.dmp`, plus
 `trl_vr_d3d9.log`. If you have started the game again since, the previous run
 is kept as `trlvr.log.prev` and `trlvr_crash.dmp.prev`. The crash report names
-the module and the SteamVR or DXVK call in progress, and the dump holds the
+the module and the VR runtime or DXVK call in progress, and the dump holds the
 rest.
 
 ---
@@ -524,6 +573,9 @@ Not covered by it, see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md):
 - **DXVK** (zlib/libpng). The release's `d3d9_dxvk.dll` is a **modified** build.
 - **OpenVR SDK** (BSD 3-Clause, © Valve). `openvr_api.dll` is redistributed
   unmodified.
+- **OpenXR SDK** (Apache 2.0, © The Khronos Group). `openxr_loader.dll` is
+  built from the unmodified source.
+- **Dear ImGui** (MIT, © Omar Cornut), for the settings panel.
 - **TRAWindowed** (MIT, © chreden), which the D3D9 proxy started from.
 
 Tomb Raider: Legend is © its owners. This mod is unofficial, not affiliated
@@ -543,6 +595,8 @@ game data, and needs a legitimate copy of the game.
 >   compositor at all.
 > - **chreden**, for **TRAWindowed**, the D3D9 wrapper this mod's proxy grew from.
 > - **Valve**, for **OpenVR** and SteamVR.
+> - **The Khronos Group**, for **OpenXR**.
+> - **Omar Cornut**, for **Dear ImGui**.
 > - **Crystal Dynamics**, for making Tomb Raider: Legend.
 
 Any mistakes in this mod are my own, not theirs.

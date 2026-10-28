@@ -12,7 +12,23 @@ dxbc-spirv, libdisplay-info) keep their own licences in their folders.
 
 `openvr.h` and the 32-bit `openvr_api.dll` from Valve's
 [OpenVR SDK](https://github.com/ValveSoftware/openvr).
-BSD 3-Clause licence; see `third_party/openvr/LICENSE`.
+BSD 3-Clause licence; see `third_party/openvr/LICENSE`. Used when OpenXR is
+not available.
+
+## OpenXR SDK (`third_party/openxr/`)
+
+The OpenXR headers and the 32-bit OpenXR loader (`openxr_loader.dll`, built
+unmodified) from the Khronos
+[OpenXR-SDK-Source](https://github.com/KhronosGroup/OpenXR-SDK-Source),
+release 1.1.63. Apache 2.0 licence (the loader bundles jsoncpp, MIT / public
+domain); see `third_party/openxr/LICENSE` and `third_party/openxr/COPYING.adoc`.
+`third_party/openxr/README.md` says how it was built.
+
+## Dear ImGui (`third_party/imgui/`)
+
+[Dear ImGui](https://github.com/ocornut/imgui) 1.91.8 by Omar Cornut, with
+its Direct3D 9 and Win32 backends, unmodified. Draws the in-game settings
+panel. MIT licence; see `third_party/imgui/LICENSE.txt`.
 
 ## TRAWindowed
 

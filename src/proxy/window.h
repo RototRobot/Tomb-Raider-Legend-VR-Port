@@ -28,6 +28,11 @@ namespace trlvr
     // the game has re-applied, and releases the cursor when the window is not
     // in the foreground so alt-tab actually gets you out.
     void window_tick();
+    // The game window once window_configure has seen it, else null.
+    HWND window_handle();
+    // While set, the game sees a mouse that does not move and cannot move
+    // the cursor itself (the settings overlay has it).
+    void window_block_game_mouse(bool blocked);
 
     // Before a synthesised click: if the cursor has left the (foreground)
     // game window, put it back inside, so the click cannot land on -- and
