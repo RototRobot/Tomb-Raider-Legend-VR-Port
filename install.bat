@@ -51,6 +51,8 @@ rem The launcher patches a COPY of the exe to be large-address-aware. The
 rem original is never touched, so Steam's integrity check has nothing to undo.
 if exist "!ROOT!dist\trlvr_launcher.exe" (
     copy /y "!ROOT!dist\trlvr_launcher.exe" "!GAME!\trlvr_launcher.exe" >nul
+    copy /y "!ROOT!play_flat.bat" "!GAME!\play_flat.bat" >nul
+    copy /y "!ROOT!play_flat_mod.bat" "!GAME!\play_flat_mod.bat" >nul
 
 rem OpenVR (the fallback backend, 1.1.0): the SteamVR action manifest and
 rem its bindings sit beside the game -- SteamVR resolves the bindings files
@@ -106,6 +108,9 @@ echo.
 echo Steam ^> Properties ^> Launch Options:
 echo   "!GAME!\trlvr_launcher.exe" %%command%%
 echo.
+echo play_flat.bat in the game folder starts the original game with the VR mod bypassed.
+echo play_flat_mod.bat starts it flat with the mod loaded but no VR ^(no headset or simulator^).
+echo.
 echo On first run the game writes trlvr.ini and trlvr.log beside trl.exe.
 echo trlvr.log records startup, headset, hook and controller status.
 echo Missing current settings are added to older INIs without replacing values.
@@ -118,6 +123,8 @@ del /q "!GAME!\d3d9_dxvk.dll" 2>nul
 del /q "!GAME!\openvr_api.dll" 2>nul
 del /q "!GAME!\openxr_loader.dll" 2>nul
 del /q "!GAME!\trlvr_launcher.exe" 2>nul
+del /q "!GAME!\play_flat.bat" 2>nul
+del /q "!GAME!\play_flat_mod.bat" 2>nul
 if exist "!GAME!\xinput9_1_0.dll" (
     findstr /m /c:"/actions/gameplay" "!GAME!\xinput9_1_0.dll" >nul 2>&1
     if not errorlevel 1 del /q "!GAME!\xinput9_1_0.dll"

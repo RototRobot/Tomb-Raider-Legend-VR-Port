@@ -27,3 +27,6 @@ __pycache__/
 *.pyc
 .vs/
 .vscode/
+
+# Unrelated HD-mods tooling (own pipeline, built binaries)
+/tools/

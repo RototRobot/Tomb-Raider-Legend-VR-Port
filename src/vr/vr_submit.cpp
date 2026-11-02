@@ -2554,11 +2554,17 @@ namespace trlvr
         // body_rear_debug: the rear soft body's regions as wireframes.
         void draw_rear_debug(IDirect3DSurface9* back)
         {
-            constexpr int kMax = 512;       // about 483 segments
+            constexpr int kMax = 1280;      // the rear's ~483 and the grab zones'
             static float seg[kMax][6];
             static unsigned colours[kMax];
-            const int count = stereo_same_frame_active()
-                ? camera_rear_debug_lines(seg, colours, kMax) : 0;
+            int count = 0;
+            if (stereo_same_frame_active())
+            {
+                count = camera_rear_debug_lines(seg, colours, kMax);
+                // god_zone_debug: the grab zones, drawn the same way.
+                count += camera_zone_debug_lines(seg + count, colours + count,
+                                                 kMax - count);
+            }
             if (count <= 0)
                 return;
             D3DSURFACE_DESC desc{};

@@ -655,10 +655,12 @@ namespace dxvk {
      * Read from a buffer created with:              *
      * D3DPOOL_DEFAULT,                              *
      * D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY buffer. *
-     * Legend flickers with next gen content option. */
+     * Legend flickers with next gen content option. *
+     * trlvr: no 60 fps cap. This fork only ships    *
+     * with the VR mod, and launching trl.exe        *
+     * directly (e.g. from Steam) runs VR here too.  */
     { R"(\\(trl|tra|tru)\.exe$)", {{
       { "d3d9.cachedWriteOnlyBuffers",      "True" },
-      { "d3d9.maxFrameRate",                 "-60" },
     }} },
     /* Tomb Raider: Legend VR mod (trlvr). The mod launches a patched     *
      * copy, trl_vr.exe, which the profile above never matched: its      *

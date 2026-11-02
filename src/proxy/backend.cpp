@@ -79,7 +79,10 @@ namespace trlvr
             return g_backend;
         g_tried = true;
 
-        choose(g_path);
+        if (vanilla_mode())
+            system_d3d9(g_path);
+        else
+            choose(g_path);
 
         // LOAD_WITH_ALTERED_SEARCH_PATH so a backend beside the game resolves
         // its own dependencies from there rather than from our directory.
@@ -102,5 +105,14 @@ namespace trlvr
     {
         HMODULE m = backend();
         return m ? GetProcAddress(m, name) : nullptr;
+    }
+
+    bool vanilla_mode()
+    {
+        static const bool on = [] {
+            wchar_t v[8]{};
+            return GetEnvironmentVariableW(L"TRLVR_VANILLA", v, 8) != 0 && v[0] == L'1';
+        }();
+        return on;
     }
 }

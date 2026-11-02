@@ -208,6 +208,56 @@ namespace trlvr
         float god_throw_gravity = 9.81f;
         int god_land_anim = -1;
         float god_drop_height = 1.0f;
+        // Let go over a floor: she is left at least this high above it
+        // (metres at her size), so even a light let-go is the game's own fall.
+        float god_drop_min = 0.15f;             // 0..1
+        // Throws and ragdoll (ported back from Underworld). god_throw_velocity:
+        // the release speed is the hand's fastest 5-frame average of the last
+        // 0.15 s (0 = the old peak). A thrown Lara is a ball round her centre
+        // (a third of her height times god_throw_radius) swept against the
+        // level; off a wall or ceiling she keeps god_throw_bounce of the speed
+        // into it and 1 - god_throw_friction of the speed along it. Held or
+        // thrown, her limbs swing on pendulums (god_ragdoll times the default,
+        // 0 = they turn with her body), the knees bend god_knee_bend degrees,
+        // a throw starts a tumble of god_throw_spin rad/s per m/s. Holding her
+        // by one arm, the other hand can take her other arm (god_two_hands).
+        // god_arm_lead is parsed but ignored: the arm lead is off.
+        bool god_throw_velocity = true;
+        float god_throw_bounce = 0.3f;          // 0..1
+        float god_throw_friction = 0.5f;        // 0..1
+        float god_throw_radius = 1.0f;          // 0.3..2
+        float god_ragdoll = 1.0f;               // 0..2
+        float god_knee_bend = 12.0f;            // degrees, 0..45
+        float god_throw_spin = 1.0f;            // 0..4
+        bool god_two_hands = true;
+        // Torso fist "doll" grab (ported back from Underworld, god_torso.h):
+        // a fist with its palm toward her torso, while she looks at most
+        // god_torso_max_height tall to you (metres), holds her as a doll
+        // that follows the hand rigidly, limbs swinging. The zone is the
+        // pelvis-to-chest capsule of god_torso_radius (metres at her size)
+        // plus god_torso_margin of your hand (player metres), slid down toward
+        // her hips by god_torso_lower (metres at her size); the palm must face
+        // her within god_torso_facing (a cosine), and the fist may close
+        // god_torso_grace seconds after it was aimed. god_torso_fist_first: a
+        // squeezed fist never holds a soft part (chest, rear) while she is
+        // smaller than god_fist_block_height (0 = never). A swing on release
+        // is a toss at the hand's speed times god_torso_throw_scale, tumbling at
+        // god_torso_spin of the hand's turn; slower: she is put down.
+        // god_zone_debug draws every grab zone as a wireframe; god_zone_scale
+        // multiplies the grab zones (and the wireframes).
+        bool god_torso = true;
+        float god_torso_max_height = 0.6f;      // 0.05..3
+        float god_torso_facing = 0.3f;          // 0..1
+        float god_torso_radius = 0.25f;         // 0.05..1
+        float god_torso_margin = 0.08f;         // 0..0.3
+        float god_torso_lower = 0.0f;           // 0..0.5
+        float god_torso_grace = 0.4f;           // 0..1
+        bool god_torso_fist_first = true;
+        float god_fist_block_height = 0.6f;     // 0..3
+        float god_torso_throw_scale = 1.0f;     // 0..3
+        float god_torso_spin = 0.25f;           // 0..2
+        bool god_zone_debug = false;
+        float god_zone_scale = 1.0f;            // 0.25..4
         // god_grab_pose: grabs come from the hand's pose -- a pinch (trigger
         // + thumb down) or a fist (trigger + grip); grip alone only points
         // and presses. 0 = the old grip-button grabs.

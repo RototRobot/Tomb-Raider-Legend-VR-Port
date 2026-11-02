@@ -40,6 +40,7 @@
 #include "perf_cpu.h"
 #include "cull.h"
 #include "godmode/god_pluck.h"
+#include "godmode/god_torso.h"
 
 
 #include "hook.h"
@@ -8881,6 +8882,26 @@ namespace trlvr
             PluckInput god_in;
             int bounces = 0;            // a throw's wall/ceiling hits
             int throw_hand = -1;
+            // The input of the frame a throw started: the flight is drawn
+            // (pluck_body_matrix) from it, so her centre stays where the
+            // module put it however her real pose moves on.
+            PluckInput fly_in;
+            // The last point of her drawn centre reached along a clear line
+            // while held (god_throw_free_track): a throw released behind a
+            // wall starts from it.
+            float throw_free[3]{};
+            bool throw_free_ok = false;
+            bool throw_normal_logged = false;
+            // Her arms as last drawn (carry_apply), game space: the second
+            // grab's zone (PluckInput::drawn_*).
+            bool drawn_ok = false;
+            float drawn_shoulder[2][3]{};
+            float drawn_end[2][3]{};
+            float drawn_wrist[2][3]{};
+            // Two hands: each reaching arm's wrist target in her own frame,
+            // kept through a flight.
+            float reach_local[2][3]{};
+            bool reach_local_ok[2] = { false, false };
             DWORD land_anim_due = 0;    // god_land_anim after a thrown landing
             LARGE_INTEGER last_step{};
             // The wrist she hangs by (arm grab), as her last draw raised it.
@@ -8907,6 +8928,54 @@ namespace trlvr
             DWORD palm_left_at = 0;
         };
         BoardPluck g_pluck;
+
+        // The torso fist "doll" grab (god_torso.h, ported back from
+        // Underworld, user 2026-10-20): state, the last step's input (her
+        // real pose, for the draw), and per hand whether the fist is the
+        // torso's (mask: the pluck does not see it until the hand opens;
+        // block: not a soft-part hold either, god_torso_fist_first).
+        struct BoardTorso
+        {
+            TorsoState god;
+            TorsoInput in;
+            bool mask[2] = { false, false };
+            bool aim[2] = { false, false };
+            bool fist[2] = { false, false };        // the fist, with hysteresis
+            bool fist_block[2] = { false, false };  // g_tp_grip does not hold parts
+            float apparent = 0.0f;                  // her height to the player, metres
+            bool leg_left[2] = { true, false };     // hip c is her left leg
+            // A free hand's index tip last frame, for its speed (touch_nudge).
+            float touch_last[2][3] = {};
+            bool touch_ok[2] = { false, false };
+        };
+        BoardTorso g_torso;
+
+        // Is a hand busy holding Lara (pluck by head or arm, second hand,
+        // palm, torso fist)? Such a hand does not touch her.
+        bool hand_holds_her(int hand)
+        {
+            return g_pluck.hand == hand || g_pluck.palm == hand ||
+                   g_pluck.god.hand2 == hand || g_torso.god.hand == hand;
+        }
+
+        // Her root as the touch systems (soft parts, rear) should see it:
+        // where she is DRAWN. Held by the pluck or the torso, her real
+        // instance stays where she was picked up; the drawn pose is what a
+        // free hand touches.
+        void touch_root(const unsigned char* instance, float root[3])
+        {
+            memcpy(root, instance + 0x10, sizeof(float) * 3);
+            if (torso_drawn(g_torso.god))
+            {
+                for (int k = 0; k < 3; ++k)
+                    root[k] = g_torso.god.feet[k];
+            }
+            else if (pluck_drawn(g_pluck.god) || g_pluck.palm >= 0)
+            {
+                for (int k = 0; k < 3; ++k)
+                    root[k] += g_pluck.carry[k];
+            }
+        }
 
         // Each third-person hand's palm as last drawn: centre (true world
         // scale) and the palm normal; fresh for 250 ms.
@@ -10056,6 +10125,48 @@ namespace trlvr
         // that path. Cached per model.
         void* g_hip_model = nullptr;
         int g_hip[2] = { -1, -1 };
+        // The knee of each leg (the bone after the hip: the third from the
+        // lowest leaf up, or the middle one of a three-bone leg), for the
+        // pluck's knee bend.
+        int g_knee[2] = { -1, -1 };
+        // The foot of each leg (the lowest leaf under the hip), for the
+        // torso grab's leg pendulums.
+        int g_foot[2] = { -1, -1 };
+
+        void find_knees(const ModelSegment* segments, int count,
+                        const float (*saved)[16])
+        {
+            g_knee[0] = g_knee[1] = -1;
+            g_foot[0] = g_foot[1] = -1;
+            bool has_child[kMaxSegments] = {};
+            for (int s = 0; s < count; ++s)
+                if (segments[s].parent >= 0 && segments[s].parent < count)
+                    has_child[segments[s].parent] = true;
+            for (int k = 0; k < 2; ++k)
+            {
+                const int hip = g_hip[k];
+                if (hip < 0)
+                    continue;
+                int foot = -1;
+                for (int s = 0; s < count; ++s)
+                    if (!has_child[s] &&
+                        segment_is_in_head_subtree(segments, count, s, hip) &&
+                        (foot < 0 || saved[s][14] < saved[foot][14]))
+                        foot = s;
+                g_foot[k] = foot;
+                int path[64];
+                int n = 0;
+                for (int s = foot; s >= 0 && s < count && n < 64;
+                     s = segments[s].parent)
+                {
+                    path[n++] = s;
+                    if (s == hip)
+                        break;
+                }
+                if (n >= 3 && path[n - 1] == hip)
+                    g_knee[k] = n == 3 ? path[1] : path[2];
+            }
+        }
 
         void find_hips(const ModelSegment* segments, int count,
                        const float (*saved)[16])
@@ -10102,8 +10213,10 @@ namespace trlvr
                         g_hip[k] = a;
                         break;
                     }
-            log("board: dangle legs -- feet %d/%d, pelvis %d, hips %d/%d",
-                foot[0], foot[1], common, g_hip[0], g_hip[1]);
+            find_knees(segments, count, saved);
+            log("board: dangle legs -- feet %d/%d, pelvis %d, hips %d/%d, "
+                "knees %d/%d", foot[0], foot[1], common, g_hip[0], g_hip[1],
+                g_knee[0], g_knee[1]);
         }
 
         // Rotation of `angle` radians about a unit world axis, row-vector
@@ -11131,6 +11244,7 @@ namespace trlvr
                     {
                         float joint[3];
                         if (g_pluck.hand != hand &&
+                            g_pluck.god.hand2 != hand &&
                             first_person_palm_local(hand, palm_local) &&
                             pose_begin(g_pose_work, segments, count,
                                        virtual_count, matrices) &&
@@ -11162,7 +11276,9 @@ namespace trlvr
                         // a recorded pose cannot be placed.
                         float pinch[3];
                         bool holding_posed = false;
-                        if (g_pluck.hand == hand &&
+                        // (The second hand of a two-hand hold pinches too.)
+                        if ((g_pluck.hand == hand ||
+                             g_pluck.god.hand2 == hand) &&
                             first_person_palm_local(hand, palm_local))
                         {
                             if (pose_begin(g_pose_work, segments, count,
@@ -11216,14 +11332,21 @@ namespace trlvr
                             // Drawn at 1/F about the head; the projection
                             // scales by F, so the world pinch is there.
                             const float grow = camera_world_scale_factor();
+                            float world_pinch[3];
                             for (int k = 0; k < 3; ++k)
-                                g_pluck.pinch[k] = camera_to_world.m[3][k] +
+                                world_pinch[k] = camera_to_world.m[3][k] +
                                     (pinch[k] - camera_to_world.m[3][k]) *
                                     grow;
-                            g_pluck.pinch_time = GetTickCount();
-                            for (int k = 0; k < 3; ++k)
-                                g_index_seen[hand].point[k] = g_pluck.pinch[k];
-                            g_index_seen[hand].time = g_pluck.pinch_time;
+                            // Only the first hand's pinch is the hang.
+                            if (g_pluck.hand == hand)
+                            {
+                                memcpy(g_pluck.pinch, world_pinch,
+                                       sizeof(world_pinch));
+                                g_pluck.pinch_time = GetTickCount();
+                            }
+                            memcpy(g_index_seen[hand].point, world_pinch,
+                                   sizeof(world_pinch));
+                            g_index_seen[hand].time = GetTickCount();
                         }
                         else if (flick_posed)
                         {
@@ -11500,10 +11623,12 @@ namespace trlvr
             // Held or thrown; an arm lead (only her arm reaches for the
             // hand, she stands); or standing on a palm.
             const bool drawn = pluck_drawn(ps);
+            // Held or tossed by the torso fist (god_torso).
+            const bool tdrawn = torso_drawn(g_torso.god);
             const int held_arm = ps.part == kPluckArm0 ? 0
                 : ps.part == kPluckArm1 ? 1 : -1;
             const bool lead = !drawn && ps.hand >= 0 && held_arm >= 0;
-            if ((!drawn && !lead && g_pluck.palm < 0) ||
+            if ((!drawn && !lead && !tdrawn && g_pluck.palm < 0) ||
                 g_first_person_active || !instance)
                 return false;
             __try
@@ -11568,6 +11693,86 @@ namespace trlvr
                         pose_commit(g_pose_work, matrices);
                     return true;
                 }
+                // The torso fist's doll (god_torso.h): her real pose, the
+                // knees bent about the knees, each limb turned about its
+                // real joint (arms about the shoulders, legs about the
+                // hips, the head about its joint), then every bone by the
+                // body matrix. Her gear follows by the body matrix alone.
+                if (tdrawn)
+                {
+                    const TorsoState& ts = g_torso.god;
+                    const Mat4 body = torso_body_matrix(ts, g_torso.in);
+                    const unsigned char* prop =
+                        *reinterpret_cast<unsigned char* const*>(kPlayerProp);
+                    const int head = prop ? *reinterpret_cast<const int*>(
+                        prop + kOffPlayerPropHeadSegment) : -1;
+                    if (instance == lara && arms_ok && head >= 0 &&
+                        head < count &&
+                        pose_begin(g_pose_work, segments, count, total - count,
+                                   matrices))
+                    {
+                        if (g_hip_model != m)
+                        {
+                            g_hip_model = m;
+                            find_hips(segments, count, g_pose_work.saved);
+                        }
+                        const bool* leg_left = g_torso.leg_left;
+                        for (int c = 0; c < 2; ++c)
+                        {
+                            const int knee = g_knee[c];
+                            if (knee < 0 || knee >= count)
+                                continue;
+                            float pivot[3];
+                            pose_joint(g_pose_work, knee, pivot);
+                            pose_rotate_subtree(g_pose_work, knee, pivot,
+                                ts.knee_rotation[leg_left[c] ? 0 : 1]);
+                        }
+                        for (int c = 0; c < 2; ++c)
+                        {
+                            float pivot[3];
+                            pose_joint(g_pose_work, arm[c][0], pivot);
+                            pose_rotate_subtree(g_pose_work, arm[c][0], pivot,
+                                torso_limb_rotation(ts, kTorsoArm0 + c));
+                        }
+                        for (int c = 0; c < 2; ++c)
+                        {
+                            if (g_hip[c] < 0 || g_hip[c] >= count)
+                                continue;
+                            float pivot[3];
+                            pose_joint(g_pose_work, g_hip[c], pivot);
+                            pose_rotate_subtree(g_pose_work, g_hip[c], pivot,
+                                torso_limb_rotation(ts, leg_left[c]
+                                                        ? kTorsoLeg0
+                                                        : kTorsoLeg1));
+                        }
+                        {
+                            float pivot[3];
+                            pose_joint(g_pose_work, head, pivot);
+                            pose_rotate_subtree(g_pose_work, head, pivot,
+                                torso_limb_rotation(ts, kTorsoHead));
+                        }
+                        for (int s2 = 0; s2 < count; ++s2)
+                        {
+                            g_pose_work.xform[s2] = g_pose_work.xform[s2] * body;
+                            g_pose_work.changed[s2] = true;
+                        }
+                        // Her arms as drawn (the pluck's second-grab zones
+                        // are not used by the torso grab, but keep them true).
+                        g_pluck.drawn_ok = false;
+                        pose_commit(g_pose_work, matrices);
+                    }
+                    else
+                    {
+                        for (int s2 = 0; s2 < total; ++s2)
+                        {
+                            const Mat4 moved =
+                                matrix_from_floats(save->full[s2]) * body;
+                            memcpy(matrices + s2 * 16, &moved.m[0][0],
+                                   sizeof(moved.m));
+                        }
+                    }
+                    return true;
+                }
                 // Standing on a palm: her own animation, moved there.
                 if (!drawn)
                 {
@@ -11617,17 +11822,38 @@ namespace trlvr
                         g_pivot_valid = true;
                     }
                 }
-                // Hanging: the grab point goes to the hand, tilted by the
-                // pendulum (translate(-grab) * body_rotation *
-                // translate(hang), as pluck_body_matrix). The grab point is
+                // Hanging: pluck_body_matrix, translate(-grab) *
+                // body_rotation * translate(hang) (flying: about her centre,
+                // from the frame of the throw, `fly_in`). The grab point is
                 // the raised wrist of a held arm, her higher wrist with a
-                // dangle animation, else where she was pinched.
+                // dangle animation, else where she was pinched. `draw` is
+                // the state with the hang at this draw's pinch.
                 const bool wrist_pivot = held_arm < 0 && g_dangle_active &&
                                          g_pivot_valid;
-                float grab[3];
-                for (int k = 0; k < 3; ++k)
-                    grab[k] = wrist_pivot ? g_pivot[k]
-                        : g_pluck.root[k] - ps.grab_offset[k];
+                PluckState draw = ps;
+                if (!ps.flying && ps.two_t <= 0.0f && ps.hand2 < 0 &&
+                    ps.release_chain < 0)
+                    hang_point(draw.hang);
+                PluckInput gi = ps.flying ? g_pluck.fly_in : g_pluck.god_in;
+                if (!ps.flying)
+                {
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        gi.root[k] = g_pluck.root[k];
+                        gi.wrist_pivot[k] = g_pivot[k];
+                    }
+                    gi.wrist_pivot_valid = wrist_pivot;
+                }
+                // Two hands: an arm drawn reaching to its wrist target (held
+                // by either hand) is not raised, and its pivot is the
+                // module's.
+                const bool reaching[2] = { pluck_arm_reaches(ps, 0),
+                                           pluck_arm_reaches(ps, 1) };
+                const bool reach_any = reaching[0] || reaching[1];
+                const float two_w = pluck_two_weight(ps);
+                Mat4 body = Mat4::identity();
+                if (reach_any)
+                    body = pluck_body_matrix(draw, gi);
                 const bool posed = arms_ok &&
                     pose_begin(g_pose_work, segments, count, total - count,
                                matrices);
@@ -11640,9 +11866,11 @@ namespace trlvr
                     }
                     // Her arms first, on her own pose (procedural, as
                     // Underworld): a held arm raised straight up (she hangs
-                    // from that wrist); held by the head, both arms up
-                    // (default) or limp at her sides (god_arms_limp). The
-                    // elbows of raised arms bend outward, away from her.
+                    // from that wrist) or reaching for its wrist target
+                    // (two hands); held by the head, both arms up (default)
+                    // or limp at her sides (god_arms_limp); the arm she does
+                    // not hang by limp. The elbows of raised arms bend
+                    // outward, away from her.
                     const float metre = config().world_scale;
                     float S[2][3], reach[2], out[2][3];
                     bool out_ok[2];
@@ -11667,13 +11895,55 @@ namespace trlvr
                         out[c][2] = 0.0f;
                         out_ok[c] = normalise3(out[c]) > 1e-3f;
                     }
+                    const Mat4 to_local = reach_any ? rigid_inverse(body)
+                                                    : Mat4::identity();
                     for (int c = 0; c < 2; ++c)
                     {
+                        // Where a limp arm's wrist hangs: a hand's width out
+                        // from her hip, a little forward.
+                        float limp_to[3];
+                        for (int k = 0; k < 3; ++k)
+                            limp_to[k] = S[c][k] + (out_ok[c]
+                                ? out[c][k] * 0.06f * metre : 0.0f) +
+                                (k < 2 ? gi.facing[k] * 0.03f * metre : 0.0f);
+                        limp_to[2] -= reach[c] * 0.96f;
+                        if (reaching[c])
+                        {
+                            if (!ps.flying)
+                            {
+                                const float* w = ps.wrist_target[c];
+                                for (int j = 0; j < 3; ++j)
+                                    g_pluck.reach_local[c][j] =
+                                        w[0] * to_local.m[0][j] +
+                                        w[1] * to_local.m[1][j] +
+                                        w[2] * to_local.m[2][j] +
+                                        to_local.m[3][j];
+                                g_pluck.reach_local_ok[c] = true;
+                            }
+                            if (!g_pluck.reach_local_ok[c])
+                                continue;
+                            // No further than the arm goes.
+                            float to[3], d[3];
+                            for (int k = 0; k < 3; ++k)
+                                d[k] = g_pluck.reach_local[c][k] - S[c][k];
+                            const float len = sqrtf(dot3(d, d));
+                            const float cap = reach[c] * 0.98f;
+                            const float scale = len > cap && len > 1e-4f
+                                ? cap / len : 1.0f;
+                            for (int k = 0; k < 3; ++k)
+                                to[k] = S[c][k] + d[k] * scale;
+                            pose_arm_reach(g_pose_work, arm[c][0], arm[c][1],
+                                           arm[c][2], to,
+                                           out_ok[c] ? out[c] : nullptr);
+                            continue;
+                        }
                         const bool raise = held_arm >= 0
                             ? c == held_arm
                             : !wrist_pivot && !config().god_arms_limp;
-                        const bool limp = held_arm < 0 && !wrist_pivot &&
-                                          config().god_arms_limp;
+                        // The arm she does not hang by hangs limp (ragdoll;
+                        // the limb pendulums swing it), as with god_arms_limp.
+                        const bool limp = held_arm >= 0 ? c != held_arm
+                            : !wrist_pivot && config().god_arms_limp;
                         float to[3];
                         if (raise)
                         {
@@ -11686,58 +11956,123 @@ namespace trlvr
                         }
                         else if (limp)
                         {
-                            // A hand's width out from her hip.
+                            // Just let go of (two hands): from its reach,
+                            // eased down.
                             for (int k = 0; k < 3; ++k)
-                                to[k] = S[c][k] + (out_ok[c]
-                                    ? out[c][k] * 0.06f * metre : 0.0f);
-                            to[2] -= reach[c] * 0.96f;
+                                to[k] = limp_to[k];
+                            if (c == ps.release_chain && two_w > 0.0f &&
+                                g_pluck.reach_local_ok[c])
+                                for (int k = 0; k < 3; ++k)
+                                    to[k] += (g_pluck.reach_local[c][k] -
+                                              to[k]) * two_w;
                             pose_arm_reach(g_pose_work, arm[c][0], arm[c][1],
                                            arm[c][2], to, nullptr);
                         }
                     }
-                    if (held_arm >= 0)
+                    // The held arm's wrist, as raised, is the hang's pivot.
+                    if (!reach_any && held_arm >= 0)
                     {
+                        float grab[3];
                         pose_joint(g_pose_work, arm[held_arm][2], grab);
                         for (int k = 0; k < 3; ++k)
                             g_pluck.draw_pivot[k] = grab[k];
                         g_pluck.draw_pivot_valid = true;
+                        if (!ps.flying)
+                            for (int k = 0; k < 3; ++k)
+                                gi.arm_pivot[held_arm][k] = grab[k];
                     }
-                }
-                else if (held_arm >= 0)
-                    for (int k = 0; k < 3; ++k)
-                        grab[k] = g_pluck.draw_pivot_valid
-                            ? g_pluck.draw_pivot[k]
-                            : g_pluck.god_in.arm_pivot[held_arm][k];
-                float hang[3];
-                hang_point(hang);
-                const Mat4 body = translation(-grab[0], -grab[1], -grab[2]) *
-                    ps.body_rotation *
-                    translation(hang[0], hang[1], hang[2]);
-                if (posed)
-                {
+                    // Which hip is her left (limbs 2 / 3 are her left /
+                    // right leg).
+                    bool leg_left[2] = { true, false };
+                    if (g_hip[0] >= 0 && g_hip[1] >= 0 && g_hip[0] < count &&
+                        g_hip[1] < count)
+                    {
+                        float h0[3], h1[3], d[3], left[3];
+                        pose_joint(g_pose_work, g_hip[0], h0);
+                        pose_joint(g_pose_work, g_hip[1], h1);
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            d[k] = h0[k] - h1[k];
+                            left[k] = S[0][k] - S[1][k];
+                        }
+                        leg_left[0] = dot3(d, left) >= 0.0f;
+                        leg_left[1] = !leg_left[0];
+                    }
+                    // Ragdoll knees: each shin turned back about its knee,
+                    // relaxed and more as the thigh swings forward
+                    // (knee_rotation).
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const int knee = g_knee[c];
+                        if (knee < 0 || knee >= count)
+                            continue;
+                        float pivot[3];
+                        pose_joint(g_pose_work, knee, pivot);
+                        pose_rotate_subtree(g_pose_work, knee, pivot,
+                                            ps.knee_rotation[leg_left[c]
+                                                             ? 0 : 1]);
+                    }
+                    // The limb pendulums, in her own frame before the body
+                    // turn: 0/1 her left/right arm about the shoulder, 2/3
+                    // her legs about the hips; an arm held, or reaching,
+                    // keeps its pose.
+                    for (int l = 0; l < 2; ++l)
+                    {
+                        const int root = arm[l][0];
+                        if (root < 0 || root >= count || l == held_arm ||
+                            reaching[l])
+                            continue;
+                        float pivot[3];
+                        pose_joint(g_pose_work, root, pivot);
+                        pose_rotate_subtree(g_pose_work, root, pivot,
+                                            ps.limb_rotation[l]);
+                    }
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        if (g_hip[c] < 0 || g_hip[c] >= count)
+                            continue;
+                        float pivot[3];
+                        pose_joint(g_pose_work, g_hip[c], pivot);
+                        pose_rotate_subtree(g_pose_work, g_hip[c], pivot,
+                                            ps.limb_rotation[leg_left[c]
+                                                             ? 2 : 3]);
+                    }
+                    if (!reach_any)
+                        body = pluck_body_matrix(draw, gi);
                     for (int s = 0; s < count; ++s)
                     {
                         g_pose_work.xform[s] = g_pose_work.xform[s] * body;
                         g_pose_work.changed[s] = true;
                     }
-                    // The limb pendulums: 0/1 her left/right arm about the
-                    // shoulder, 2/3 her legs about the hips; the held arm
-                    // keeps its pose.
-                    const int limb[4] = { arm[0][0], arm[1][0], g_hip[0],
-                                          g_hip[1] };
-                    for (int l = 0; l < 4; ++l)
+                    // Her arms as drawn: the second grab's zone next frame.
+                    for (int c = 0; c < 2; ++c)
                     {
-                        if (limb[l] < 0 || limb[l] >= count || l == held_arm)
-                            continue;
-                        float pivot[3];
-                        pose_joint(g_pose_work, limb[l], pivot);
-                        pose_rotate_subtree(g_pose_work, limb[l], pivot,
-                                            ps.limb_rotation[l]);
+                        float el[3];
+                        pose_joint(g_pose_work, arm[c][0],
+                                   g_pluck.drawn_shoulder[c]);
+                        pose_joint(g_pose_work, arm[c][1], el);
+                        pose_joint(g_pose_work, arm[c][2],
+                                   g_pluck.drawn_wrist[c]);
+                        for (int k = 0; k < 3; ++k)
+                            g_pluck.drawn_end[c][k] =
+                                g_pluck.drawn_wrist[c][k] +
+                                (g_pluck.drawn_wrist[c][k] - el[k]) * 0.7f;
                     }
+                    g_pluck.drawn_ok = true;
                     pose_commit(g_pose_work, matrices);
                 }
                 else
                 {
+                    if (!reach_any)
+                    {
+                        if (held_arm >= 0 && !ps.flying)
+                            for (int k = 0; k < 3; ++k)
+                                gi.arm_pivot[held_arm][k] =
+                                    g_pluck.draw_pivot_valid
+                                        ? g_pluck.draw_pivot[k]
+                                        : g_pluck.god_in.arm_pivot[held_arm][k];
+                        body = pluck_body_matrix(draw, gi);
+                    }
                     for (int s = 0; s < total; ++s)
                     {
                         const Mat4 moved =
@@ -11946,8 +12281,11 @@ namespace trlvr
                 return false;
             const char* name = *reinterpret_cast<const char**>(
                 obj + kOffObjectName);
+            // The Amanda costumes ("amanda_player", "amanda_player_alt") use
+            // Lara's 109-bone rig, so the body physics work on them too.
             if (!name || (strcmp(name, "lara") != 0 &&
-                          strncmp(name, "lara_", 5) != 0))
+                          strncmp(name, "lara_", 5) != 0 &&
+                          strncmp(name, "amanda_player", 13) != 0))
                 return false;
             const int num_models = *reinterpret_cast<short*>(
                 obj + kOffObjectNumModels);
@@ -12262,7 +12600,8 @@ namespace trlvr
             save->matrices = nullptr;
             if (!config().wall_touch || g_first_person_active ||
                 g_first_person_instance || !instance ||
-                g_pluck.hand >= 0 || g_pluck.palm >= 0 || g_pluck.god.flying)
+                g_pluck.hand >= 0 || g_pluck.palm >= 0 || g_pluck.god.flying ||
+                torso_drawn(g_torso.god))
                 return false;
             void* draw_model = nullptr;
             ModelSegment* segments = nullptr;
@@ -12793,8 +13132,9 @@ namespace trlvr
                 static bool have_root = false, have_velocity = false;
                 float push[3] = { 0.0f, 0.0f, 0.0f };
                 float root[3];
-                memcpy(root, static_cast<const unsigned char*>(instance) +
-                       0x10, sizeof(root));
+                // Where she is drawn (held, tossed, on a palm), not her
+                // real instance.
+                touch_root(static_cast<const unsigned char*>(instance), root);
                 LARGE_INTEGER now{}, frequency{};
                 QueryPerformanceCounter(&now);
                 QueryPerformanceFrequency(&frequency);
@@ -12866,7 +13206,7 @@ namespace trlvr
                         float out[3], normal[3], depth = 0.0f;
                         int box_index = -1;
                         const bool touching = n > 0 &&
-                            g_pluck.hand != hand && g_pluck.palm != hand &&
+                            !hand_holds_her(hand) &&
                             chest_box_push(points, n, out, normal, &depth,
                                            &box_index);
                         // In first person the hand is stopped at her
@@ -12895,7 +13235,9 @@ namespace trlvr
                         static int held_point[2] = { 0, 0 };
                         static bool grabbing[2] = { false, false };
                         static float entry[2][3];
-                        const bool gripping = g_tp_grip[hand];
+                        // (A fist the torso grab owns holds no part.)
+                        const bool gripping = g_tp_grip[hand] &&
+                                              !g_torso.fist_block[hand];
                         if (!gripping)
                             grabbing[hand] = false;
                         if (!touching && !grabbing[hand])
@@ -13468,6 +13810,14 @@ namespace trlvr
                 for (int m = 1; m < 4; ++m)
                     if (origin_error[m] < origin_error[mode])
                         mode = m;
+                // The scores only advise (they stay in the log): a blended
+                // vertex is stored from its index bone's joint (cdcEditor's
+                // exporter writes it that way, and vanilla Lara and Amanda
+                // score best there). On densely blended smoothed models the
+                // nearest-vertex score picked "w index + (1-w) weight",
+                // which put every blended hip vertex centimetres off, so
+                // they froze or tore while the rest moved (2026-10-29).
+                mode = 2;
             }
             for (int v = 0; v < virtual_count; ++v)
             {
@@ -13660,8 +14010,7 @@ namespace trlvr
                 // Underworld's rear; points[0], the index tip, dents).
                 float points[4][3];
                 const int n = hand_contact_points(h, points, true);
-                const bool valid = allowed && n > 0 && g_pluck.hand != h &&
-                                   g_pluck.palm != h;
+                const bool valid = allowed && n > 0 && !hand_holds_her(h);
                 if (!valid)
                 {
                     for (int c = 0; c < 2; ++c)
@@ -13727,7 +14076,7 @@ namespace trlvr
                     in.point_valid = true;
                     in.velocity_valid = v_ok;
                     in.hand = h;
-                    in.gripping = g_tp_grip[h];
+                    in.gripping = g_tp_grip[h] && !g_torso.fist_block[h];
                     in.metre = metre;
                     in.now_seconds = now;
                     for (int k = 0; k < 3; ++k)
@@ -13806,8 +14155,7 @@ namespace trlvr
                 r.debug_frame = g_present_count;
             }
             float root[3];
-            memcpy(root, static_cast<const unsigned char*>(instance) + 0x10,
-                   sizeof(root));
+            touch_root(static_cast<const unsigned char*>(instance), root);
             float root_v[3] = {};
             const bool root_v_ok = r.have_root && dt > 0.001f && dt < 0.1f;
             if (root_v_ok)
@@ -14522,7 +14870,8 @@ namespace trlvr
                 cfg.board_god_hand && camera_third_person_mode() == 2 &&
                 camera_world_scale_factor() >= 1.25f && g_pluck.hand < 0 &&
                 g_pluck.palm < 0 && !g_pluck.god.flying &&
-                !pluck_drawn(g_pluck.god) && metre > 0.0f;
+                !pluck_drawn(g_pluck.god) && !torso_drawn(g_torso.god) &&
+                metre > 0.0f;
             BodyBoneMap map;
             if (!allowed || !push_map(model, segments, count, mats, &map))
             {
@@ -14585,8 +14934,8 @@ namespace trlvr
             {
                 float points[4][3];
                 const int n = hand_contact_points(h, points, false);
-                if (!cfg.hand_body_collision || n == 0 || g_pluck.hand == h ||
-                    g_pluck.palm == h || push_hand_busy(h, tick))
+                if (!cfg.hand_body_collision || n == 0 || hand_holds_her(h) ||
+                    push_hand_busy(h, tick))
                 {
                     p.have_lead[h] = false;
                     p.touching_last[h] = false;
@@ -19718,7 +20067,7 @@ namespace trlvr
         // point, the first floor down; a drop point below it goes onto it.
         // Over no floor she is not moved (Legend never drops into a void).
         bool god_put_down(void* lara, const float feet[3], float* floor_z,
-                          bool* has_floor)
+                          bool* has_floor, float min_air = 0.0f)
         {
             const float metre = config().world_scale;
             const float from[3] = { feet[0], feet[1], feet[2] + 0.5f * metre };
@@ -19728,6 +20077,23 @@ namespace trlvr
             {
                 const float top = *floor_z + config().god_drop_height * metre;
                 place[2] = fminf(fmaxf(place[2], *floor_z), top);
+                // A drop is always a fall (god_drop_min): at least min_air
+                // above the floor, so even a light let-go is the game's own
+                // fall. SetPositionFindGround snaps her onto the ground
+                // within ~96 units (0.33 m), which would make a lesser
+                // height no fall at all: so the least is just past that,
+                // and less where a ceiling is lower.
+                // TODO(headset): check the snap distance in play.
+                if (min_air > 0.0f)
+                {
+                    float air = fmaxf(min_air, 100.0f);
+                    const float up[3] = { 0.0f, 0.0f, 1.0f };
+                    float ceil_at[3];
+                    if (body_probe(place, up, air + 1.75f * metre, ceil_at))
+                        air = fminf(air, fmaxf(0.0f, ceil_at[2] - place[2] -
+                                                     1.75f * metre));
+                    place[2] = fmaxf(place[2], *floor_z + air);
+                }
             }
             const float above[3] = { place[0], place[1],
                 fmaxf(g_pluck.root[2], place[2]) + metre };
@@ -19813,6 +20179,37 @@ namespace trlvr
                     }
                     in.arm_pivot[c][2] += reach;
                 }
+                // Her facing (the heading vector, (sin yaw, -cos yaw)) and
+                // her right: the side of limbs 1 / 3 (arm chain 1), from the
+                // shoulders, so the legs spread outward whichever way the
+                // chains are named.
+                {
+                    const float yaw = *reinterpret_cast<const float*>(
+                        static_cast<unsigned char*>(lara) + kOffInstanceHeading);
+                    const float* s0 = mats + arm[0][0] * 16 + 12;
+                    const float* s1 = mats + arm[1][0] * 16 + 12;
+                    const float rx = s1[0] - s0[0], ry = s1[1] - s0[1];
+                    const float rn = sqrtf(rx * rx + ry * ry);
+                    if (std::isfinite(yaw) && rn > 1e-3f)
+                    {
+                        in.facing[0] = sinf(yaw);
+                        in.facing[1] = -cosf(yaw);
+                        in.right[0] = rx / rn;
+                        in.right[1] = ry / rn;
+                        // Right should be (fy, -fx).
+                        static bool told_side = false;
+                        if (!told_side && in.facing[1] * in.right[0] -
+                                          in.facing[0] * in.right[1] < 0.5f)
+                        {
+                            told_side = true;
+                            log("board: her heading and shoulder line "
+                                "disagree (facing %.2f %.2f, right %.2f "
+                                "%.2f); knees may bend the wrong way",
+                                in.facing[0], in.facing[1], in.right[0],
+                                in.right[1]);
+                        }
+                    }
+                }
                 return in.head_valid;
             }
             __except(EXCEPTION_EXECUTE_HANDLER)
@@ -19821,105 +20218,320 @@ namespace trlvr
             }
         }
 
-        // A thrown Lara (god flying), once per frame after pluck_step: her
-        // feet's path this frame against the level, a line just above her
-        // feet and one at her chest (1 m up at her size), as Underworld's
-        // god_flight.
-        //  - The feet line hits while she falls: she lands there (put down).
-        //  - Otherwise a hit is a wall (or, rising, a ceiling): she is moved
-        //    0.3 m back along her path and bounces off at a quarter of her
-        //    speed; the 5th hit puts her down there.
-        //  - Below where she was picked up (0.5 m) over no floor, or at the
-        //    end of the flight (`over`): put down there (over no floor she
-        //    stays where she was).
+        // The level against a segment a -> b (Lara herself passed through):
+        // the first hit. The probe skips its first 4 units, so it starts a
+        // little behind a.
+        bool god_segment_hit(const float a[3], const float b[3], float at[3])
+        {
+            float d[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+            const float len = sqrtf(dot3(d, d));
+            if (!(len > 1e-3f))
+                return false;
+            for (float& x : d)
+                x /= len;
+            const float from[3] = { a[0] - d[0] * 6.0f, a[1] - d[1] * 6.0f,
+                                    a[2] - d[2] * 6.0f };
+            return body_probe(from, d, len + 6.0f, at);
+        }
+
+        // The surface normal at a hit of the ray from -> to at `at`. Legend's
+        // probe gives no hit record's normal (TODO(headset): the PCollideInfo
+        // may hold one, as Underworld's does), so two parallel rays a tenth of
+        // a metre (her size) to the sides give a plane (throw_plane_normal);
+        // last resort: straight back along the ray. *src names the source.
+        void flight_normal(const float from[3], const float to[3],
+                           const float at[3], float metre, float n[3],
+                           const char** src)
+        {
+            float dir[3] = { to[0] - from[0], to[1] - from[1],
+                             to[2] - from[2] };
+            const float len = sqrtf(dot3(dir, dir));
+            for (float& x : dir)
+                x = len > 0.0f ? x / len : 0.0f;
+            // Two directions across the ray.
+            const bool flat = fabsf(dir[2]) < 0.9f;
+            const float ref[3] = { flat ? 0.0f : 1.0f, 0.0f,
+                                   flat ? 1.0f : 0.0f };
+            float u[3] = { dir[1] * ref[2] - dir[2] * ref[1],
+                           dir[2] * ref[0] - dir[0] * ref[2],
+                           dir[0] * ref[1] - dir[1] * ref[0] };
+            const float ul = sqrtf(dot3(u, u));
+            for (float& x : u)
+                x = ul > 0.0f ? x / ul : 0.0f;
+            const float v[3] = { dir[1] * u[2] - dir[2] * u[1],
+                                 dir[2] * u[0] - dir[0] * u[2],
+                                 dir[0] * u[1] - dir[1] * u[0] };
+            const float side = 0.1f * metre, more = 0.5f * metre;
+            float pts[2][3];
+            bool side_ok = true;
+            for (int i = 0; i < 2 && side_ok; ++i)
+            {
+                const float* o = i ? v : u;
+                float a[3], b[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    a[k] = from[k] + o[k] * side;
+                    b[k] = to[k] + o[k] * side + dir[k] * more;
+                }
+                side_ok = god_segment_hit(a, b, pts[i]);
+            }
+            float est[3];
+            if (side_ok && throw_plane_normal(at, pts[0], pts[1], dir, est))
+            {
+                for (int k = 0; k < 3; ++k)
+                    n[k] = est[k];
+                *src = "the side probes";
+                return;
+            }
+            for (int k = 0; k < 3; ++k)
+                n[k] = -dir[k];
+            *src = "straight back along her path (no normal)";
+        }
+
+        // A thrown Lara, once per frame after pluck_step: her centre is a
+        // ball of fly.radius (god_throw), swept prev -> pos, the line
+        // extended by the radius along her motion (as Underworld's
+        // flight_probe).
+        //  - A hit whose normal points up (z > 0.6) while she descends: she
+        //    lands, her feet on the floor under her centre.
+        //  - Any other hit (a wall, a ceiling, a slope on the way up): her
+        //    centre goes back to the radius short of the hit and she
+        //    bounces about the normal (god_throw_bounce / god_throw_friction);
+        //    after 4 bounces she is put down there.
+        //  - No hit, descending: a probe down by the radius from her centre
+        //    finds a floor under her (she lands), or a steep slope (bounce).
+        //  - After a bounce, slower than 0.5 m/s (her size) over a floor
+        //    within twice the radius: she lands.
+        //  - Below where she was picked up (0.5 m) over no floor: put down
+        //    there (over no floor she stays where she was). So does the end
+        //    of the flight (`over`).
+        struct FlightProbe
+        {
+            int result = 0;             // 0 flying on, 1 bounce at `at`, 2 lands at `at`
+            float at[3] = {};
+            float normal[3] = {};
+            const char* surface = "a wall";
+            const char* why = nullptr;
+            bool on_level = false;      // landed on the level (not the time limit)
+        };
+
+        FlightProbe flight_probe(const ThrowBody& b, float pick_z, float metre,
+                                 bool over)
+        {
+            FlightProbe r;
+            const float* c0 = b.prev;
+            const float* c1 = b.pos;
+            const float rad = b.radius;
+            const float move[3] = { c1[0] - c0[0], c1[1] - c0[1],
+                                    c1[2] - c0[2] };
+            const float len = sqrtf(dot3(move, move));
+            // Default landing spot: her feet under the centre.
+            r.at[0] = c1[0];
+            r.at[1] = c1[1];
+            r.at[2] = c1[2] - rad;
+            auto feet_under = [&](const float c[3], float* out) {
+                const float top[3] = { c[0], c[1], c[2] + 0.1f * metre };
+                float fz;
+                out[0] = c[0];
+                out[1] = c[1];
+                out[2] = god_floor(top, 60.0f * metre, &fz) &&
+                         fz > c[2] - 3.0f * rad
+                             ? fz + 0.02f * metre : c[2] - rad;
+            };
+            auto log_normal = [&](const char* src, const float n[3]) {
+                if (g_pluck.throw_normal_logged)
+                    return;
+                g_pluck.throw_normal_logged = true;
+                log("board: throw: surface normal %.2f %.2f %.2f from %s",
+                    n[0], n[1], n[2], src);
+            };
+            // The sweep.
+            if (len > 1e-3f)
+            {
+                float dir[3];
+                for (int k = 0; k < 3; ++k)
+                    dir[k] = move[k] / len;
+                const float to[3] = { c1[0] + dir[0] * rad,
+                                      c1[1] + dir[1] * rad,
+                                      c1[2] + dir[2] * rad };
+                float at[3];
+                if (god_segment_hit(c0, to, at))
+                {
+                    const float d = sqrtf((at[0] - c0[0]) * (at[0] - c0[0]) +
+                                          (at[1] - c0[1]) * (at[1] - c0[1]) +
+                                          (at[2] - c0[2]) * (at[2] - c0[2]));
+                    const float keep = d - rad > 0.0f ? d - rad : 0.0f;
+                    float contact[3];
+                    for (int k = 0; k < 3; ++k)
+                        contact[k] = c0[k] + dir[k] * keep;
+                    const char* src = "";
+                    flight_normal(c0, to, at, metre, r.normal, &src);
+                    log_normal(src, r.normal);
+                    const int kind = throw_surface(r.normal, b.vel[2]);
+                    if (kind == kThrowFloor)
+                    {
+                        feet_under(contact, r.at);
+                        r.result = 2;
+                        r.why = "on the level";
+                        r.on_level = true;
+                        return r;
+                    }
+                    r.surface = kind == kThrowCeiling ? "a ceiling" : "a wall";
+                    if (++g_pluck.bounces > 4)
+                    {
+                        feet_under(contact, r.at);
+                        r.result = 2;
+                        r.why = "against a wall (bounced 4 times)";
+                        r.on_level = true;
+                        return r;
+                    }
+                    for (int k = 0; k < 3; ++k)
+                        r.at[k] = contact[k];
+                    r.result = 1;
+                    return r;
+                }
+            }
+            // Floor contact under her centre while descending.
+            if (b.vel[2] <= 0.0f)
+            {
+                const float down[3] = { c1[0], c1[1], c1[2] - rad };
+                float at[3];
+                if (god_segment_hit(c1, down, at))
+                {
+                    const char* src = "";
+                    flight_normal(c1, down, at, metre, r.normal, &src);
+                    log_normal(src, r.normal);
+                    if (r.normal[2] > 0.6f || ++g_pluck.bounces > 4)
+                    {
+                        r.at[0] = c1[0];
+                        r.at[1] = c1[1];
+                        r.at[2] = at[2] + 0.02f * metre;
+                        r.result = 2;
+                        r.why = r.normal[2] > 0.6f
+                            ? "on the level"
+                            : "on a steep slope (bounced 4 times)";
+                        r.on_level = true;
+                        return r;
+                    }
+                    // A steep slope under her: back to where she was, off it.
+                    r.surface = "a steep slope";
+                    for (int k = 0; k < 3; ++k)
+                        r.at[k] = c0[k];
+                    r.result = 1;
+                    return r;
+                }
+            }
+            // Slow after a bounce, near a floor: she lands.
+            if (g_pluck.bounces > 0 && sqrtf(dot3(b.vel, b.vel)) < 0.5f * metre)
+            {
+                float fz;
+                if (god_floor(c1, 2.0f * rad, &fz))
+                {
+                    r.at[0] = c1[0];
+                    r.at[1] = c1[1];
+                    r.at[2] = fz + 0.02f * metre;
+                    r.result = 2;
+                    r.why = "on the level (slowed after a bounce)";
+                    r.on_level = true;
+                    return r;
+                }
+            }
+            const char* why = nullptr;
+            if (c1[2] - rad < pick_z - 0.5f * metre)
+            {
+                float fz;
+                if (!god_floor(c1, 60.0f * metre, &fz))
+                    why = "over no floor";
+            }
+            if (!why && over)
+            {
+                why = "at the end of the flight";
+                feet_under(c1, r.at);
+            }
+            if (!why)
+                return r;
+            r.result = 2;
+            r.why = why;
+            return r;
+        }
+
+        // While she is held, once per frame: her drawn centre `c`. The last
+        // point it reached along a clear line is kept (throw_free); `real`
+        // (her real centre) starts it. flight_start moves a new throw's start
+        // back to it when the line from there to the release is blocked
+        // (thrown from behind or inside a wall).
+        void throw_free_track(const float c[3], const float real[3])
+        {
+            if (!g_pluck.throw_free_ok)
+            {
+                for (int k = 0; k < 3; ++k)
+                    g_pluck.throw_free[k] = real[k];
+                g_pluck.throw_free_ok = true;
+            }
+            float at[3];
+            if (!god_segment_hit(g_pluck.throw_free, c, at))
+                for (int k = 0; k < 3; ++k)
+                    g_pluck.throw_free[k] = c[k];
+        }
+
+        // A throw just started from `b.pos`: false = the line from the last
+        // free held point is clear; true = blocked, *start = the last free
+        // point along it (the radius short of the hit).
+        bool flight_start(const ThrowBody& b, float start[3])
+        {
+            g_pluck.throw_normal_logged = false;
+            if (!g_pluck.throw_free_ok)
+                return false;
+            const float* f = g_pluck.throw_free;
+            float at[3];
+            if (!god_segment_hit(f, b.pos, at))
+                return false;
+            float dir[3] = { b.pos[0] - f[0], b.pos[1] - f[1],
+                             b.pos[2] - f[2] };
+            const float len = sqrtf(dot3(dir, dir));
+            const float d = sqrtf((at[0] - f[0]) * (at[0] - f[0]) +
+                                  (at[1] - f[1]) * (at[1] - f[1]) +
+                                  (at[2] - f[2]) * (at[2] - f[2]));
+            const float keep = d - b.radius > 0.0f ? d - b.radius : 0.0f;
+            for (int k = 0; k < 3; ++k)
+                start[k] = f[k] + (len > 0.0f ? dir[k] / len * keep : 0.0f);
+            return true;
+        }
+
         void pluck_flight(void* lara, bool over)
         {
             PluckState& s = g_pluck.god;
             const float metre = config().world_scale;
-            const float* a = s.fly_prev;
-            const float* e = s.target;
-            const float path[3] = { e[0] - a[0], e[1] - a[1], e[2] - a[2] };
-            const float path_len = sqrtf(dot3(path, path));
-            const float flat = sqrtf(path[0] * path[0] + path[1] * path[1]);
-            float land[3] = { e[0], e[1], e[2] };
-            const char* why = nullptr;
-            bool on_level = false;
-            for (int pass = 0; pass < 2 && !why && path_len > 1e-3f; ++pass)
+            const FlightProbe r = flight_probe(s.fly, s.root[2], metre, over);
+            if (r.result == 1)
             {
-                const float up = pass ? metre : 0.05f * metre;
-                const float start[3] = { a[0], a[1], a[2] + up };
-                const float dir[3] = { path[0] / path_len, path[1] / path_len,
-                                       path[2] / path_len };
-                // From a little behind: the probe skips its first 4 units.
-                const float from[3] = { start[0] - dir[0] * 6.0f,
-                                        start[1] - dir[1] * 6.0f,
-                                        start[2] - dir[2] * 6.0f };
-                float at[3];
-                if (!body_probe(from, dir, path_len + 6.0f, at))
-                    continue;
-                const bool falling = s.fly_vel[2] <= 0.0f;
-                if (pass == 0 && falling)
-                {
-                    // On the ground: a little back along her path (not into
-                    // the step she hit), on the surface.
-                    land[0] = at[0] - (flat > 1e-3f
-                        ? path[0] / flat * 0.1f * metre : 0.0f);
-                    land[1] = at[1] - (flat > 1e-3f
-                        ? path[1] / flat * 0.1f * metre : 0.0f);
-                    land[2] = at[2] + 0.02f * metre;
-                    why = "on the level";
-                    on_level = true;
-                    break;
-                }
-                float d[3];
-                for (int k = 0; k < 3; ++k)
-                    d[k] = at[k] - start[k];
-                const float keep = sqrtf(dot3(d, d)) - 0.3f * metre;
-                float back[3];
-                for (int k = 0; k < 3; ++k)
-                    back[k] = keep > 0.0f ? a[k] + dir[k] * keep : a[k];
-                // A ceiling only when rising more steeply than she moves
-                // across: a step or wall face hit on the way up is a wall,
-                // or she was sent on into it.
-                const bool ceiling = !falling &&
-                    s.fly_vel[2] > sqrtf(s.fly_vel[0] * s.fly_vel[0] +
-                                         s.fly_vel[1] * s.fly_vel[1]);
-                if (++g_pluck.bounces > 4)
-                {
-                    for (int k = 0; k < 3; ++k)
-                        land[k] = back[k];
-                    why = "against a wall (bounced 4 times)";
-                    break;
-                }
-                pluck_bounce(s, back, 0.25f, ceiling);
-                log("board: the throw hits %s %.2f s in; she bounces off",
-                    ceiling ? "a ceiling" : "a wall", s.fly_time);
+                const float v_in = sqrtf(dot3(s.fly.vel, s.fly.vel));
+                pluck_bounce(s, r.at, r.normal, config().god_throw_bounce,
+                             config().god_throw_friction);
+                log("board: the throw hits %s %.2f s in (normal %.2f %.2f "
+                    "%.2f); she bounces off at %.2f of her speed, velocity "
+                    "now %.0f %.0f %.0f", r.surface, s.fly_time, r.normal[0],
+                    r.normal[1], r.normal[2],
+                    v_in > 0.0f ? sqrtf(dot3(s.fly.vel, s.fly.vel)) / v_in
+                                : 0.0f,
+                    s.fly.vel[0], s.fly.vel[1], s.fly.vel[2]);
                 return;
             }
-            if (!why && e[2] < s.root[2] - 0.5f * metre)
-            {
-                const float from[3] = { e[0], e[1], e[2] + 0.5f * metre };
-                float fz;
-                if (!god_floor(from, 60.0f * metre, &fz))
-                    why = "over no floor";
-            }
-            if (!why && over)
-                why = "at the end of the flight";
-            if (!why)
+            if (r.result != 2)
                 return;
             float floor_z = 0.0f;
             bool has_floor = false;
             const float time = s.fly_time;
-            const bool moved = god_put_down(lara, land, &floor_z, &has_floor);
+            const bool moved = god_put_down(lara, r.at, &floor_z, &has_floor);
             log("board: the throw lands %s after %.2f s, %.2f m (her size) "
-                "from where she was picked up%s", why, time,
-                sqrtf((land[0] - s.root[0]) * (land[0] - s.root[0]) +
-                      (land[1] - s.root[1]) * (land[1] - s.root[1])) / metre,
+                "from where she was picked up%s", r.why, time,
+                sqrtf((r.at[0] - s.root[0]) * (r.at[0] - s.root[0]) +
+                      (r.at[1] - s.root[1]) * (r.at[1] - s.root[1])) / metre,
                 moved ? "" : "; she could not be moved (she stays where "
                              "she was)");
             // On the level: the landing animation (god_land_anim) once the
             // teleport has settled.
-            if (moved && on_level && config().god_land_anim >= 0)
+            if (moved && r.on_level && config().god_land_anim >= 0)
                 g_pluck.land_anim_due = (GetTickCount() + 100) | 1;
             if (g_pluck.throw_hand >= 0)
                 vr_input_weapon_haptic(g_pluck.throw_hand == 0, 0.25f);
@@ -19927,6 +20539,279 @@ namespace trlvr
             g_pluck.bounces = 0;
             g_pluck.throw_hand = -1;
             dangle_restore(lara);
+        }
+
+        // Her pose for the torso grab (TorsoInput), from her animated
+        // matrices (the last draw's, put back after it): the torso axis from
+        // the hips' middle to the shoulders' middle, her arms (shoulder ->
+        // wrist), legs (hip -> foot) and head (its joint -> 20 cm above, as
+        // the pick-up's head top). Her reference frame is her feet with the
+        // world axes (rigid; any rigid frame does, god_torso.h). in.root is
+        // set by the caller. leg_left[c]: hip c is her left leg.
+        bool torso_read_bones(void* lara, TorsoInput& in, bool leg_left[2])
+        {
+            const float metre = config().world_scale;
+            __try
+            {
+                void* model = nullptr;
+                if (!lara_is_drawn_lara(lara, nullptr, &model) || !model)
+                    return false;
+                unsigned char* m = static_cast<unsigned char*>(model);
+                const int count = *reinterpret_cast<const int*>(
+                    m + kOffModelNumSegments);
+                const ModelSegment* segments =
+                    *reinterpret_cast<ModelSegment* const*>(
+                        m + kOffModelSegments);
+                const float* mats = *reinterpret_cast<float* const*>(
+                    static_cast<unsigned char*>(lara) + kOffInstanceMatrices);
+                const unsigned char* prop =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerProp);
+                int arm[2][3];
+                if (!mats || !prop || !segments || count <= 0 ||
+                    count > kMaxSegments || !lara_arm_segments(count, arm))
+                    return false;
+                const int head = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropHeadSegment);
+                if (head < 0 || head >= count)
+                    return false;
+                if (g_hip_model != model)
+                {
+                    g_hip_model = model;
+                    find_hips(segments, count,
+                              reinterpret_cast<const float (*)[16]>(mats));
+                }
+                if (g_hip[0] < 0 || g_hip[1] < 0 || g_hip[0] >= count ||
+                    g_hip[1] >= count)
+                    return false;
+                const float* hip[2] = { mats + g_hip[0] * 16 + 12,
+                                        mats + g_hip[1] * 16 + 12 };
+                const float* sh[2] = { mats + arm[0][0] * 16 + 12,
+                                       mats + arm[1][0] * 16 + 12 };
+                const float* wr[2] = { mats + arm[0][2] * 16 + 12,
+                                       mats + arm[1][2] * 16 + 12 };
+                const float* hj = mats + head * 16 + 12;
+                // Her left leg: the hip on the same side as her left shoulder.
+                const float side[3] = { hip[0][0] - hip[1][0],
+                                        hip[0][1] - hip[1][1],
+                                        hip[0][2] - hip[1][2] };
+                const float left[3] = { sh[0][0] - sh[1][0],
+                                        sh[0][1] - sh[1][1],
+                                        sh[0][2] - sh[1][2] };
+                leg_left[0] = dot3(side, left) >= 0.0f;
+                leg_left[1] = !leg_left[0];
+                const float yaw = *reinterpret_cast<const float*>(
+                    static_cast<unsigned char*>(lara) + kOffInstanceHeading);
+                if (!std::isfinite(yaw))
+                    return false;
+                in.body_valid = true;
+                in.body = translation(in.root[0], in.root[1], in.root[2]);
+                in.forward[0] = sinf(yaw);
+                in.forward[1] = -cosf(yaw);
+                in.up[2] = 1.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    in.torso_a[k] = 0.5f * (hip[0][k] + hip[1][k]);
+                    in.torso_b[k] = 0.5f * (sh[0][k] + sh[1][k]);
+                }
+                for (int c = 0; c < 2; ++c)
+                {
+                    const int a = kTorsoArm0 + c;
+                    const int l = leg_left[c] ? kTorsoLeg0 : kTorsoLeg1;
+                    const int foot = g_foot[c] >= 0 && g_foot[c] < count
+                        ? g_foot[c] : -1;
+                    in.limb_valid[a] = in.limb_valid[l] = true;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        in.limb_joint[a][k] = sh[c][k];
+                        in.limb_end[a][k] = wr[c][k];
+                        in.limb_joint[l][k] = hip[c][k];
+                        in.limb_end[l][k] = foot >= 0
+                            ? mats[foot * 16 + 12 + k]
+                            : hip[c][k] - (k == 2 ? 0.9f * metre : 0.0f);
+                    }
+                }
+                in.limb_valid[kTorsoHead] = true;
+                for (int k = 0; k < 3; ++k)
+                {
+                    in.limb_joint[kTorsoHead][k] = hj[k];
+                    in.limb_end[kTorsoHead][k] =
+                        hj[k] + (k == 2 ? 0.20f * metre : 0.0f);
+                }
+                for (int l = 0; l < kTorsoLimbs; ++l)
+                    for (int k = 0; k < 3; ++k)
+                        if (!std::isfinite(in.limb_joint[l][k]) ||
+                            !std::isfinite(in.limb_end[l][k]))
+                            return false;
+                return std::isfinite(in.torso_a[0]) &&
+                       std::isfinite(in.torso_b[0]) &&
+                       std::isfinite(in.torso_a[2]) &&
+                       std::isfinite(in.torso_b[2]);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        // The torso toss (TorsoState::flying), once per frame after
+        // torso_step: as pluck_flight, her drawn centre swept against the
+        // level, her feet under the drawn pose.
+        void torso_flight(void* lara, bool over)
+        {
+            TorsoState& s = g_torso.god;
+            const float metre = config().world_scale;
+            const FlightProbe r = flight_probe(s.fly, g_torso.in.root[2],
+                                               metre, over);
+            if (r.result == 1)
+            {
+                const float v_in = sqrtf(dot3(s.fly.vel, s.fly.vel));
+                torso_bounce(s, r.at, r.normal, config().god_throw_bounce,
+                             config().god_throw_friction);
+                log("board: torso toss hits %s %.2f s in (normal %.2f %.2f "
+                    "%.2f); she bounces off at %.2f of her speed, velocity "
+                    "now %.0f %.0f %.0f", r.surface, s.fly_time, r.normal[0],
+                    r.normal[1], r.normal[2],
+                    v_in > 0.0f ? sqrtf(dot3(s.fly.vel, s.fly.vel)) / v_in
+                                : 0.0f,
+                    s.fly.vel[0], s.fly.vel[1], s.fly.vel[2]);
+                return;
+            }
+            if (r.result != 2)
+                return;
+            float floor_z = 0.0f;
+            bool has_floor = false;
+            const float time = s.fly_time;
+            const bool moved = god_put_down(lara, r.at, &floor_z, &has_floor);
+            log("board: torso toss lands %s after %.2f s%s", r.why, time,
+                moved ? "" : "; she could not be moved (she stays where she "
+                             "was)");
+            if (moved && r.on_level && config().god_land_anim >= 0)
+                g_pluck.land_anim_due = (GetTickCount() + 100) | 1;
+            if (g_pluck.throw_hand >= 0)
+                vr_input_weapon_haptic(g_pluck.throw_hand == 0, 0.25f);
+            torso_land(s);
+            g_pluck.bounces = 0;
+            g_pluck.throw_hand = -1;
+        }
+
+        // Is this hand's pose a fist (index and the other fingers curled),
+        // with hysteresis: closing past 0.6 / 0.5, opening below 0.45 / 0.35.
+        // False without finger data.
+        bool hand_is_fist(int hand, bool was)
+        {
+            float curl[5], splay[4];
+            if (!vr_input_finger_pose(hand == 0, curl, splay))
+                return false;
+            const float others = (curl[2] + curl[3] + curl[4]) / 3.0f;
+            return curl[1] > (was ? 0.45f : 0.6f) &&
+                   others > (was ? 0.35f : 0.5f);
+        }
+
+        // god_zone_debug: the grab zones as world-space line segments, filled
+        // each pick-up update and drawn in the headset by the same path as the
+        // rear soft body's wireframes (camera_zone_debug_lines ->
+        // vr_submit's draw_rear_debug). Colours are 0xAARRGGBB.
+        constexpr unsigned kZoneTorso = 0xFF00FF00u, kZoneHead = 0xFFFF00FFu,
+                           kZoneHand = 0xFFFF8000u, kZonePoint = 0xFFFFFFFFu;
+        struct ZoneDebug
+        {
+            static constexpr int kMax = 640;
+            float seg[kMax][6];
+            unsigned colour[kMax];
+            int count = 0;
+            unsigned frame = 0xFFFFFFFFu;
+        };
+        ZoneDebug g_zone_debug;
+
+        void zone_line(const float a[3], const float b[3], unsigned colour)
+        {
+            ZoneDebug& z = g_zone_debug;
+            if (z.count >= ZoneDebug::kMax)
+                return;
+            memcpy(&z.seg[z.count][0], a, sizeof(float) * 3);
+            memcpy(&z.seg[z.count][3], b, sizeof(float) * 3);
+            z.colour[z.count++] = colour;
+        }
+
+        // A ring round c in the plane of u and w (vectors with the radius).
+        void zone_ring(const float c[3], const float u[3], const float w[3],
+                       unsigned colour)
+        {
+            const int kSteps = 16;
+            float prev[3];
+            for (int i = 0; i <= kSteps; ++i)
+            {
+                const float a = 6.2831853f * i / kSteps;
+                float p[3];
+                for (int k = 0; k < 3; ++k)
+                    p[k] = c[k] + u[k] * cosf(a) + w[k] * sinf(a);
+                if (i)
+                    zone_line(prev, p, colour);
+                memcpy(prev, p, sizeof(prev));
+            }
+        }
+
+        // A ball: three rings.
+        void zone_ball(const float c[3], float r, unsigned colour)
+        {
+            const float x[3] = { r, 0.0f, 0.0f }, y[3] = { 0.0f, r, 0.0f },
+                        z[3] = { 0.0f, 0.0f, r };
+            zone_ring(c, x, y, colour);
+            zone_ring(c, y, z, colour);
+            zone_ring(c, x, z, colour);
+        }
+
+        // A capsule a-b of radius r: a ring at each end and four side lines
+        // (a == b is a ball).
+        void zone_capsule(const float a[3], const float b[3], float r,
+                          unsigned colour)
+        {
+            float axis[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+            if (normalise3(axis) < 1e-4f)
+            {
+                zone_ball(a, r, colour);
+                return;
+            }
+            const float helper[3] = { fabsf(axis[2]) < 0.9f ? 0.0f : 1.0f, 0.0f,
+                                      fabsf(axis[2]) < 0.9f ? 1.0f : 0.0f };
+            float u[3] = { axis[1] * helper[2] - axis[2] * helper[1],
+                           axis[2] * helper[0] - axis[0] * helper[2],
+                           axis[0] * helper[1] - axis[1] * helper[0] };
+            normalise3(u);
+            float w[3] = { axis[1] * u[2] - axis[2] * u[1],
+                           axis[2] * u[0] - axis[0] * u[2],
+                           axis[0] * u[1] - axis[1] * u[0] };
+            for (int k = 0; k < 3; ++k)
+            {
+                u[k] *= r;
+                w[k] *= r;
+            }
+            zone_ring(a, u, w, colour);
+            zone_ring(b, u, w, colour);
+            for (int i = 0; i < 4; ++i)
+            {
+                const float cs = i == 0 ? 1.0f : i == 2 ? -1.0f : 0.0f;
+                const float sn = i == 1 ? 1.0f : i == 3 ? -1.0f : 0.0f;
+                float p[3], q[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    p[k] = a[k] + u[k] * cs + w[k] * sn;
+                    q[k] = b[k] + u[k] * cs + w[k] * sn;
+                }
+                zone_line(p, q, colour);
+            }
+        }
+
+        // A small three-axis cross at p, `arm` long each way.
+        void zone_cross(const float p[3], float arm, unsigned colour)
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                float a[3] = { p[0], p[1], p[2] }, b[3] = { p[0], p[1], p[2] };
+                a[k] -= arm;
+                b[k] += arm;
+                zone_line(a, b, colour);
+            }
         }
     }
 
@@ -20015,6 +20900,17 @@ namespace trlvr
             g_pluck.palm = -1;
             g_pluck.hand = -1;
             g_pluck.hover = false;
+            if (torso_drawn(g_torso.god))
+                log("board: torso grab dropped (left board gameplay); Lara "
+                    "stays where she was");
+            torso_reset(g_torso.god);
+            for (int h = 0; h < 2; ++h)
+            {
+                g_torso.mask[h] = g_torso.aim[h] = g_torso.fist[h] = false;
+                g_torso.fist_block[h] = false;
+                g_torso.touch_ok[h] = false;
+            }
+            g_zone_debug.count = 0;
             // Cleared, the grips remembered (one held now is no press).
             PluckParams off;
             off.enabled = false;
@@ -20144,6 +21040,7 @@ namespace trlvr
         // Onto the palm unaided: an upturned palm she walks onto (its top
         // within a step of her feet), or lands on from above.
         if (g_pluck.palm < 0 && g_pluck.hand < 0 && !g_pluck.god.flying &&
+            !torso_drawn(g_torso.god) &&
             GetTickCount() - g_pluck.palm_left_at > 1000)
         {
             const bool airborne = lara_airborne(lara);
@@ -20213,19 +21110,42 @@ namespace trlvr
         pp.metre = metre;
         pp.table = table;
         pp.head_only = true;
-        pp.head_radius = config().god_head_zone;
+        // god_zone_scale multiplies every grab zone (and its wireframe).
+        pp.head_radius = config().god_head_zone * config().god_zone_scale;
         // Drag by hand is experimental (god_drag_hand): off, no arm zones
         // and the head grab hangs on Legend's dangle animation.
-        pp.arm_radius = config().god_drag_hand ? config().god_arm_zone : 0.0f;
-        // Off a palm she is lifted at once (the lead draws her arm on her
-        // real pose, not on the palm).
-        pp.arm_lead = config().god_arm_lead && g_pluck.palm < 0;
+        pp.arm_radius = config().god_drag_hand
+            ? config().god_arm_zone * config().god_zone_scale : 0.0f;
+        // The arm lead is off (2026-10-26): she is lifted by the arm at
+        // once. god_arm_lead is still parsed but ignored.
+        pp.arm_lead = false;
         pp.settle_seconds = 0.15f;      // fingers closing into the pinch pose
         pp.throw_enabled = config().god_throw;
         pp.throw_scale = config().god_throw_strength;
         pp.throw_gravity = config().god_throw_gravity;
+        pp.throw_velocity = config().god_throw_velocity ? 1 : 0;
+        pp.throw_radius = config().god_throw_radius;
+        // Ragdoll limbs, knees (degrees in the ini), the throw's tumble, and
+        // a second hand on her other arm; the held draw is carry_apply.
+        pp.ragdoll = config().god_ragdoll;
+        pp.knee_bend = config().god_knee_bend * 0.017453293f;
+        pp.throw_spin = config().god_throw_spin;
+        pp.two_hands = config().god_two_hands;
         PluckInput in;
         in.dt = dt;
+        // Two hands: her arms as drawn last frame (the other arm is the
+        // second grab's zone); chain c is limb c (0 left, 1 right).
+        for (int c = 0; c < 2; ++c)
+        {
+            in.arm_limb[c] = c;
+            in.drawn_arm_valid[c] = g_pluck.drawn_ok && pluck_drawn(g_pluck.god);
+            for (int k = 0; k < 3; ++k)
+            {
+                in.drawn_shoulder[c][k] = g_pluck.drawn_shoulder[c][k];
+                in.drawn_end[c][k] = g_pluck.drawn_end[c][k];
+                in.drawn_wrist[c][k] = g_pluck.drawn_wrist[c][k];
+            }
+        }
         for (int k = 0; k < 3; ++k)
             in.root[k] = g_pluck.root[k];
         float head_top[3] = { g_pluck.root[0], g_pluck.root[1],
@@ -20306,6 +21226,222 @@ namespace trlvr
             in.part_held[h] = g_tp_part_time[h] &&
                 GetTickCount() - g_tp_part_time[h] < 150;
         }
+        // Torso fist grab (god_torso, ported back from Underworld's torso_step
+        // glue): before the pluck, which does not see a hand whose fist
+        // closed aimed at her torso (mask) nor any grab while she is held or
+        // tossed by it. A hand on a soft part (part_held) or a Lara the pluck
+        // has (held, flying, on a palm) is no torso grab.
+        TorsoParams tp;
+        TorsoEvents tev;
+        {
+            const Config& cfg = config();
+            g_zone_debug.count = 0;
+            g_zone_debug.frame = g_present_count;
+            tp.metre = metre;
+            tp.table = table;
+            tp.enabled = cfg.god_torso;
+            tp.max_height = cfg.god_torso_max_height;
+            tp.facing_dot = cfg.god_torso_facing;
+            tp.torso_radius = cfg.god_torso_radius * cfg.god_zone_scale;
+            tp.hand_margin = cfg.god_torso_margin;
+            tp.zone_lower = cfg.god_torso_lower;
+            tp.grace_seconds = cfg.god_torso_grace;
+            tp.knee_bend = cfg.god_knee_bend * 0.017453293f;
+            tp.throw_enabled = cfg.god_throw && cfg.god_torso_throw_scale > 0.0f;
+            tp.throw_scale = cfg.god_torso_throw_scale;
+            tp.throw_gravity = cfg.god_throw_gravity;
+            tp.throw_velocity = cfg.god_throw_velocity ? 1 : 0;
+            tp.throw_radius = cfg.god_throw_radius;
+            tp.spin_scale = cfg.god_torso_spin;
+            TorsoInput& ti = g_torso.in;
+            ti = TorsoInput();
+            ti.dt = dt;
+            for (int k = 0; k < 3; ++k)
+                ti.root[k] = g_pluck.root[k];
+            const bool bones = torso_read_bones(lara, ti, g_torso.leg_left);
+            ti.body_valid = bones;
+            g_torso.apparent = factor > 0.0f ? 1.75f / factor : 0.0f;
+            ti.apparent_height = g_torso.apparent;
+            if (!bones)
+            {
+                static bool told = false;
+                if (!told)
+                {
+                    told = true;
+                    log("board: her bones are unreadable for the torso "
+                        "grab; none until they are");
+                }
+            }
+            const bool pluck_taken = s.hand >= 0 || s.flying || g_pluck.palm >= 0;
+            float za[3], zb[3], zr = 0.0f;
+            if (!torso_zone(tp, ti, za, zb, &zr))
+                for (int k = 0; k < 3; ++k)
+                {
+                    za[k] = ti.torso_a[k];
+                    zb[k] = ti.torso_b[k];
+                }
+            const DWORD tick = GetTickCount();
+            for (int h = 0; h < 2; ++h)
+            {
+                TorsoHand& th = ti.hand[h];
+                g_torso.fist[h] = hand_is_fist(h, g_torso.fist[h]);
+                Mat4 to_head;
+                const bool seen = hand_seen_fresh(h) && g_palm_seen[h].time &&
+                    tick - g_palm_seen[h].time < 250 &&
+                    vr_controller_head_pose(h == 0, &to_head);
+                th.valid = seen;
+                th.fist = seen && g_torso.fist[h];
+                if (seen)
+                {
+                    // The hand's frame: the controller's turn, at the palm
+                    // as drawn (the board's apparent place).
+                    const Mat4 world = to_head * camera_to_world;
+                    Mat4 pose = Mat4::identity();
+                    for (int r = 0; r < 3; ++r)
+                    {
+                        float a[3] = { world.m[r][0], world.m[r][1],
+                                       world.m[r][2] };
+                        normalise3(a);
+                        for (int k = 0; k < 3; ++k)
+                            pose.m[r][k] = a[k];
+                    }
+                    for (int k = 0; k < 3; ++k)
+                        pose.m[3][k] = g_palm_seen[h].point[k];
+                    th.pose = pose;
+                    // The zone test takes whichever of the hand's points is
+                    // nearest her spine (a fist's palm centre is often a
+                    // hand's width off it); the facing still uses the
+                    // palm's normal.
+                    const HandSeen& hs = g_hand_seen[h];
+                    const float* cand[4] = { g_palm_seen[h].point, hs.pinch,
+                                             hs.index_tip, hs.thumb_tip };
+                    const float* near_pt = cand[0];
+                    float near_d = 1e30f;
+                    for (const float* c : cand)
+                    {
+                        const float d = pluck_segment_distance(za, zb, c);
+                        if (d < near_d)
+                        {
+                            near_d = d;
+                            near_pt = c;
+                        }
+                    }
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        th.palm_centre[k] = near_pt[k];
+                        th.palm_normal[k] = g_palm_seen[h].normal[k];
+                    }
+                }
+                th.part_held = in.part_held[h];
+                th.other_grab = pluck_taken || s.hand2 == h;
+            }
+            torso_step(g_torso.god, tp, ti, &tev);
+            TorsoState& ts = g_torso.god;
+            for (int h = 0; h < 2; ++h)
+            {
+                g_torso.aim[h] = tev.aim[h];
+                if (tev.wants[h] || ts.hand == h)
+                    g_torso.mask[h] = true;
+                else if (!ti.hand[h].valid || !grip[h])
+                    g_torso.mask[h] = false;
+                // A squeezed fist is the torso grab's, not a soft-part
+                // pinch, while she is small enough to be grabbed by the
+                // torso: only a pinch holds a part.
+                g_torso.fist_block[h] = cfg.god_torso_fist_first &&
+                    cfg.god_torso && g_torso.fist[h] &&
+                    g_torso.apparent <= cfg.god_fist_block_height;
+                if (tev.hover_enter[h])
+                    vr_input_handhold_haptic(h == 0);
+            }
+            if (tev.grabbed)
+            {
+                vr_input_weapon_haptic(tev.hand == 0, 0.5f);
+                g_pluck.bounces = 0;
+                g_pluck.land_anim_due = 0;
+                log("board: torso grab by the %s hand (she looks %.2f m "
+                    "tall to you)", tev.hand ? "right" : "left",
+                    g_torso.apparent);
+            }
+            if (tev.thrown)
+            {
+                vr_input_weapon_haptic(tev.hand == 0, 0.4f);
+                g_pluck.bounces = 0;
+                g_pluck.throw_hand = tev.hand;
+                const ThrowBody& fb = ts.fly;
+                log("board: torso toss by the %s hand at %.2f m/s (your "
+                    "size, %s), velocity %.0f %.0f %.0f units/s, centre %.0f "
+                    "%.0f %.0f, radius %.0f", tev.hand ? "right" : "left",
+                    tev.throw_speed,
+                    cfg.god_throw_velocity ? "averaged" : "peak",
+                    fb.vel[0], fb.vel[1], fb.vel[2], fb.pos[0], fb.pos[1],
+                    fb.pos[2], fb.radius);
+                // Released behind a wall: she starts at the last free point.
+                float start[3];
+                if (flight_start(fb, start))
+                {
+                    log("board: torso toss: the release point is behind the "
+                        "level; she starts at the last free point");
+                    torso_fly_move(ts, start);
+                }
+            }
+            else if (tev.put_down)
+            {
+                vr_input_weapon_haptic(tev.hand == 0, 0.3f);
+                float floor_z = 0.0f;
+                bool has_floor = false;
+                if (god_put_down(lara, tev.feet, &floor_z, &has_floor,
+                                 cfg.god_drop_min * metre))
+                    log("board: torso released by the %s hand: put down "
+                        "%.2f m (her size) above the floor, %.2f table-m "
+                        "from where she was picked up",
+                        tev.hand ? "right" : "left",
+                        (tev.feet[2] - floor_z) / metre,
+                        sqrtf((tev.feet[0] - g_pluck.root[0]) *
+                              (tev.feet[0] - g_pluck.root[0]) +
+                              (tev.feet[1] - g_pluck.root[1]) *
+                              (tev.feet[1] - g_pluck.root[1])) / table);
+                else
+                    log("board: torso released by the %s hand; Lara stays "
+                        "where she was%s", tev.hand ? "right" : "left",
+                        has_floor ? "" : " (over no floor)");
+            }
+            if (ts.flying && !tev.thrown)
+                torso_flight(lara, tev.flight_over);
+            // Held: where a throw may start from (throw_free_track).
+            if (ts.hand >= 0 && cfg.god_throw)
+            {
+                const float real_c[3] = {
+                    0.5f * (ti.torso_a[0] + ti.torso_b[0]),
+                    0.5f * (ti.torso_a[1] + ti.torso_b[1]),
+                    0.5f * (ti.torso_a[2] + ti.torso_b[2]) };
+                throw_free_track(ts.centre, real_c);
+            }
+            // The torso zone and the hand's own points, as wireframes (the
+            // head and arm zones are added after the pick-up step).
+            if (cfg.god_zone_debug)
+            {
+                float dza[3], dzb[3], dzr = 0.0f;
+                if (torso_zone(tp, ti, dza, dzb, &dzr))
+                    zone_capsule(dza, dzb, dzr, kZoneTorso);
+                for (int h = 0; h < 2; ++h)
+                    if (hand_seen_fresh(h))
+                    {
+                        const HandSeen& hs = g_hand_seen[h];
+                        if (g_palm_seen[h].time &&
+                            tick - g_palm_seen[h].time < 250)
+                            zone_cross(g_palm_seen[h].point, 0.01f * table,
+                                       kZonePoint);
+                        zone_cross(hs.pinch, 0.006f * table, kZonePoint);
+                        zone_cross(hs.index_tip, 0.004f * table, kZonePoint);
+                        zone_cross(hs.thumb_tip, 0.004f * table, kZonePoint);
+                    }
+            }
+        }
+        // The pluck does not see a fist the torso grab took, nor anything
+        // while she is held by her torso.
+        for (int h = 0; h < 2; ++h)
+            in.grip[h] = grip[h] && !g_torso.mask[h] &&
+                         !torso_drawn(g_torso.god);
         // The floor under the held Lara: straight down from a little
         // above her feet (she may be pushed slightly into a surface).
         if (s.hand >= 0)
@@ -20321,6 +21457,8 @@ namespace trlvr
         PluckEvents ev;
         pluck_step(s, pp, in, &ev);
         g_pluck.god_in = in;
+        if (!pluck_drawn(s))
+            g_pluck.drawn_ok = false;
         const bool by_arm = ev.part == kPluckArm0 || ev.part == kPluckArm1;
         if (ev.picked_up)
         {
@@ -20356,6 +21494,20 @@ namespace trlvr
         {
             vr_input_weapon_haptic(ev.hand == 0, 0.5f);
             log("board: lifted off her feet by her arm");
+        }
+        if (ev.second_grab)
+        {
+            vr_input_weapon_haptic(ev.hand == 0, 0.5f);
+            log("board: the %s hand takes her other arm (chain %d): she "
+                "hangs from both hands", ev.hand == 0 ? "left" : "right",
+                ev.part - kPluckArm0);
+        }
+        if (ev.second_release)
+        {
+            vr_input_weapon_haptic(ev.hand == 0, 0.2f);
+            log("board: the %s hand lets go of her arm (chain %d); she "
+                "hangs by the %s hand", ev.hand == 0 ? "left" : "right",
+                ev.part - kPluckArm0, s.hand == 0 ? "left" : "right");
         }
         for (int h = 0; h < 2; ++h)
             if (ev.hover_enter[h])
@@ -20443,19 +21595,40 @@ namespace trlvr
                 {
                     g_pluck.throw_hand = h;
                     g_pluck.bounces = 0;
+                    g_pluck.fly_in = in;
                     vr_input_weapon_haptic(left, 0.4f);
                     log("board: thrown by the %s hand at %.2f m/s (your "
-                        "size), velocity %.0f %.0f %.0f units/s, from %.0f "
-                        "%.0f %.0f", left ? "left" : "right", ev.throw_speed,
-                        s.fly_vel[0], s.fly_vel[1], s.fly_vel[2],
-                        ev.target[0], ev.target[1], ev.target[2]);
+                        "size, %s), velocity %.0f %.0f %.0f units/s, centre "
+                        "%.0f %.0f %.0f, radius %.0f, feet held at %.0f %.0f "
+                        "%.0f", left ? "left" : "right", ev.throw_speed,
+                        config().god_throw_velocity ? "averaged" : "peak",
+                        s.fly.vel[0], s.fly.vel[1], s.fly.vel[2],
+                        s.fly.pos[0], s.fly.pos[1], s.fly.pos[2],
+                        s.fly.radius, ev.target[0], ev.target[1],
+                        ev.target[2]);
+                    // Released behind a wall: she starts at the last free
+                    // point of the held path.
+                    float start[3];
+                    if (flight_start(s.fly, start))
+                    {
+                        log("board: throw: the release point is behind the "
+                            "level; she starts %.2f m back, at the last free "
+                            "point", sqrtf((start[0] - s.fly.pos[0]) *
+                                           (start[0] - s.fly.pos[0]) +
+                                           (start[1] - s.fly.pos[1]) *
+                                           (start[1] - s.fly.pos[1]) +
+                                           (start[2] - s.fly.pos[2]) *
+                                           (start[2] - s.fly.pos[2])) / metre);
+                        pluck_fly_move(s, start);
+                    }
                 }
             }
             else if (!on_other)
             {
                 // Dropped from her feet as drawn, no higher than
                 // god_drop_height above the floor.
-                if (god_put_down(lara, ev.target, &floor_z, &has_floor))
+                if (god_put_down(lara, ev.target, &floor_z, &has_floor,
+                                 config().god_drop_min * metre))
                     log("board: Lara dropped from %.2f m (her size) above "
                         "the floor, %.2f table-m from where she was picked "
                         "up", (ev.target[2] - floor_z) / metre,
@@ -20472,6 +21645,18 @@ namespace trlvr
         // In flight: what she hits, where she lands.
         if (s.flying && !ev.thrown)
             pluck_flight(lara, ev.flight_over);
+        // Held and lifted: where a throw may start from (throw_free_track);
+        // nothing held or flying: forgotten.
+        if (s.hand >= 0 && s.lifted && config().god_throw)
+        {
+            float c[3];
+            pluck_centre(s, in, c);
+            const float real_c[3] = { g_pluck.root[0], g_pluck.root[1],
+                                      g_pluck.root[2] + 0.9f * metre };
+            throw_free_track(c, real_c);
+        }
+        else if (s.hand < 0 && !s.flying && !torso_drawn(g_torso.god))
+            g_pluck.throw_free_ok = false;
         // Legend's dangle animation while she is held (or thrown) by her
         // head -- always without god_drag_hand, else with god_hang_arm; her
         // own animation otherwise.
@@ -20507,8 +21692,85 @@ namespace trlvr
         // as Underworld): holding her, in a pick-up zone, touching her, on
         // a soft part, or the pinch / index tip within god_claim_zone of her
         // body (feet to the top of her head).
-        board_claims(pp, feet, head_top, point_ok, point, tip, s.hand,
-                     s.inside, claimed);
+        // The torso fist counts too: holding her, aiming at her torso, or a
+        // fist it took (mask) keeps its grip and trigger from the game.
+        const int holding = s.hand >= 0 ? s.hand : g_torso.god.hand;
+        bool inside[2];
+        for (int h = 0; h < 2; ++h)
+            inside[h] = s.inside[h] || g_torso.aim[h] || g_torso.mask[h];
+        board_claims(pp, feet, head_top, point_ok, point, tip, holding,
+                     inside, claimed);
+        // The second hand of a two-hand hold keeps its grip too.
+        if (s.hand2 >= 0)
+            claimed[s.hand2] = true;
+
+        // A free hand touching her while she is drawn (held or flying): its
+        // speed knocks her limbs / swing; the soft parts and the rear see
+        // her as drawn already (touch_root, the carried matrices).
+        if (config().hand_body_collision &&
+            (torso_drawn(g_torso.god) || pluck_drawn(s)))
+        {
+            const bool torso = torso_drawn(g_torso.god);
+            for (int h = 0; h < 2; ++h)
+            {
+                float pts[4][3];
+                const int n = hand_contact_points(h, pts, true);
+                if (n == 0 || hand_holds_her(h) || dt <= 0.0f)
+                {
+                    g_torso.touch_ok[h] = false;
+                    if (n > 0)
+                        memcpy(g_torso.touch_last[h], pts[0], sizeof(pts[0]));
+                    continue;
+                }
+                float v[3] = {};
+                if (g_torso.touch_ok[h])
+                    for (int k = 0; k < 3; ++k)
+                        v[k] = (pts[0][k] - g_torso.touch_last[h][k]) / dt;
+                memcpy(g_torso.touch_last[h], pts[0], sizeof(pts[0]));
+                g_torso.touch_ok[h] = true;
+                if (torso)
+                {
+                    for (int q = 0; q < n; ++q)
+                        if (torso_nudge(g_torso.god, tp, g_torso.in, pts[q], v,
+                                        0.03f * table, 0.6f, dt))
+                            break;
+                }
+                else
+                {
+                    float c[3];
+                    pluck_centre(s, in, c);
+                    const float reach = 0.55f * metre + 0.03f * table;
+                    for (int q = 0; q < n; ++q)
+                    {
+                        const float d[3] = { pts[q][0] - c[0], pts[q][1] - c[1],
+                                             pts[q][2] - c[2] };
+                        if (dot3(d, d) <= reach * reach)
+                        {
+                            pluck_nudge(s, v, 0.6f, dt);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        else
+            g_torso.touch_ok[0] = g_torso.touch_ok[1] = false;
+
+        // The head ball and arm zones of the pick-up, as wireframes (the
+        // torso zone and the hand points were added above).
+        if (config().god_zone_debug && !pluck_drawn(s) &&
+            !torso_drawn(g_torso.god))
+        {
+            if (in.head_valid)
+                zone_ball(in.head, pluck_head_radius(pp), kZoneHead);
+            if (pp.arm_radius > 0.0f)
+                for (int c = 0; c < 2; ++c)
+                    if (in.arm_valid[c])
+                        zone_capsule(in.arm_wrist[c], in.arm_end[c],
+                                     pp.arm_radius * pp.metre +
+                                         0.01f * pp.table, kZoneHand);
+        }
+
     }
 
     // Board mode finger flick (left hand, Y long press held = loaded,
@@ -20570,7 +21832,8 @@ namespace trlvr
         }
         const bool board = active && god_hand_scale() &&
             !g_first_person_active && config().immersive_controls &&
-            config().board_god_hand && g_pluck.hand != 0;
+            config().board_god_hand && g_pluck.hand != 0 &&
+            g_torso.god.hand != 0;
         if (!board)
         {
             g_flick.phase = 0;
@@ -20829,12 +22092,14 @@ namespace trlvr
 
     bool camera_board_pluck_held()
     {
-        return g_pluck.hand >= 0 || g_pluck.palm >= 0;
+        return g_pluck.hand >= 0 || g_pluck.palm >= 0 ||
+               g_torso.god.hand >= 0;
     }
 
     bool camera_board_pluck_carried()
     {
-        return g_pluck.hand >= 0 || g_pluck.god.flying;
+        return g_pluck.hand >= 0 || g_pluck.god.flying ||
+               torso_drawn(g_torso.god);
     }
 
     void camera_pose_debug_key(int key)
@@ -21090,6 +22355,37 @@ namespace trlvr
             a[k] = -arm;
             b[k] = arm;
             line(a, b, 0xFFFFFFFFu);
+        }
+        return n;
+    }
+
+    // god_zone_debug wireframes (camera_board_pluck_update): the grab zones
+    // as head-space segments with a colour each, appended to the rear's in
+    // vr_submit. Fresh for 2 frames.
+    int camera_zone_debug_lines(float (*seg)[6], unsigned* colours,
+                                int max_segments)
+    {
+        const ZoneDebug& z = g_zone_debug;
+        if (!seg || !colours || max_segments < 1 || !config().god_zone_debug ||
+            z.count <= 0 || g_present_count - z.frame > 2)
+            return 0;
+        Mat4 camera_to_world;
+        memcpy(&camera_to_world.m[0][0],
+               static_cast<const unsigned char*>(kMainCamera) +
+                   kOffCwTransform, sizeof(camera_to_world.m));
+        const Mat4 world_to_head = rigid_inverse(camera_to_world);
+        const int n = z.count < max_segments ? z.count : max_segments;
+        for (int i = 0; i < n; ++i)
+        {
+            for (int e = 0; e < 2; ++e)
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    float v = world_to_head.m[3][axis];
+                    for (int k = 0; k < 3; ++k)
+                        v += z.seg[i][e * 3 + k] * world_to_head.m[k][axis];
+                    seg[i][e * 3 + axis] = v;
+                }
+            colours[i] = z.colour[i];
         }
         return n;
     }

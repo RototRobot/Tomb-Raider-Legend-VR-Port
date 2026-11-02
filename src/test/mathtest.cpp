@@ -103,6 +103,8 @@ namespace
 #include "body_volumes_tests.inc"
 #include "god_carry_tests.inc"
 #include "god_pluck_tests.inc"
+#include "god_throw_tests.inc"
+#include "god_torso_tests.inc"
 #include "soft_body_tests.inc"
 #include "rear_jiggle_tests.inc"
 #include "rear_shape_tests.inc"
@@ -119,6 +121,8 @@ int main()
     test_body_volumes_legend();
     test_god_carry();
     test_god_pluck();
+    test_god_throw();
+    test_god_torso();
     test_soft_body();
     test_rear_jiggle();
     test_rear_shape();

@@ -132,6 +132,10 @@ namespace trlvr
     // and a colour each; returns the count (0 when off or stale).
     int camera_rear_debug_lines(float (*seg)[6], unsigned* colours,
                                 int max_segments);
+    // god_zone_debug wireframes: the grab zones (torso, head, arms, the
+    // hands' points) as head-space segments and a colour each.
+    int camera_zone_debug_lines(float (*seg)[6], unsigned* colours,
+                                int max_segments);
     // A cutscene is playing (retail cinematic or resident cinematic).
     bool camera_cinematic_playing();
 

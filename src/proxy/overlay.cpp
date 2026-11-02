@@ -760,9 +760,10 @@ namespace trlvr
                        L"vr", L"god_arm_zone",
                        "A grip this close to an arm holds that arm. 0 = no "
                        "arm grab.");
-                toggle("Arm leads", &c.god_arm_lead, L"vr", L"god_arm_lead",
-                       "Holding an arm, only the arm follows until you pull "
-                       "past her reach.");
+                toggle("Two hands", &c.god_two_hands, L"vr", L"god_two_hands",
+                       "Holding her by one arm, grab her other arm with your "
+                       "other hand: she hangs below both hands. Let go of one "
+                       "and she hangs by the other.");
                 toggle("Limp arms", &c.god_arms_limp, L"vr",
                        L"god_arms_limp",
                        "Her arms hang limp while she is held by the head.");
@@ -777,6 +778,32 @@ namespace trlvr
             slider("Throw gravity", &c.god_throw_gravity, 1.0f, 30.0f,
                    "%.2f m/s2", L"vr", L"god_throw_gravity",
                    "9.81 = a doll thrown on your table; lower floats more.");
+            toggle("Throw: averaged speed", &c.god_throw_velocity, L"vr",
+                   L"god_throw_velocity",
+                   "On: a throw takes your hand's fastest 5-frame average (a "
+                   "jitter or the backswing is ignored). Off: the old peak.");
+            slider("Throw bounce", &c.god_throw_bounce, 0.0f, 1.0f, "%.2f",
+                   L"vr", L"god_throw_bounce",
+                   "Off a wall or ceiling she keeps this much of her speed "
+                   "into it. 0 = stops dead.");
+            slider("Throw friction", &c.god_throw_friction, 0.0f, 1.0f,
+                   "%.2f", L"vr", L"god_throw_friction",
+                   "... and loses this much of her speed along it.");
+            slider("Throw radius", &c.god_throw_radius, 0.3f, 2.0f, "%.2fx",
+                   L"vr", L"god_throw_radius",
+                   "The ball round a thrown Lara's middle that hits the "
+                   "level (1 = a third of her height).");
+            slider("Ragdoll", &c.god_ragdoll, 0.0f, 2.0f, "%.2fx", L"vr",
+                   L"god_ragdoll",
+                   "How loosely her limbs swing, held or thrown. 0 = they "
+                   "turn with her body.");
+            slider("Knee bend", &c.god_knee_bend, 0.0f, 45.0f, "%.0f deg",
+                   L"vr", L"god_knee_bend",
+                   "How far her knees bend while held or thrown.");
+            slider("Throw spin", &c.god_throw_spin, 0.0f, 4.0f, "%.2f",
+                   L"vr", L"god_throw_spin",
+                   "The tumble a throw starts, rad/s per m/s across. 0 = "
+                   "she keeps only the swing she had.");
             ImGui::SliderInt("Landing animation", &c.god_land_anim, -1, 4000,
                              "%d", ImGuiSliderFlags_AlwaysClamp);
             if (ImGui::IsItemDeactivatedAfterEdit())
@@ -791,6 +818,57 @@ namespace trlvr
                    L"vr", L"god_drop_height",
                    "Let go over a floor and she falls from no higher than "
                    "this. 0 = set straight down.");
+            slider("Drop minimum", &c.god_drop_min, 0.0f, 1.0f, "%.2f m",
+                   L"vr", L"god_drop_min",
+                   "Let go and she is left at least this high above the "
+                   "floor, so even a light let-go is the game's own fall.");
+            ImGui::SeparatorText("Torso grab (fist)");
+            toggle("Torso grab", &c.god_torso, L"vr", L"god_torso",
+                   "Make a fist with the palm toward her waist, back or "
+                   "belly and hold her like a doll: she follows your hand, "
+                   "her limbs hang. Let go with a swing to toss her. Needs "
+                   "'Grab with hand pose'.");
+            slider("Torso max height", &c.god_torso_max_height, 0.05f, 3.0f,
+                   "%.2f m", L"vr", L"god_torso_max_height",
+                   "Only while she looks no taller than this to you.");
+            slider("Torso facing", &c.god_torso_facing, 0.0f, 1.0f, "%.2f",
+                   L"vr", L"god_torso_facing",
+                   "How squarely the palm must face her spine "
+                   "(0 = any, 1 = dead on).");
+            slider("Torso zone radius", &c.god_torso_radius, 0.05f, 1.0f,
+                   "%.2f m", L"vr", L"god_torso_radius",
+                   "Round her spine, metres at her size.");
+            slider("Torso hand margin", &c.god_torso_margin, 0.0f, 0.3f,
+                   "%.2f m", L"vr", L"god_torso_margin",
+                   "Plus this much of your own hand.");
+            slider("Torso zone lower", &c.god_torso_lower, 0.0f, 0.5f,
+                   "%.2f m", L"vr", L"god_torso_lower",
+                   "Slide the zone down her spine toward her hips.");
+            slider("Torso grab grace", &c.god_torso_grace, 0.0f, 1.0f,
+                   "%.2f s", L"vr", L"god_torso_grace",
+                   "The fist may close this long after the palm was aimed.");
+            toggle("Fist beats chest pinch", &c.god_torso_fist_first, L"vr",
+                   L"god_torso_fist_first",
+                   "While she is small, a squeezed fist never holds a soft "
+                   "part (chest, rear): only a pinch does.");
+            slider("Fist block height", &c.god_fist_block_height, 0.0f, 3.0f,
+                   "%.2f m", L"vr", L"god_fist_block_height",
+                   "A fist never holds a soft part while she looks smaller "
+                   "than this. 0 = never blocks.");
+            slider("Torso toss strength", &c.god_torso_throw_scale, 0.0f,
+                   3.0f, "%.2fx", L"vr", L"god_torso_throw_scale",
+                   "Toss speed = your hand's speed times this. 0 = always "
+                   "put down.");
+            slider("Torso toss spin", &c.god_torso_spin, 0.0f, 2.0f, "%.2f",
+                   L"vr", L"god_torso_spin",
+                   "The tumble, as a fraction of your hand's turn.");
+            toggle("Show grab zones", &c.god_zone_debug, L"vr",
+                   L"god_zone_debug",
+                   "Wireframes in the headset: torso green, head magenta, "
+                   "arms orange, your hand's points white.");
+            slider("Grab zone size", &c.god_zone_scale, 0.25f, 4.0f, "%.2fx",
+                   L"vr", L"god_zone_scale",
+                   "Multiplies the head, arm and torso grab zones.");
         }
 
         void theatre_section(Config& c)

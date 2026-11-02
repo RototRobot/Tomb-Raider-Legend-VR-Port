@@ -96,6 +96,28 @@ namespace trlvr
             { L"vr", L"god_throw_gravity", L"9.81" },
             { L"vr", L"god_land_anim", L"-1" },
             { L"vr", L"god_drop_height", L"1" },
+            { L"vr", L"god_drop_min", L"0.15" },
+            { L"vr", L"god_throw_velocity", L"1" },
+            { L"vr", L"god_throw_bounce", L"0.3" },
+            { L"vr", L"god_throw_friction", L"0.5" },
+            { L"vr", L"god_throw_radius", L"1" },
+            { L"vr", L"god_ragdoll", L"1" },
+            { L"vr", L"god_knee_bend", L"12" },
+            { L"vr", L"god_throw_spin", L"1" },
+            { L"vr", L"god_two_hands", L"1" },
+            { L"vr", L"god_torso", L"1" },
+            { L"vr", L"god_torso_max_height", L"0.6" },
+            { L"vr", L"god_torso_facing", L"0.3" },
+            { L"vr", L"god_torso_radius", L"0.25" },
+            { L"vr", L"god_torso_margin", L"0.08" },
+            { L"vr", L"god_torso_lower", L"0" },
+            { L"vr", L"god_torso_grace", L"0.4" },
+            { L"vr", L"god_torso_fist_first", L"1" },
+            { L"vr", L"god_fist_block_height", L"0.6" },
+            { L"vr", L"god_torso_throw_scale", L"1" },
+            { L"vr", L"god_torso_spin", L"0.25" },
+            { L"vr", L"god_zone_debug", L"0" },
+            { L"vr", L"god_zone_scale", L"1" },
             { L"vr", L"god_grab_pose", L"1" },
             { L"vr", L"god_drag_hand", L"0" },
             { L"vr", L"body_push", L"1" },
@@ -358,9 +380,7 @@ namespace trlvr
             L"; live: god mode, a grip this close to one of her arms (metres at her\r\n"
             L"; size) holds that arm instead of her head. 0 = no arm grab. 0 .. 0.5.\r\n"
             L"god_arm_zone = 0.25\r\n"
-            L"; live: god mode, holding her arm, only the arm follows your hand until\r\n"
-            L"; you pull past her reach; then she hangs from that wrist. 0 = she is\r\n"
-            L"; lifted by the arm at once.\r\n"
+            L"; IGNORED: the arm lead is off (she is lifted by the arm at once).\r\n"
             L"god_arm_lead = 1\r\n"
             L"; live: god mode pick-up, 1 = Legend's old way: the dangle animation,\r\n"
             L"; hanging by her wrist. 0 = she hangs from where you pinched her.\r\n"
@@ -381,6 +401,77 @@ namespace trlvr
             L"; her, but from no higher than this above the floor (metres at her size).\r\n"
             L"; 0 = set straight down on the floor. 0 .. 5.\r\n"
             L"god_drop_height = 1\r\n"
+            L"; live: god mode, let go and she is left at least this high above the\r\n"
+            L"; floor (metres at her size) however little you lifted her, so even a\r\n"
+            L"; light let-go is the game's own fall. 0 = exactly where held. 0 .. 1.\r\n"
+            L"god_drop_min = 0.15\r\n"
+            L"; live: god mode, a throw's release speed: 1 = your hand's fastest 5-frame\r\n"
+            L"; average of the last 0.15 s (a jitter spike or the backswing ignored);\r\n"
+            L"; 0 = the old peak.\r\n"
+            L"god_throw_velocity = 1\r\n"
+            L"; live: god mode, a thrown Lara bouncing off a wall or ceiling keeps this\r\n"
+            L"; much of her speed into it (0 = she stops dead, 1 = a full bounce). 0 .. 1.\r\n"
+            L"god_throw_bounce = 0.3\r\n"
+            L"; live: god mode, ... and loses this much of her speed along it. 0 .. 1.\r\n"
+            L"god_throw_friction = 0.5\r\n"
+            L"; live: god mode, the size of the ball round a thrown Lara's middle that\r\n"
+            L"; hits the level (1 = a third of her height). 0.3 .. 2.\r\n"
+            L"god_throw_radius = 1\r\n"
+            L"; live: god mode, held or thrown her limbs swing loose on their own\r\n"
+            L"; pendulums: this times the default swing. 0 = her limbs turn with her\r\n"
+            L"; body. 0 .. 2.\r\n"
+            L"god_ragdoll = 1\r\n"
+            L"; live: god mode, held or thrown, her knees bend this many degrees (more\r\n"
+            L"; as a thigh swings forward). 0 .. 45.\r\n"
+            L"god_knee_bend = 12\r\n"
+            L"; live: god mode, a throw sets her tumbling: rad/s per m/s of the throw\r\n"
+            L"; across. 0 = she only keeps the swing she had. 0 .. 4.\r\n"
+            L"god_throw_spin = 1\r\n"
+            L"; live: god mode, holding her by one arm (god_drag_hand), grab her other\r\n"
+            L"; arm with your other hand and she hangs below both hands. 0 = one hand.\r\n"
+            L"god_two_hands = 1\r\n"
+            L"; live: god mode, 1 = a fist with its palm toward her torso, while she\r\n"
+            L"; looks small to you (god_torso_max_height), holds her as a doll that\r\n"
+            L"; follows the hand, limbs swinging; let go with a swing and she is\r\n"
+            L"; tossed, slowly and she is put down. Needs god_grab_pose. 0 = off.\r\n"
+            L"god_torso = 1\r\n"
+            L"; live: the torso grab works while she looks at most this tall to you,\r\n"
+            L"; in metres. 0.05 .. 3.\r\n"
+            L"god_torso_max_height = 0.6\r\n"
+            L"; live: the torso grab's palm must face her torso: palm normal dotted\r\n"
+            L"; with the way to her spine at least this (0 = any, 1 = dead on).\r\n"
+            L"; 0 .. 1.\r\n"
+            L"god_torso_facing = 0.3\r\n"
+            L"; live: the torso grab zone's radius round her spine, metres at her\r\n"
+            L"; size. 0.05 .. 1.\r\n"
+            L"god_torso_radius = 0.25\r\n"
+            L"; live: ... plus this much of your own hand, metres. 0 .. 0.3.\r\n"
+            L"god_torso_margin = 0.08\r\n"
+            L"; live: the torso grab zone slid down her spine toward her hips, metres\r\n"
+            L"; at her size (the hold is unchanged). 0 .. 0.5.\r\n"
+            L"god_torso_lower = 0\r\n"
+            L"; live: a fist may close this many seconds after the palm was last\r\n"
+            L"; aimed at her torso (closing moves the palm). 0 .. 1.\r\n"
+            L"god_torso_grace = 0.4\r\n"
+            L"; live: 1 = a squeezed fist is the torso grab's, never a soft-part\r\n"
+            L"; hold (chest, rear) while she is smaller than god_fist_block_height:\r\n"
+            L"; only a pinch holds a part. 0 = a fist may hold parts.\r\n"
+            L"god_torso_fist_first = 1\r\n"
+            L"; live: ... the height (metres, to you) under which a fist never holds a\r\n"
+            L"; part. 0 = never blocks. 0 .. 3.\r\n"
+            L"god_fist_block_height = 0.6\r\n"
+            L"; live: a torso toss's speed is your hand's speed times this. 0 = no\r\n"
+            L"; toss (she is always put down). 0 .. 3.\r\n"
+            L"god_torso_throw_scale = 1\r\n"
+            L"; live: a torso toss tumbles at this fraction of your hand's turn.\r\n"
+            L"; 0 .. 2.\r\n"
+            L"god_torso_spin = 0.25\r\n"
+            L"; live: 1 = draw every grab zone as a wireframe in the headset (torso\r\n"
+            L"; green, head magenta, arms orange, your hand's points white).\r\n"
+            L"god_zone_debug = 0\r\n"
+            L"; live: multiplies every grab zone and its wireframe (head, arm,\r\n"
+            L"; torso). 0.25 .. 4.\r\n"
+            L"god_zone_scale = 1\r\n"
             L"; live: god mode, 1 = you grab with your hand's pose: a pinch (trigger\r\n"
             L"; and thumb down) or a fist (trigger and grip); the grip alone only\r\n"
             L"; points and presses. Needs finger_tracking. 0 = the grip button grabs.\r\n"
@@ -883,6 +974,17 @@ namespace trlvr
             read_bool(L"general", L"release_cursor_unfocused", true, path);
 
         g_config.vr_enabled = read_bool(L"vr", L"enabled", true, path);
+        // play_flat_mod.bat: the mod without VR for one run, ini untouched --
+        // no OpenXR session (so no headset or simulator), and the game's own
+        // window mode, fullscreen included.
+        {
+            wchar_t flat[8]{};
+            if (GetEnvironmentVariableW(L"TRLVR_FLAT", flat, 8) && flat[0] == L'1')
+            {
+                g_config.vr_enabled = false;
+                g_config.force_windowed = false;
+            }
+        }
         g_config.vr_submit = read_bool(L"vr", L"submit", true, path);
         {
             wchar_t text[16]{};
@@ -1085,6 +1187,39 @@ namespace trlvr
                                       4000.0f, -1.0f);
             c.god_drop_height =
                 rf(L"god_drop_height", L"1", 0.0f, 5.0f, 1.0f);
+            c.god_drop_min = rf(L"god_drop_min", L"0.15", 0.0f, 1.0f, 0.15f);
+            c.god_throw_velocity = rb(L"god_throw_velocity", true);
+            c.god_throw_bounce =
+                rf(L"god_throw_bounce", L"0.3", 0.0f, 1.0f, 0.3f);
+            c.god_throw_friction =
+                rf(L"god_throw_friction", L"0.5", 0.0f, 1.0f, 0.5f);
+            c.god_throw_radius =
+                rf(L"god_throw_radius", L"1", 0.3f, 2.0f, 1.0f);
+            c.god_ragdoll = rf(L"god_ragdoll", L"1", 0.0f, 2.0f, 1.0f);
+            c.god_knee_bend = rf(L"god_knee_bend", L"12", 0.0f, 45.0f, 12.0f);
+            c.god_throw_spin = rf(L"god_throw_spin", L"1", 0.0f, 4.0f, 1.0f);
+            c.god_two_hands = rb(L"god_two_hands", true);
+            c.god_torso = rb(L"god_torso", true);
+            c.god_torso_max_height =
+                rf(L"god_torso_max_height", L"0.6", 0.05f, 3.0f, 0.6f);
+            c.god_torso_facing =
+                rf(L"god_torso_facing", L"0.3", 0.0f, 1.0f, 0.3f);
+            c.god_torso_radius =
+                rf(L"god_torso_radius", L"0.25", 0.05f, 1.0f, 0.25f);
+            c.god_torso_margin =
+                rf(L"god_torso_margin", L"0.08", 0.0f, 0.3f, 0.08f);
+            c.god_torso_lower =
+                rf(L"god_torso_lower", L"0", 0.0f, 0.5f, 0.0f);
+            c.god_torso_grace =
+                rf(L"god_torso_grace", L"0.4", 0.0f, 1.0f, 0.4f);
+            c.god_torso_fist_first = rb(L"god_torso_fist_first", true);
+            c.god_fist_block_height =
+                rf(L"god_fist_block_height", L"0.6", 0.0f, 3.0f, 0.6f);
+            c.god_torso_throw_scale =
+                rf(L"god_torso_throw_scale", L"1", 0.0f, 3.0f, 1.0f);
+            c.god_torso_spin = rf(L"god_torso_spin", L"0.25", 0.0f, 2.0f, 0.25f);
+            c.god_zone_debug = rb(L"god_zone_debug", false);
+            c.god_zone_scale = rf(L"god_zone_scale", L"1", 0.25f, 4.0f, 1.0f);
             c.god_grab_pose = rb(L"god_grab_pose", true);
             c.god_drag_hand = rb(L"god_drag_hand", false);
             c.body_push = rb(L"body_push", true);

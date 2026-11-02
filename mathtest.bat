@@ -12,6 +12,7 @@ cl /nologo /EHsc /MT /O2 /W4 /std:c++17 /D_CRT_SECURE_NO_WARNINGS ^
    "%ROOT%src\vr\vr_gesture.cpp" ^
    "%ROOT%src\vr\physics\body_push.cpp" "%ROOT%src\vr\physics\body_volumes.cpp" ^
    "%ROOT%src\vr\godmode\god_carry.cpp" "%ROOT%src\vr\godmode\god_pluck.cpp" ^
+   "%ROOT%src\vr\godmode\god_throw.cpp" "%ROOT%src\vr\godmode\god_torso.cpp" ^
    "%ROOT%src\vr\physics\soft_body.cpp" "%ROOT%src\vr\physics\rear_jiggle.cpp" ^
    "%ROOT%src\vr\physics\rear_shape.cpp" ^
    "%ROOT%src\vr\godmode\board_leash.cpp" "%ROOT%src\vr\menu_panel.cpp" ^

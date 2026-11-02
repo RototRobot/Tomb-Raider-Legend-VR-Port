@@ -1391,6 +1391,8 @@ namespace trlvr
 
     void input_labels_update()
     {
+        if (!config().vr_enabled)
+            return;
         update_labels();
         settings_snapshot();
         if (in_level() && config().immersive_controls &&
@@ -1408,6 +1410,13 @@ namespace trlvr
 
     void input_labels_init()
     {
+        // Flat run (play_flat_mod.bat / vr enabled = 0): leave the pause menu
+        // alone so Widescreen and the Display page's resolution work.
+        if (!config().vr_enabled)
+        {
+            log("controls: flat run -- pause-menu takeovers not installed");
+            return;
+        }
         // push esi / mov esi,[esp+8] -- two complete instructions.
         const unsigned char sig[] = { 0x56, 0x8B, 0x74, 0x24, 0x08 };
         if (hook_install((void*)kGetButtonName, (void*)&detour,
