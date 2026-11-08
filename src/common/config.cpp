@@ -35,10 +35,10 @@ namespace trlvr
 
             { L"vr", L"enabled", L"1" },
             { L"vr", L"submit", L"1" },
-            { L"vr", L"vr_runtime", L"auto" },
+            { L"vr", L"vr_runtime", L"openxr" },
             { L"vr", L"xr_runtime_json", L"" },
             { L"vr", L"xr_copy_wait", L"1" },
-            { L"vr", L"xr_grip_match_openvr", L"1" },
+            { L"vr", L"xr_grip_match_openvr", L"0" },
             { L"vr", L"view_transition_seconds", L"0.3" },
             { L"vr", L"picture_brightness", L"0" },
             { L"vr", L"picture_contrast", L"1" },
@@ -192,7 +192,7 @@ namespace trlvr
             { L"controls", L"gear_cross_x_rate", L"1.0" },
             { L"controls", L"gear_menu", L"radial" },
             { L"controls", L"stick_walk", L"1" },
-            { L"controls", L"finger_tracking", L"0" },
+            { L"controls", L"finger_tracking", L"1" },
             { L"controls", L"finger_rest_curl", L"0" },
             { L"controls", L"reset_controller_tuning_on_load", L"0" },
             { L"controls", L"stick_walk_threshold", L"0.7" },
@@ -278,16 +278,17 @@ namespace trlvr
             L"; 0 is the untouched flat-game baseline.\r\n"
             L"enabled = 1\r\n"
             L"submit = 1\r\n"
-            L"; VR runtime: auto (OpenXR, or OpenVR / SteamVR if OpenXR cannot start\r\n"
-            L"; or openxr_loader.dll is missing), openxr, or openvr.\r\n"
-            L"vr_runtime = auto\r\n"
+            L"; VR runtime: openxr (no fallback, so a failed start is visible), auto\r\n"
+            L"; (OpenXR, or OpenVR / SteamVR if OpenXR cannot start or\r\n"
+            L"; openxr_loader.dll is missing), or openvr. Needs a game restart.\r\n"
+            L"vr_runtime = openxr\r\n"
             L"; OpenXR runtime manifest (a 32-bit one). Empty uses the registered runtime.\r\n"
             L"xr_runtime_json =\r\n"
             L"; 1 waits for the GPU copy into the headset's image before handing it over.\r\n"
             L"xr_copy_wait = 1\r\n"
-            L"; 1 = under OpenXR the hands sit where they do under OpenVR (the\r\n"
-            L"; controllers' grip point converted; known for Reverb G2 and Touch).\r\n"
-            L"xr_grip_match_openvr = 1\r\n"
+            L"; 0 = use the runtime's own OpenXR grip pose (Quest / Virtual Desktop).\r\n"
+            L"; 1 = convert it to SteamVR's grip pose (Reverb G2 and Touch only).\r\n"
+            L"xr_grip_match_openvr = 0\r\n"
             L"stereo = 1\r\n"
             L"; Both eyes in one game frame. Keep Depth of Field and Fullscreen Effects off.\r\n"
             L"stereo_same_frame = 1\r\n"
@@ -692,7 +693,7 @@ namespace trlvr
             L"; controller finger sensors, or hand tracking) instead of her\r\n"
             L"; animations. finger_rest_curl = how curled her straight hand\r\n"
             L"; already is (0..0.6).\r\n"
-            L"finger_tracking = 0\r\n"
+            L"finger_tracking = 1\r\n"
             L"finger_rest_curl = 0\r\n"
             L"; 1 = every start clears your saved hand tuning (Hand Calibration,\r\n"
             L"; hand alignment, aim offsets) so the defaults for your controllers\r\n"
@@ -988,7 +989,7 @@ namespace trlvr
         g_config.vr_submit = read_bool(L"vr", L"submit", true, path);
         {
             wchar_t text[16]{};
-            GetPrivateProfileStringW(L"vr", L"vr_runtime", L"auto", text, 16,
+            GetPrivateProfileStringW(L"vr", L"vr_runtime", L"openxr", text, 16,
                                      path);
             g_config.vr_runtime = _wcsicmp(text, L"openxr") == 0 ? 1
                 : _wcsicmp(text, L"openvr") == 0 ? 2 : 0;
@@ -997,7 +998,7 @@ namespace trlvr
                                  g_config.xr_runtime_json, MAX_PATH, path);
         g_config.xr_copy_wait = read_bool(L"vr", L"xr_copy_wait", true, path);
         g_config.xr_grip_match_openvr =
-            read_bool(L"vr", L"xr_grip_match_openvr", true, path);
+            read_bool(L"vr", L"xr_grip_match_openvr", false, path);
         g_config.stereo = read_bool(L"vr", L"stereo", true, path);
         g_config.stereo_same_frame = read_bool(L"vr", L"stereo_same_frame", true, path);
         g_config.stereo_lock_pose = read_bool(L"vr", L"stereo_lock_pose", true, path);
@@ -1420,7 +1421,7 @@ namespace trlvr
         }
         g_config.stick_walk = read_bool(L"controls", L"stick_walk", true, path);
         g_config.finger_tracking =
-            read_bool(L"controls", L"finger_tracking", false, path);
+            read_bool(L"controls", L"finger_tracking", true, path);
         value = read_float(L"controls", L"finger_rest_curl", L"0", path);
         g_config.finger_rest_curl = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 0.6f ? 0.6f : value) : 0.0f;

@@ -24,12 +24,13 @@ namespace trlvr
         // VR backend (1.1.0): 0 auto (OpenXR, falling back to OpenVR when
         // openxr_loader.dll is missing or no OpenXR runtime starts),
         // 1 OpenXR only, 2 OpenVR / SteamVR only.
-        int vr_runtime = 0;
+        int vr_runtime = 1;
         wchar_t xr_runtime_json[MAX_PATH] = L"";
         bool xr_copy_wait = true;
         // OpenXR: convert the controllers' grip pose to the OpenVR grip pose
         // the hand tuning was made against (known for Reverb G2 and Touch).
-        bool xr_grip_match_openvr = true;
+        // Off by default: on Quest over Virtual Desktop the raw grip lines up.
+        bool xr_grip_match_openvr = false;
         bool stereo = true;
         bool stereo_same_frame = true;
         bool stereo_lock_pose = true;
@@ -419,7 +420,7 @@ namespace trlvr
         // skeletal input (controller finger sensors, or Quest / Index hand
         // tracking), from her model's straight rest pose instead of her
         // animation. finger_rest_curl is how curled that pose already is.
-        bool finger_tracking = false;   // off by default (user 2026-10-10)
+        bool finger_tracking = true;    // on: god mode gestures need it (user 2026-11-03)
         float finger_rest_curl = 0.0f;
         float stick_walk_threshold = 0.7f;   // stick below this walks
         unsigned short walk_vk = 0xA0;       // VK_LSHIFT

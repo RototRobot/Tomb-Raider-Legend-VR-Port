@@ -4,6 +4,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 #include "../vr/vr_session.h"
+#include "../vr/vr_backend.h"
 #include "../vr/tr7_menu_hook.h"
 
 #include "imgui.h"
@@ -982,6 +983,43 @@ namespace trlvr
                    "How curled her fingers are with your hand open.");
         }
 
+        // OpenXR / Quest settings. The runtime is chosen once at startup, so
+        // that one needs a restart; the rest apply at once.
+        void runtime_section(Config& c)
+        {
+            static const int started_with = c.vr_runtime;
+            const VrBackend running = vr_backend();
+            ImGui::Text("Running on: %s",
+                        running == VrBackendOpenXr ? "OpenXR"
+                        : running == VrBackendOpenVr ? "OpenVR / SteamVR"
+                                                     : "none");
+            int runtime = c.vr_runtime;
+            if (ImGui::Combo("VR runtime", &runtime,
+                             "Auto (OpenXR, then SteamVR)\0OpenXR only\0"
+                             "OpenVR / SteamVR only\0"))
+            {
+                c.vr_runtime = runtime;
+                config_save_setting(L"vr", L"vr_runtime",
+                    runtime == 1 ? L"openxr"
+                    : runtime == 2 ? L"openvr" : L"auto");
+            }
+            help("Which VR system the game starts on. OpenXR only never "
+                 "starts SteamVR behind your back: if OpenXR fails, the log "
+                 "says why. Takes effect after restarting the game.");
+            if (c.vr_runtime != started_with)
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                                   "Restart the game to apply this.");
+            toggle("Match SteamVR grip pose", &c.xr_grip_match_openvr, L"vr",
+                   L"xr_grip_match_openvr",
+                   "Off: hands use OpenXR's own grip pose (Quest over Virtual "
+                   "Desktop). On: the pose is converted to SteamVR's, which "
+                   "the built-in hand tuning was made against.");
+            toggle("Wait for the GPU copy", &c.xr_copy_wait, L"vr",
+                   L"xr_copy_wait",
+                   "Wait for each frame's copy to finish before handing it "
+                   "to the headset. Leave on unless a runtime stutters.");
+        }
+
         void overlay_section(Config& c)
         {
             slider("Panel distance", &c.overlay_vr_distance, 0.3f, 5.0f,
@@ -1198,6 +1236,8 @@ namespace trlvr
                 diorama_section(c);
             if (ImGui::CollapsingHeader("Controls"))
                 controls_section(c);
+            if (ImGui::CollapsingHeader("VR runtime (OpenXR / Quest)"))
+                runtime_section(c);
             if (tr7_menu_hook_present() &&
                 ImGui::CollapsingHeader("TR7-Menu-Hook"))
                 mod_menu_section();
