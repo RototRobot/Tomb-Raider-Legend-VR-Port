@@ -66,8 +66,11 @@ namespace trlvr
         XrAction g_act_squeeze = XR_NULL_HANDLE;
         XrAction g_act_button[XrButtonCount]{};
         XrAction g_act_grip = XR_NULL_HANDLE;
+        XrAction g_act_aim = XR_NULL_HANDLE;
         XrAction g_act_haptic = XR_NULL_HANDLE;
         XrSpace g_grip_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+        XrSpace g_aim_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+        TrackedPose g_aim_pose[2]{};
         bool g_actions_attached = false;
         bool g_input_active = false;
         bool g_profile_dirty = true;
@@ -405,6 +408,7 @@ namespace trlvr
             g_act_button[XrTouchTrigger] = make_action("trigger_touch", "Finger on the trigger", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_act_button[XrTouchThumb] = make_action("thumb_touch", "Thumb on the controller", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_act_grip = make_action("grip_pose", "Hand grip pose", XR_ACTION_TYPE_POSE_INPUT);
+            g_act_aim = make_action("aim_pose", "Pointing pose", XR_ACTION_TYPE_POSE_INPUT);
             g_act_haptic = make_action("haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT);
 
             // Only components the profile defines: one path it does not have
@@ -427,6 +431,7 @@ namespace trlvr
                 {&g_act_button[XrTouchThumb], 1, "/input/a/touch"},
                 {&g_act_button[XrTouchThumb], 1, "/input/b/touch"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/oculus/touch_controller", touch,
@@ -446,6 +451,7 @@ namespace trlvr
                 {&g_act_button[XrTouchThumb], -1, "/input/b/touch"},
                 {&g_act_button[XrTouchThumb], -1, "/input/trackpad/touch"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/valve/index_controller", index,
@@ -459,6 +465,7 @@ namespace trlvr
                 {&g_act_button[XrButtonMenu], -1, "/input/menu/click"},
                 {&g_act_button[XrButtonTrackpad], -1, "/input/trackpad/click"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/microsoft/motion_controller", wmr,
@@ -477,6 +484,7 @@ namespace trlvr
                     {&g_act_button[XrButtonSecondary], 1, "/input/b/click"},
                     {&g_act_button[XrButtonMenu], -1, "/input/menu/click"},
                     {&g_act_grip, -1, "/input/grip/pose"},
+                    {&g_act_aim, -1, "/input/aim/pose"},
                     {&g_act_haptic, -1, "/output/haptic"},
                 };
                 suggest("/interaction_profiles/hp/mixed_reality_controller", hp,
@@ -487,6 +495,7 @@ namespace trlvr
                 {&g_act_trigger, -1, "/input/select/click"},
                 {&g_act_button[XrButtonMenu], -1, "/input/menu/click"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/khr/simple_controller", simple,
@@ -498,6 +507,7 @@ namespace trlvr
         {
             g_actions_attached = false;
             g_grip_space[0] = g_grip_space[1] = XR_NULL_HANDLE;
+            g_aim_space[0] = g_aim_space[1] = XR_NULL_HANDLE;
             if (!create_actions())
                 return;
             XrSessionActionSetsAttachInfo attach{
@@ -515,6 +525,12 @@ namespace trlvr
                 space.poseInActionSpace.orientation.w = 1.0f;
                 ok(xrCreateActionSpace(g_session, &space, &g_grip_space[hand]),
                    "xrCreateActionSpace (grip)");
+                if (g_act_aim != XR_NULL_HANDLE)
+                {
+                    space.action = g_act_aim;
+                    ok(xrCreateActionSpace(g_session, &space, &g_aim_space[hand]),
+                       "xrCreateActionSpace (aim)");
+                }
             }
             g_actions_attached = true;
             g_profile_dirty = true;
@@ -883,6 +899,8 @@ namespace trlvr
         g_session = XR_NULL_HANDLE;
         g_local = g_view = XR_NULL_HANDLE;
         g_grip_space[0] = g_grip_space[1] = XR_NULL_HANDLE;
+        g_aim_space[0] = g_aim_space[1] = XR_NULL_HANDLE;
+        g_aim_pose[0] = g_aim_pose[1] = TrackedPose{};
         g_actions_attached = false;
         g_input_active = false;
         g_running = false;
@@ -898,6 +916,14 @@ namespace trlvr
     }
 
     // --- frame --------------------------------------------------------------
+
+    bool oxr_aim_pose(int hand, TrackedPose* out)
+    {
+        if (!out || hand < 0 || hand > 1 || !g_aim_pose[hand].bPoseIsValid)
+            return false;
+        *out = g_aim_pose[hand];
+        return true;
+    }
 
     bool oxr_frame_begun() { return g_frame_begun; }
     double oxr_frame_wait_ms() { return g_wait_ms; }
@@ -951,9 +977,13 @@ namespace trlvr
                 locate(g_grip_space[hand], time, &out->poses[kPoseLeft + hand]);
                 grip_to_openvr(g_controller[hand], hand,
                                &out->poses[kPoseLeft + hand]);
+                locate(g_aim_space[hand], time, &g_aim_pose[hand]);
             }
             else
+            {
                 out->poses[kPoseLeft + hand] = TrackedPose{};
+                g_aim_pose[hand] = TrackedPose{};
+            }
         }
 
         XrViewLocateInfo where{XR_TYPE_VIEW_LOCATE_INFO};

@@ -2091,6 +2091,35 @@ namespace trlvr
         return true;
     }
 
+    namespace
+    {
+        // OpenXR's grip -Z runs up through the fist; its aim pose points.
+        TrackedPose pointer_pose(bool left)
+        {
+            TrackedPose aim;
+            if (xr_aim_pose(left ? 0 : 1, &aim))
+                return aim;
+            return g_tracked_poses[left ? kPoseLeft : kPoseRight];
+        }
+    }
+
+    bool vr_pointer_tracking_pose(bool left, float pos[3], float rot[9])
+    {
+        if (!g_ready || !g_pose_valid || !pos || !rot)
+            return false;
+        const TrackedPose pointer = pointer_pose(left);
+        if (!pointer.bPoseIsValid || !pointer.bDeviceIsConnected)
+            return false;
+        const Mat34& pm = pointer.mDeviceToAbsoluteTracking;
+        for (int r = 0; r < 3; ++r)
+        {
+            pos[r] = pm.m[r][3];
+            for (int c = 0; c < 3; ++c)
+                rot[r * 3 + c] = pm.m[r][c];
+        }
+        return true;
+    }
+
     bool vr_hmd_tracking_forward(float* fx, float* fz)
     {
         if (!g_ready || !g_pose_valid || !fx || !fz)
@@ -3535,6 +3564,28 @@ namespace trlvr
         controller_to_head->m[3][0] *= move_scale;
         controller_to_head->m[3][1] *= move_scale;
         controller_to_head->m[3][2] *= move_scale;
+        return true;
+    }
+
+    bool vr_pointer_head_pose(bool left, Mat4* pointer_to_head)
+    {
+        if (!pointer_to_head || !g_ready || !g_pose_valid)
+            return false;
+        const TrackedPose pointer = pointer_pose(left);
+        const TrackedPose& hmd = g_tracked_poses[kPoseHmd];
+        if (!pointer.bPoseIsValid || !pointer.bDeviceIsConnected ||
+            !hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+            return false;
+        const float scale = tune_world_scale();
+        const Mat4 pointer_view = view_from_pose(
+            &pointer.mDeviceToAbsoluteTracking.m[0][0], scale);
+        const Mat4 hmd_view = view_from_pose(
+            &hmd.mDeviceToAbsoluteTracking.m[0][0], scale);
+        *pointer_to_head = rigid_inverse(pointer_view) * hmd_view;
+        const float move_scale = tune_move_scale();
+        pointer_to_head->m[3][0] *= move_scale;
+        pointer_to_head->m[3][1] *= move_scale;
+        pointer_to_head->m[3][2] *= move_scale;
         return true;
     }
 

@@ -21,6 +21,7 @@ namespace trlvr
     void oxr_session_destroy();
     bool oxr_session_exists();
     bool oxr_frame_wait(XrFrame* out);
+    bool oxr_aim_pose(int hand, TrackedPose* out);
     bool oxr_frame_begun();
     bool oxr_frame_should_render();
     double oxr_frame_wait_ms();
@@ -51,6 +52,7 @@ namespace trlvr
     void ovr_session_destroy();
     bool ovr_session_exists();
     bool ovr_frame_wait(XrFrame* out);
+    bool ovr_aim_pose(int hand, TrackedPose* out);
     bool ovr_frame_begun();
     bool ovr_frame_should_render();
     double ovr_frame_wait_ms();

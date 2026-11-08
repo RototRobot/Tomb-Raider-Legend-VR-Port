@@ -126,6 +126,9 @@ namespace trlvr
     // A controller's raw pose in SteamVR's tracking space: position in
     // metres and the 3x3 rotation (row-major, local axes as columns).
     bool vr_controller_tracking_pose(bool left, float pos[3], float rot[9]);
+    // The same for pointing at menus: OpenXR's aim pose where there is one,
+    // otherwise the controller pose.
+    bool vr_pointer_tracking_pose(bool left, float pos[3], float rot[9]);
     // The headset's yaw-only forward in tracking space (x, z), unit.
     bool vr_hmd_tracking_forward(float* fx, float* fz);
 
@@ -166,6 +169,8 @@ namespace trlvr
     // camera-to-world transform without feeding controller motion into game
     // simulation.
     bool vr_controller_head_pose(bool left, Mat4* controller_to_head);
+    // The pointing pose of vr_pointer_tracking_pose, in the same head frame.
+    bool vr_pointer_head_pose(bool left, Mat4* pointer_to_head);
 
     // A yaw-only body-frame point (metres, as vr_controller_body_position
     // reports it) in the same head space and units as the translation of

@@ -2971,7 +2971,7 @@ namespace trlvr
             bool ray = false, hit = false;
             {
                 float pos[3], rot[9];
-                if (vr_controller_tracking_pose(main_left, pos, rot))
+                if (vr_pointer_tracking_pose(main_left, pos, rot))
                 {
                     const float d[3] = { -rot[2], -rot[5], -rot[8] };
                     const float* r = panel.pose.right;
@@ -4089,7 +4089,7 @@ namespace trlvr
             float hit_u = 0.0f, hit_v = 0.0f;
             float origin[3]{}, end[3]{};
             Mat4 ray;
-            if (vr_controller_head_pose(!off_left, &ray))
+            if (vr_pointer_head_pose(!off_left, &ray))
             {
                 float d[3] = { ray.m[2][0], ray.m[2][1], ray.m[2][2] };
                 for (int k = 0; k < 3; ++k)
