@@ -78,6 +78,10 @@ namespace trlvr
     // Sideways seat offset, metres at Lara's size (+ right, - left).
     float camera_tp_side();
     void camera_set_tp_view(float scale, float zoom, float side, bool save);
+    // The right stick's view controls (control_scheme = controller), each
+    // input -1..1, per frame; saved once they are all back at 0.
+    void camera_view_stick(float height_in, float zoom_in, float scale_in,
+                           float dt);
     // The current preset's defaults (the palm sliders' notches).
     void camera_tp_defaults(float* scale, float* zoom, float* side);
     // How much a drawn third-person hand's palm faces up (-2 unknown).

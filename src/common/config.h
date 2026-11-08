@@ -190,6 +190,11 @@ namespace trlvr
         // flick). Only with third_person_mode = board, immersive_controls
         // = 1 and first_person = 0 as well.
         bool board_god_hand = true;
+        // Board leash: Lara runs free inside this radius (table metres) of
+        // the board's centre before the board follows her; board_leash_height
+        // is the same for up/down. 0 = the old 12 cm leash.
+        float board_leash = 0.35f;
+        float board_leash_height = 0.1f;
         // God-hand pick-up (board mode with board_god_hand only). Zones are
         // metres at her size: head grip zone, claim zone (a hand this close
         // keeps its grip/trigger from the game) and arm grip zone (0 = no
@@ -263,6 +268,14 @@ namespace trlvr
         // + thumb down) or a fist (trigger + grip); grip alone only points
         // and presses. 0 = the old grip-button grabs.
         bool god_grab_pose = true;
+        // Right stick, control_scheme = controller (immersive third person):
+        // a quick hold of its click (seconds) switches the view, a click
+        // recentres; up/down zooms (board_zoom_speed), click-drag scales
+        // the board (board_scale_speed) or moves the seat (stick_height_speed).
+        float view_switch_hold = 0.4f;
+        float stick_height_speed = 0.4f;
+        float board_zoom_speed = 1.0f;
+        float board_scale_speed = 0.7f;
         // Experimental: grab her hand or arm and drag her up like a
         // ragdoll (arm zones, procedural IK hang). Off: the head grab with
         // Legend's own dangle animation.
@@ -373,6 +386,9 @@ namespace trlvr
         // Hide the gameplay HUD (health, ammo, prompts) outright instead of
         // letting it fade. World markers and the binocular view stay.
         bool hide_gameplay_hud = false;
+        // Third-person scale / zoom: 0 both, 1 right stick only, 2 palm
+        // sliders only.
+        int tp_scale_control = 1;
         float ui_scale = 0.6f;
         // 1 follows the headset exactly; lower values leave part of the
         // current head angle in the gameplay HUD so edge elements move toward
@@ -412,6 +428,10 @@ namespace trlvr
         // own flat cross shown). Immersive off always uses the radial menu.
         // [controls] gear_menu = cross / radial (2026-10-09).
         bool gear_menu_radial = true;
+        // [controls] control_scheme: 0 controller (the sticks do everything),
+        // 1 interaction (hand-based: upstream's right stick, 3D gear cross,
+        // palm sliders). Live.
+        int control_scheme = 0;
         // Analog walk (2026-10-10): the game only gets keys, so the stick
         // was run-or-nothing. A light push also holds the game's Walk key
         // (input slot 20 Left Shift or 21 Left Ctrl, whichever is Walk).
@@ -493,6 +513,10 @@ namespace trlvr
     void config_set_theatre(int mode);
     // 0 classic, 1 shoulder, 2 board, 3 all (the view switch cycles them).
     void config_set_third_person_mode(int mode);
+    // 0 both, 1 stick, 2 sliders.
+    void config_set_tp_scale_control(int mode);
+    // 0 controller, 1 interaction; also presets gear_menu and tp_scale_control.
+    void config_set_control_scheme(int scheme);
     void config_set_full_body(bool on);
     // 0 both, 1 stick, 2 sliders.
     // Hands against the world and Lara's body.

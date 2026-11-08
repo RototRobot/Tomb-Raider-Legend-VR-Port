@@ -85,6 +85,8 @@ namespace trlvr
             { L"vr", L"board_distance", L"0.5" },
             { L"vr", L"board_height", L"0.35" },
             { L"vr", L"board_god_hand", L"1" },
+            { L"vr", L"board_leash", L"0.35" },
+            { L"vr", L"board_leash_height", L"0.1" },
             { L"vr", L"god_head_zone", L"0.3" },
             { L"vr", L"god_claim_zone", L"0.6" },
             { L"vr", L"god_arm_zone", L"0.25" },
@@ -119,6 +121,10 @@ namespace trlvr
             { L"vr", L"god_zone_debug", L"0" },
             { L"vr", L"god_zone_scale", L"1" },
             { L"vr", L"god_grab_pose", L"1" },
+            { L"vr", L"view_switch_hold", L"0.4" },
+            { L"vr", L"stick_height_speed", L"0.4" },
+            { L"vr", L"board_zoom_speed", L"1" },
+            { L"vr", L"board_scale_speed", L"0.7" },
             { L"vr", L"god_drag_hand", L"0" },
             { L"vr", L"body_push", L"1" },
             { L"vr", L"body_push_strength", L"1" },
@@ -190,6 +196,7 @@ namespace trlvr
             { L"vr", L"board_diorama_height", L"0.45" },
             { L"vr", L"board_diorama_below", L"0.15" },
             { L"controls", L"gear_cross_x_rate", L"1.0" },
+            { L"controls", L"control_scheme", L"controller" },
             { L"controls", L"gear_menu", L"radial" },
             { L"controls", L"stick_walk", L"1" },
             { L"controls", L"finger_tracking", L"1" },
@@ -203,6 +210,7 @@ namespace trlvr
             { L"vr", L"menu_world_locked", L"1" },
             { L"vr", L"pause_world_locked", L"1" },
             { L"vr", L"hide_gameplay_hud", L"0" },
+            { L"vr", L"tp_scale_control", L"stick" },
             { L"vr", L"ui_scale", L"0.6" },
             { L"vr", L"hud_follow", L"0.85" },
             { L"vr", L"overlay_vr_distance", L"1.0" },
@@ -372,6 +380,13 @@ namespace trlvr
             L"; her over (hold Y). Needs board mode, immersive controls and\r\n"
             L"; third person too.\r\n"
             L"board_god_hand = 1\r\n"
+            L"; live: board view (god mode), how far Lara can run from the board's\r\n"
+            L"; centre before the table is pulled after her, in table metres.\r\n"
+            L"; 0 = the old 12 cm leash. 0 .. 2.\r\n"
+            L"board_leash = 0.35\r\n"
+            L"; live: board view, how far she can go up or down from the board's centre\r\n"
+            L"; before its height follows, in table metres. 0 = at once. 0 .. 1.\r\n"
+            L"board_leash_height = 0.1\r\n"
             L"; live: god mode (board view with board_god_hand), the pick-up zone round\r\n"
             L"; her head, metres at her size. 0.05 .. 1.\r\n"
             L"god_head_zone = 0.3\r\n"
@@ -381,7 +396,9 @@ namespace trlvr
             L"; live: god mode, a grip this close to one of her arms (metres at her\r\n"
             L"; size) holds that arm instead of her head. 0 = no arm grab. 0 .. 0.5.\r\n"
             L"god_arm_zone = 0.25\r\n"
-            L"; IGNORED: the arm lead is off (she is lifted by the arm at once).\r\n"
+            L"; live: god mode, 1 = holding her arm, only the arm follows your hand\r\n"
+            L"; until you pull past her reach, then she hangs from that wrist.\r\n"
+            L"; 0 = she is lifted by the arm at once.\r\n"
             L"god_arm_lead = 1\r\n"
             L"; live: god mode pick-up, 1 = Legend's old way: the dangle animation,\r\n"
             L"; hanging by her wrist. 0 = she hangs from where you pinched her.\r\n"
@@ -477,6 +494,19 @@ namespace trlvr
             L"; and thumb down) or a fist (trigger and grip); the grip alone only\r\n"
             L"; points and presses. Needs finger_tracking. 0 = the grip button grabs.\r\n"
             L"god_grab_pose = 1\r\n"
+            L"; live: control_scheme = controller, third-person views. Holding the\r\n"
+            L"; right stick's click this many seconds switches the view; a quick\r\n"
+            L"; click resets the angle (recentres). 0.15 .. 2.\r\n"
+            L"view_switch_hold = 0.4\r\n"
+            L"; live: shoulder view, hold the right stick in and push up/down to\r\n"
+            L"; raise and lower the seat, metres a second at full tilt. 0 = off.\r\n"
+            L"stick_height_speed = 0.4\r\n"
+            L"; live: right stick up/down zooms to Lara (up = closer), e-folds a\r\n"
+            L"; second at full tilt; saved as that view's zoom. 0 = off. 0 .. 5.\r\n"
+            L"board_zoom_speed = 1\r\n"
+            L"; live: board view, hold the right stick in and push up/down to scale\r\n"
+            L"; Lara (up = bigger), e-folds a second at full tilt. 0 = off. 0 .. 5.\r\n"
+            L"board_scale_speed = 0.7\r\n"
             L"; live: EXPERIMENTAL, god mode: grab her hand or arm and drag her up\r\n"
             L"; like a ragdoll, hanging by IK. 0 = the head grab and Legend's dangle\r\n"
             L"; animation.\r\n"
@@ -653,6 +683,9 @@ namespace trlvr
             L"pause_world_locked = 1\r\n"
             L"; 1 = hide the gameplay HUD completely (world markers stay).\r\n"
             L"hide_gameplay_hud = 0\r\n"
+            L"; Third-person scale and zoom: stick (right thumbstick only), sliders\r\n"
+            L"; (the palm sliders only) or both.\r\n"
+            L"tp_scale_control = stick\r\n"
             L"ui_scale = 0.6\r\n"
             L"; 1.0 is rigidly head-locked; 0.85 gives the gameplay HUD gentle drag.\r\n"
             L"hud_follow = 0.85\r\n"
@@ -679,6 +712,13 @@ namespace trlvr
             L"controllers = 1\r\n"
             L"; 1 enables body-relative gestures. Chest + left grip toggles the personal light.\r\n"
             L"immersive_controls = 1\r\n"
+            L"; live: controller = the sticks do everything: right stick click\r\n"
+            L"; recentres, hold switches view, up/down zooms, click-drag sets height\r\n"
+            L"; or scale. interaction = upstream's hand-based layout: right stick\r\n"
+            L"; click switches weapon, long press switches view; the 3D gear cross\r\n"
+            L"; and palm sliders. The Controls menu also sets gear_menu and\r\n"
+            L"; tp_scale_control when you change this; those can then be fine-tuned.\r\n"
+            L"control_scheme = controller\r\n"
             L"; Gear in immersive third person: cross (the 3D gear cross by your\r\n"
             L"; hip) or radial (hold the left stick in, then push it toward the\r\n"
             L"; item: up medipack, right binoculars, down weapon, left light).\r\n"
@@ -910,6 +950,25 @@ namespace trlvr
         save_setting(L"vr", L"cutscene_mode",
                      mode >= 1 ? L"theatre" : L"normal");
         save_setting(L"vr", L"gameplay_theatre", mode >= 2 ? L"1" : L"0");
+    }
+
+    void config_set_tp_scale_control(int mode)
+    {
+        g_config.tp_scale_control = mode >= 0 && mode <= 2 ? mode : 0;
+        config_save_setting(L"vr", L"tp_scale_control",
+            mode == 1 ? L"stick" : mode == 2 ? L"sliders" : L"both");
+    }
+
+    void config_set_control_scheme(int scheme)
+    {
+        const bool interaction = scheme == 1;
+        g_config.control_scheme = interaction ? 1 : 0;
+        config_save_setting(L"controls", L"control_scheme",
+                            interaction ? L"interaction" : L"controller");
+        g_config.gear_menu_radial = !interaction;
+        config_save_setting(L"controls", L"gear_menu",
+                            interaction ? L"cross" : L"radial");
+        config_set_tp_scale_control(interaction ? 2 : 1);
     }
 
     void config_set_third_person_mode(int mode)
@@ -1173,6 +1232,9 @@ namespace trlvr
                 return read_bool(L"vr", key, fallback, path);
             };
             Config& c = g_config;
+            c.board_leash = rf(L"board_leash", L"0.35", 0.0f, 2.0f, 0.35f);
+            c.board_leash_height =
+                rf(L"board_leash_height", L"0.1", 0.0f, 1.0f, 0.1f);
             c.god_head_zone = rf(L"god_head_zone", L"0.3", 0.05f, 1.0f, 0.3f);
             c.god_claim_zone = rf(L"god_claim_zone", L"0.6", 0.0f, 3.0f, 0.6f);
             c.god_arm_zone = rf(L"god_arm_zone", L"0.25", 0.0f, 0.5f, 0.25f);
@@ -1222,6 +1284,14 @@ namespace trlvr
             c.god_zone_debug = rb(L"god_zone_debug", false);
             c.god_zone_scale = rf(L"god_zone_scale", L"1", 0.25f, 4.0f, 1.0f);
             c.god_grab_pose = rb(L"god_grab_pose", true);
+            c.view_switch_hold =
+                rf(L"view_switch_hold", L"0.4", 0.15f, 2.0f, 0.4f);
+            c.stick_height_speed =
+                rf(L"stick_height_speed", L"0.4", 0.0f, 3.0f, 0.4f);
+            c.board_zoom_speed =
+                rf(L"board_zoom_speed", L"1", 0.0f, 5.0f, 1.0f);
+            c.board_scale_speed =
+                rf(L"board_scale_speed", L"0.7", 0.0f, 5.0f, 0.7f);
             c.god_drag_hand = rb(L"god_drag_hand", false);
             c.body_push = rb(L"body_push", true);
             c.body_push_strength =
@@ -1378,6 +1448,20 @@ namespace trlvr
             read_bool(L"vr", L"pause_world_locked", true, path);
         g_config.hide_gameplay_hud =
             read_bool(L"vr", L"hide_gameplay_hud", false, path);
+        {
+            wchar_t text[32]{};
+            GetPrivateProfileStringW(L"vr", L"tp_scale_control", L"stick",
+                                     text, 32, path);
+            g_config.tp_scale_control = _wcsicmp(text, L"both") == 0 ? 0
+                : _wcsicmp(text, L"sliders") == 0 ? 2 : 1;
+        }
+        {
+            wchar_t text[32]{};
+            GetPrivateProfileStringW(L"controls", L"control_scheme",
+                                     L"controller", text, 32, path);
+            g_config.control_scheme =
+                _wcsicmp(text, L"interaction") == 0 ? 1 : 0;
+        }
         value = read_float(L"vr", L"ui_scale", L"0.6", path);
         g_config.ui_scale = value >= 0.1f && value <= 2.0f ? value : 0.6f;
         value = read_float(L"vr", L"hud_follow", L"0.85", path);

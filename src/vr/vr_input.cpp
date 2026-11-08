@@ -48,6 +48,7 @@
 #include "tune.h"
 #include "vr_gesture.h"
 #include "finger_input.h"
+#include "godmode/board_leash.h"
 #include "vr_session.h"
 #include "vr_submit.h"
 
@@ -2104,6 +2105,10 @@ namespace trlvr
         bool g_squeeze_down[2] = { false, false };
         // The right stick's long press (immersive): switch the view.
         bool g_view_switch_request = false;
+        // Controller scheme: the right stick pushed while held in, a
+        // click-drag like the left stick's radial menu. Seat height / world
+        // scale follow the stick until it is let go.
+        bool g_seat_drag = false;
 
         // The settings overlay (proxy/overlay.cpp) from the controllers:
         // the menu button's hold-to-open (menu_panel.h), and, once the
@@ -2201,6 +2206,7 @@ namespace trlvr
                 g_trigger_down[0] = g_trigger_down[1] = false;
                 g_squeeze_down[0] = g_squeeze_down[1] = false;
                 g_menu_hold = MenuHold{};
+                g_seat_drag = false;
                 return;
             }
 
@@ -2313,12 +2319,43 @@ namespace trlvr
                             "is not up yet");
                 }
             }
+            // Right stick, control_scheme = controller (immersive): a quick
+            // hold (view_switch_hold) switches the view, a click recentres, a
+            // double click is the PDA. Pushing the stick while it is down
+            // (past half, as the left stick's radial menu) starts the seat
+            // drag instead (g_seat_drag, read by the look stick).
+            if (config().immersive_controls && config().control_scheme == 0)
+            {
+                ComplexButton& s = g_complex_stick[1];
+                const bool r3 = xr_input_button(1, XrButtonStick) &&
+                                !g_both_sticks_latched;
+                float rx = 0.0f, ry = 0.0f;
+                xr_input_stick(1, &rx, &ry);
+                if (!r3)
+                    g_seat_drag = false;
+                if (s.down && !s.long_fired)
+                {
+                    if (rx * rx + ry * ry > 0.25f)
+                    {
+                        s.long_fired = true;
+                        g_seat_drag = r3;
+                    }
+                    else if (r3 && now - s.pressed_at >=
+                             (ULONGLONG)(config().view_switch_hold * 1000.0f))
+                    {
+                        s.long_fired = true;
+                        g_view_switch_request = true;
+                    }
+                }
+                complex_update(s, r3, now, GameRecentre, GamePda, -1);
+            }
             // Right stick (1.0.0 layout): click weapon switch, double
             // click PDA, long press binoculars -- in immersive play the long
             // press switches the view instead (binoculars are on the gear
             // cross). The Index has trackpads for the long-press actions.
-            if (config().immersive_controls)
+            else if (config().immersive_controls)
             {
+                g_seat_drag = false;
                 ComplexButton& s = g_complex_stick[1];
                 const bool r3 = xr_input_button(1, XrButtonStick) &&
                                 !g_both_sticks_latched;
@@ -2331,9 +2368,12 @@ namespace trlvr
                 complex_update(s, r3, now, GameWeapon, GamePda, -1);
             }
             else
+            {
+                g_seat_drag = false;
                 complex_update(g_complex_stick[1],
                     xr_input_button(1, XrButtonStick) && !g_both_sticks_latched,
                     now, GameWeapon, GamePda, index ? -1 : GameBinoculars);
+            }
 
             bool face = false;      // the grenade / light / flick button
             if (left == XrControllerWmr || right == XrControllerWmr)
@@ -2368,6 +2408,7 @@ namespace trlvr
                 g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
                 g_complex_face = ComplexButton{};
                 g_view_switch_request = false;
+                g_seat_drag = false;
                 for (int i = 0; i < kLogicalCount; ++i)
                     g_pulse_until[i] = 0;
             }
@@ -2859,7 +2900,8 @@ namespace trlvr
             const int off = config().left_handed ? 1 : 0;
             const int other = 1 - off;
             const ULONGLONG now = GetTickCount64();
-            const bool available = !menu && camera_tp_view_available();
+            const bool available = !menu && camera_tp_view_available() &&
+                config().tp_scale_control != 1;
             const float up = available ? camera_palm_up(off) : -2.0f;
             float palm[3]{};
             const bool have_palm = available &&
@@ -4939,6 +4981,42 @@ namespace trlvr
             // deflection, integrated with the remainder carried so slow
             // movements are not lost to rounding.
             analog(g_look, &x, &y);
+            // Control scheme "controller": the right stick runs the seat.
+            // Board: y zooms, x turns, click-drag scales the world. Shoulder:
+            // y zooms, click-drag is the height. Classic: y pitches, click-
+            // drag zooms. While the stick is in (and 200 ms after, its release
+            // spring) it neither turns nor pitches. Saved once it is centred.
+            {
+                const int view = camera_third_person_mode();
+                const bool seat_stick = config().control_scheme == 0 &&
+                    tp_gameplay && !camera_view_first_person() &&
+                    view >= 0 && view <= 2;
+                static ULONGLONG r3_down_at = 0;
+                const ULONGLONG t = GetTickCount64();
+                const bool r3 = xr_input_button(1, XrButtonStick);
+                if (r3)
+                    r3_down_at = t;
+                float height_in = 0.0f, zoom_in = 0.0f, scale_in = 0.0f;
+                if (seat_stick && r3 && g_seat_drag)
+                {
+                    if (view == 2)
+                        scale_in = board_stick_axis(y, 0.2f);
+                    else if (view == 1)
+                        height_in = board_stick_axis(y, 0.2f);
+                    else
+                        zoom_in = board_stick_axis(y, 0.2f);
+                }
+                else if (seat_stick && view != 0 && t - r3_down_at > 200)
+                    zoom_in = board_stick_axis(y, 0.2f);
+                if (seat_stick && (r3 || t - r3_down_at <= 200))
+                {
+                    y = 0.0f;
+                    x = 0.0f;
+                }
+                else if (seat_stick && view != 0)
+                    y = 0.0f;
+                camera_view_stick(height_in, zoom_in, scale_in, dt);
+            }
             if (camera_first_person_active() && fabsf(x) < 0.05f)
             {
                 const float pad = gamepad_right_stick_x();

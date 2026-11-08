@@ -737,6 +737,38 @@ namespace trlvr
         void god_section(Config& c)
         {
             ImGui::TextWrapped("Board view with god hands only.");
+            ImGui::SeparatorText("Board leash");
+            slider("Leash radius", &c.board_leash, 0.0f, 2.0f, "%.2f m",
+                   L"vr", L"board_leash",
+                   "Lara runs free this far (table metres) before the board "
+                   "follows her. 0 = the old 12 cm leash.");
+            slider("Leash height", &c.board_leash_height, 0.0f, 1.0f,
+                   "%.2f m", L"vr", L"board_leash_height",
+                   "Same for up and down. 0 = height follows at once.");
+            slider("View switch hold", &c.view_switch_hold, 0.15f, 2.0f,
+                   "%.2f s", L"vr", L"view_switch_hold",
+                   "Controller scheme: hold the right stick's click this long "
+                   "to switch view. A quick click resets the angle.");
+            {
+                int control = c.tp_scale_control;
+                if (ImGui::Combo("Scale / zoom control", &control,
+                                 "Both\0Thumbstick\0Palm sliders\0"))
+                    config_set_tp_scale_control(control);
+                help("How scale and zoom are changed: the right thumbstick, "
+                     "the sliders on the off hand's upturned palm, or both.");
+            }
+            slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
+                   L"vr", L"board_zoom_speed",
+                   "Controller scheme: right stick up/down zooms to Lara (up "
+                   "= closer). 0 = off.");
+            slider("World scale speed", &c.board_scale_speed, 0.0f, 5.0f,
+                   "%.2f", L"vr", L"board_scale_speed",
+                   "Controller scheme, board view: hold the right stick in "
+                   "and push up/down to scale Lara. 0 = off.");
+            slider("Shoulder height speed", &c.stick_height_speed, 0.0f,
+                   3.0f, "%.2f m/s", L"vr", L"stick_height_speed",
+                   "Controller scheme, shoulder view: hold the right stick in "
+                   "and push up/down to raise and lower the seat. 0 = off.");
             ImGui::SeparatorText("Pick-up");
             toggle("Grab with hand pose", &c.god_grab_pose, L"vr",
                    L"god_grab_pose",
@@ -959,6 +991,15 @@ namespace trlvr
 
         void controls_section(Config& c)
         {
+            int scheme = c.control_scheme;
+            if (ImGui::Combo("Control scheme", &scheme,
+                             "Controller (sticks)\0Interaction (hands)\0"))
+                config_set_control_scheme(scheme);
+            help("Controller: right stick click recentres, hold switches "
+                 "view, up/down zooms, click-drag sets height or scale; radial "
+                 "gear menu. Interaction: right stick click switches weapon, "
+                 "long press switches view; the 3D gear cross and palm "
+                 "sliders. Applies at once.");
             toggle("Immersive controls", &c.immersive_controls, L"controls",
                    L"immersive_controls",
                    "Body-relative gestures: holsters, belt items, the chest "

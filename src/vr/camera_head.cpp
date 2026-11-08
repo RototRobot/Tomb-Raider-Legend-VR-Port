@@ -14868,7 +14868,7 @@ namespace trlvr
             // Board view's god hands, she is free.
             const bool allowed = cfg.body_push && cfg.immersive_controls &&
                 cfg.board_god_hand && camera_third_person_mode() == 2 &&
-                camera_world_scale_factor() >= 1.25f && g_pluck.hand < 0 &&
+                camera_world_scale_factor() >= 1.0f && g_pluck.hand < 0 &&
                 g_pluck.palm < 0 && !g_pluck.god.flying &&
                 !pluck_drawn(g_pluck.god) && !torso_drawn(g_torso.god) &&
                 metre > 0.0f;
@@ -18064,6 +18064,7 @@ namespace trlvr
             {
                 const float table = metre * camera_world_scale_factor();
                 const float heading = atan2f(forward[1], forward[0]);
+                const float leash = config().board_leash * table;
                 // Coming back from another view, a recentre, or a jump of
                 // 3 table-metres (a load or a teleport) puts the anchor
                 // back on her.
@@ -18079,10 +18080,29 @@ namespace trlvr
                     g_tp_camera.heading = heading;
                     g_tp_camera.recentre = vr_recenter_generation();
                 }
+                // Free roam (Underworld's leash): Lara runs free within
+                // board_leash of the anchor before it follows, and within
+                // board_leash_height up or down. Turning the view turns the
+                // anchor round her, so she keeps her place in the view
+                // instead of the board swinging round its own centre.
+                if (leash > 0.0f)
+                {
+                    float turn = heading - g_tp_camera.heading;
+                    if (turn > 3.14159265f) turn -= 6.28318531f;
+                    if (turn < -3.14159265f) turn += 6.28318531f;
+                    const float c = cosf(turn), s = sinf(turn);
+                    const float ax = g_tp_camera.anchor[0] - focus[0];
+                    const float ay = g_tp_camera.anchor[1] - focus[1];
+                    g_tp_camera.anchor[0] = focus[0] + ax * c - ay * s;
+                    g_tp_camera.anchor[1] = focus[1] + ax * s + ay * c;
+                }
                 g_tp_camera.heading = heading;
-                // Lara may wander 12 table-cm from the anchor before it
-                // follows (1.0.0); height follows at once.
-                board_leash(g_tp_camera.anchor, focus, 0.12f * table, 0.0f);
+                // board_leash 0: the old 12 table-cm leash, height at once.
+                board_leash(g_tp_camera.anchor, focus,
+                            leash > 0.0f ? leash : 0.12f * table,
+                            leash > 0.0f
+                                ? config().board_leash_height * table
+                                : 0.0f);
                 // The diorama's handle moves the board in the room (metres:
                 // right, up, forward): the seat moves the opposite way.
                 float moved[3];
@@ -19971,6 +19991,74 @@ namespace trlvr
         return true;
     }
 
+    void camera_view_stick(float height_in, float zoom_in, float scale_in,
+                           float dt)
+    {
+        // Palm sliders only: the stick leaves scale and zoom alone.
+        if (config().tp_scale_control == 2)
+            zoom_in = scale_in = 0.0f;
+        // Board: up/down zooms to Lara, the click-drag scales the world.
+        // Shoulder: up/down zooms, the click-drag is the seat height.
+        // Classic: the click-drag zooms. Live; saved once the stick is back
+        // at the centre (like the palm sliders on release). Lara stays
+        // 7 .. 175 cm (scale 1 .. 25).
+        static int view_dirty = -1;     // the preset whose zoom/scale moved
+        static int height_dirty = 0;    // 1 shoulder, 2 board
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        const bool moving = height_in != 0.0f || zoom_in != 0.0f ||
+                            scale_in != 0.0f;
+        if (moving && mode >= 0 && mode <= 2)
+        {
+            if (scale_in != 0.0f || zoom_in != 0.0f)
+            {
+                // Only the board scales; the others' zoom is their own.
+                if (mode != 2)
+                    scale_in = 0.0f;
+                float zoom = g_tp_zoom[mode], scale = g_tp_scale[mode];
+                if (board_stick_step(&zoom, &scale, zoom_in, scale_in,
+                                     config().board_zoom_speed,
+                                     config().board_scale_speed, dt, 0.3f,
+                                     3.5f, 1.0f, 25.0f))
+                {
+                    g_tp_zoom[mode] = zoom;
+                    g_tp_scale[mode] = scale;
+                    view_dirty = mode;
+                }
+            }
+            if (height_in != 0.0f)
+            {
+                Config& c = config_edit();
+                const float step = height_in * config().stick_height_speed *
+                                   dt;
+                if (mode == 2)
+                    c.board_height = fmaxf(0.0f,
+                        fminf(3.0f, c.board_height + step));
+                else
+                    c.shoulder_height = fmaxf(-1.0f,
+                        fminf(2.0f, c.shoulder_height + step));
+                height_dirty = mode;
+            }
+        }
+        else if (!moving)
+        {
+            if (view_dirty >= 0)
+            {
+                tp_view_save(view_dirty);
+                view_dirty = -1;
+            }
+            if (height_dirty)
+            {
+                wchar_t text[32];
+                swprintf(text, 32, L"%.3f", height_dirty == 2
+                    ? config().board_height : config().shoulder_height);
+                config_save_setting(L"vr", height_dirty == 2
+                    ? L"board_height" : L"shoulder_height", text);
+                height_dirty = 0;
+            }
+        }
+    }
+
     float camera_palm_up(int hand)
     {
         return palm_up(hand);
@@ -20831,7 +20919,7 @@ namespace trlvr
     bool god_hand_scale()
     {
         return camera_third_person_mode() == 2 &&
-               camera_world_scale_factor() >= 1.25f;
+               camera_world_scale_factor() >= 1.0f;
     }
 
     // Which hands' grips and triggers are the mod's in god mode (as
@@ -20870,7 +20958,7 @@ namespace trlvr
         claimed[0] = claimed[1] = false;
         const float factor = camera_world_scale_factor();
         void* lara = nullptr;
-        bool ok = active && factor > 1.001f && god_hand_scale() &&
+        bool ok = active && factor >= 1.0f && god_hand_scale() &&
                   !g_first_person_active &&
                   config().immersive_controls && config().board_god_hand;
         __try
@@ -21116,9 +21204,11 @@ namespace trlvr
         // and the head grab hangs on Legend's dangle animation.
         pp.arm_radius = config().god_drag_hand
             ? config().god_arm_zone * config().god_zone_scale : 0.0f;
-        // The arm lead is off (2026-10-26): she is lifted by the arm at
-        // once. god_arm_lead is still parsed but ignored.
-        pp.arm_lead = false;
+        // The arm lead (back on, user 2026-11-03): the arm reaches for the
+        // hand and she is lifted only once it is pulled past her reach, as
+        // Underworld; lifted at once she hung from the grab height, feet in
+        // the floor.
+        pp.arm_lead = config().god_arm_lead;
         pp.settle_seconds = 0.15f;      // fingers closing into the pinch pose
         pp.throw_enabled = config().god_throw;
         pp.throw_scale = config().god_throw_strength;
