@@ -41,6 +41,7 @@
 #include "../proxy/window.h"
 #include "../proxy/overlay.h"
 #include "menu_panel.h"
+#include "dpad_gesture.h"
 
 #include "camera_head.h"
 #include "hud_capture.h"
@@ -289,7 +290,7 @@ namespace trlvr
         // Immersive first person keeps its hand gestures.
         bool radial_gear_menu_enabled()
         {
-            if (!config().immersive_controls)
+            if (!config().immersive_any())
                 return true;
             // First person: the gear buttons give way to the gestures, and
             // the stick click is the radial menu, the hold the pause (user
@@ -2126,6 +2127,12 @@ namespace trlvr
         ULONGLONG g_both_sticks_since = 0;
         bool g_both_sticks_latched = false;
         bool g_overlay_was_open = false;
+        // control_scheme = underworld: X click recentres, double click is
+        // the PDA (user 2026-11-10; it used to arm a D-pad gesture, X then a
+        // left-stick slide, with X + menu for the PDA -- gear is the left
+        // stick's radial menu again).
+        ComplexButton g_complex_x;
+        bool underworld_scheme() { return config().control_scheme == 2; }
 
         void pulse(int logical, ULONGLONG now)
         {
@@ -2203,6 +2210,7 @@ namespace trlvr
                 }
                 g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
                 g_complex_face = ComplexButton{};
+                g_complex_x = ComplexButton{};
                 g_trigger_down[0] = g_trigger_down[1] = false;
                 g_squeeze_down[0] = g_squeeze_down[1] = false;
                 g_menu_hold = MenuHold{};
@@ -2247,6 +2255,13 @@ namespace trlvr
                 {
                     g_both_sticks_since = 0;
                     g_both_sticks_latched = false;
+                }
+                else if (both && left_menu && underworld_scheme() &&
+                         !g_both_sticks_latched)
+                {
+                    // As Underworld: both stick clicks recentre.
+                    g_both_sticks_latched = true;
+                    pulse(GameRecentre, now);
                 }
                 else if (both && !left_menu && !g_both_sticks_latched)
                 {
@@ -2324,7 +2339,8 @@ namespace trlvr
             // double click is the PDA. Pushing the stick while it is down
             // (past half, as the left stick's radial menu) starts the seat
             // drag instead (g_seat_drag, read by the look stick).
-            if (config().immersive_controls && config().control_scheme == 0)
+            // Underworld scheme: the same, but a click is accurate aim.
+            if (config().immersive_any() && config().control_scheme != 1)
             {
                 ComplexButton& s = g_complex_stick[1];
                 const bool r3 = xr_input_button(1, XrButtonStick) &&
@@ -2347,13 +2363,16 @@ namespace trlvr
                         g_view_switch_request = true;
                     }
                 }
-                complex_update(s, r3, now, GameRecentre, GamePda, -1);
+                if (underworld_scheme())
+                    complex_update(s, r3, now, GameAim, -1, -1);
+                else
+                    complex_update(s, r3, now, GameRecentre, GamePda, -1);
             }
             // Right stick (1.0.0 layout): click weapon switch, double
             // click PDA, long press binoculars -- in immersive play the long
             // press switches the view instead (binoculars are on the gear
             // cross). The Index has trackpads for the long-press actions.
-            else if (config().immersive_controls)
+            else if (config().immersive_any())
             {
                 g_seat_drag = false;
                 ComplexButton& s = g_complex_stick[1];
@@ -2390,7 +2409,16 @@ namespace trlvr
                 // the left A / B) on the left.
                 held[GameJump] = xr_input_button(1, XrButtonPrimary);
                 held[GameDive] = xr_input_button(1, XrButtonSecondary);
-                held[GameAim] = xr_input_button(0, XrButtonPrimary);
+                // Underworld: X click recentres, double click is the PDA.
+                // In first person with gestures on, X gives way to them.
+                const bool x_underworld = underworld_scheme() &&
+                    !(config().gesture_controls &&
+                      camera_first_person_active());
+                complex_update(g_complex_x, x_underworld &&
+                               xr_input_button(0, XrButtonPrimary),
+                               now, GameRecentre, GamePda, -1);
+                held[GameAim] = !underworld_scheme() &&
+                    xr_input_button(0, XrButtonPrimary);
                 face = xr_input_button(0, XrButtonSecondary);
                 if (index)
                 {
@@ -2407,6 +2435,7 @@ namespace trlvr
             {
                 g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
                 g_complex_face = ComplexButton{};
+                g_complex_x = ComplexButton{};
                 g_view_switch_request = false;
                 g_seat_drag = false;
                 for (int i = 0; i < kLogicalCount; ++i)
@@ -2473,7 +2502,7 @@ namespace trlvr
             QueryPerformanceCounter(&g_last);
 
             log("controls: connected -- OpenXR actions");
-            if (config().immersive_controls)
+            if (config().gesture_controls)
                 log("controls: immersive gestures enabled -- chest + left "
                     "grip toggles the personal light; either grip picks "
                     "up the nearer belt item; fast forward grip release "
@@ -2807,7 +2836,7 @@ namespace trlvr
     {
         const int hand = left ? 0 : 1;
         if (!g_ready || !g_handhold_haptic[hand] ||
-            !config().immersive_controls || !game_has_focus())
+            !config().gesture_controls || !game_has_focus())
             return;
 
         // One short tactile cue per zone entry; the draw hook owns the
@@ -3198,7 +3227,7 @@ namespace trlvr
     bool vr_input_pouch_item(int item, float body[3], int* held_hand)
     {
         if (!g_ready || !body || !held_hand || item < 0 || item > 1 ||
-            !config().immersive_controls)
+            !config().gesture_controls)
             return false;
         pouch_point(item, body);
         *held_hand = item == 0 ? g_grenade_hand : g_medipack_hand;
@@ -3537,14 +3566,14 @@ namespace trlvr
         }
 
         const bool immersive_first_person =
-            config().immersive_controls && camera_first_person_active();
+            config().gesture_controls && camera_first_person_active();
         // Third-person immersive (branch started 2026-10-01): for now the
         // VR-gamepad button layout in full -- nothing taken away for
         // gestures that need the first-person hands -- plus the body
         // gestures that work without them (chest-grip light). See
         // CONTROLS_IMMERSIVE.md.
         const bool immersive_third_person =
-            config().immersive_controls && !camera_first_person_active();
+            config().immersive_any() && !camera_first_person_active();
         if (immersive_third_person && !g_tp_reported)
         {
             g_tp_reported = true;
@@ -3594,9 +3623,9 @@ namespace trlvr
             vr_hand_calibration_clear_menu_request();
             g_menu_request_at = 0;
             const bool hands_shown =
-                (immersive_first_person &&
-                 config().first_person_tracked_hands) ||
-                immersive_third_person;
+                config().hands_on_controllers &&
+                (!camera_first_person_active() ||
+                 config().first_person_tracked_hands);
             if (!hands_shown)
             {
                 log("controls: hand calibration needs immersive controls "
@@ -3789,7 +3818,7 @@ namespace trlvr
         // first so neither view inherits the other's hand state.
         {
             const bool view_key = (GetAsyncKeyState(VK_OEM_5) & 1) != 0;
-            const bool pressed = (config().immersive_controls &&
+            const bool pressed = (config().immersive_any() &&
                                   g_view_switch_request) || view_key;
             g_view_switch_request = false;
             if (pressed && !menu && !tune_gear_tuning_active() &&
@@ -3963,7 +3992,7 @@ namespace trlvr
         const int action_hold = swap_triggers ? 1 : 0;
         // Single-pistol mode with pistols (not the long gun) in hand.
         const bool single_pistols_out = config().single_pistols &&
-            config().immersive_controls &&
+            config().gesture_controls &&
             (g_holster_drawn[0] || g_holster_drawn[1]) &&
             weapon_slot_kind(selected_weapon_slot()) != WeaponLong;
 
@@ -4026,7 +4055,7 @@ namespace trlvr
         // Resolve the visible belt items and pistol holsters first. Their
         // pickup consumes this grip edge; only an unclaimed upper-chest grip
         // may toggle the personal light.
-        g_light_key_pulse = config().immersive_controls && !menu &&
+        g_light_key_pulse = config().gesture_controls && !menu &&
             !handhold_active &&
             left_grip && !g_light_grip_was &&
             !g_holster_grip_consumed[0] &&
@@ -4262,9 +4291,31 @@ namespace trlvr
                          (right_trigger && g_holster_drawn[1] &&
                           !g_tuning_trigger_hold[1]);
                 if (b.out == KEY && on)
-                    want[b.vk] = true;
+                {
+                    // Underworld scheme: the buttons keep their physical
+                    // names here (gestures read them), only the keys swap:
+                    // left trigger locks on, right grip interacts. Not in
+                    // binocular view, where G zooms.
+                    int vk = b.vk;
+                    if (underworld_scheme() && !binocular_view_now())
+                    {
+                        if (i == GameInteract)
+                            vk = 'G';
+                        else if (i == GameLockOn)
+                            vk = 'E';
+                    }
+                    want[vk] = true;
+                }
                 else if (b.out == MOUSE_LEFT && on)
+                {
                     want_mouse_left = true;
+                    // The game's default for Fire is H and left mouse, but
+                    // the mouse half can be missing from its saved bindings
+                    // (2026-11-09: Input\5 was "163", and no gun fired). H
+                    // is held too, except in binocular view, where H zooms.
+                    if (!binocular_view_now())
+                        want['H'] = true;
+                }
             }
 
             if (immersive_first_person)
@@ -4318,7 +4369,7 @@ namespace trlvr
                 if (camera_first_person_secure_grip_pulse())
                     want['E'] = true; // grab secures a precarious catch
             }
-            if (config().immersive_controls)
+            if (config().gesture_controls)
             {
                 if (g_light_key_pulse)
                 {
@@ -4988,7 +5039,7 @@ namespace trlvr
             // spring) it neither turns nor pitches. Saved once it is centred.
             {
                 const int view = camera_third_person_mode();
-                const bool seat_stick = config().control_scheme == 0 &&
+                const bool seat_stick = config().control_scheme != 1 &&
                     tp_gameplay && !camera_view_first_person() &&
                     view >= 0 && view <= 2;
                 static ULONGLONG r3_down_at = 0;
@@ -5202,7 +5253,7 @@ namespace trlvr
 
     bool vr_input_holster_hand_drawn(bool left)
     {
-        return config().immersive_controls &&
+        return config().gesture_controls &&
             g_holster_drawn[left ? 0 : 1];
     }
 
@@ -5213,7 +5264,7 @@ namespace trlvr
 
     bool vr_input_holster_combat_held()
     {
-        return config().immersive_controls &&
+        return config().gesture_controls &&
             (g_holster_drawn[0] || g_holster_drawn[1]);
     }
 

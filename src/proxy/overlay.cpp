@@ -6,6 +6,8 @@
 #include "../vr/vr_session.h"
 #include "../vr/vr_backend.h"
 #include "../vr/tr7_menu_hook.h"
+#include "../vr/camera_head.h"
+#include "../vr/ui_space.h"
 
 #include "imgui.h"
 #include "imgui_impl_dx9.h"
@@ -472,23 +474,120 @@ namespace trlvr
                    "%.2f", L"vr", L"head_rotation_scale",
                    "How far the view turns for your head's turn. Anything "
                    "but 1 is uncomfortable for most people.");
-            slider("First-person eye height", &c.first_person_eye_height,
+        }
+
+        // Everything that only matters from Lara's eyes. Each control here
+        // is read every frame, so it applies at once.
+        void first_person_section(Config& c)
+        {
+            if (!c.hands_on_controllers)
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                                   "Hands on controllers is off (Controls "
+                                   "tab): her hands play the game's animation, "
+                                   "so the Hands settings do nothing.");
+            ImGui::SeparatorText("Body");
+            int body = c.first_person_full_body ? 1 : 0;
+            if (ImGui::Combo("What you see of Lara", &body,
+                             "Hands only\0Full body\0"))
+                config_set_full_body(body == 1);
+            help("Hands only draws just her hands. Full body draws all of her "
+                 "except the head, with her arms bent to reach your hands.");
+            slider("Eye height", &c.first_person_eye_height,
                    -100.0f, 180.0f, "%.0f units", L"vr",
                    L"first_person_eye_height",
                    "Eye height above Lara's neck joint, about 3 units per "
                    "cm. Lower it if the view sits too high on her body.");
-            slider("Roomscale lean deadzone", &c.roomscale_deadzone, 0.02f,
+
+            ImGui::SeparatorText("Hands");
+            toggle("Hands follow your controllers",
+                   &c.first_person_tracked_hands, L"vr",
+                   L"first_person_tracked_hands",
+                   "First person only. Off: her arms keep the game's "
+                   "animation. Needs Hands on controllers.");
+            ImGui::BeginDisabled(!c.first_person_full_body);
+            slider("Arm stretch", &c.first_person_arm_stretch,
+                   1.0f, 2.0f, "x%.2f", L"vr", L"first_person_arm_stretch",
+                   "Full body only: how much her arms may lengthen so her "
+                   "hands reach your controllers without stretching at the "
+                   "wrist. 1 = off.");
+            ImGui::EndDisabled();
+
+            ImGui::SeparatorText("Moving your body");
+            toggle("Roomscale", &c.roomscale, L"vr", L"roomscale",
+                   "Walking around your room moves Lara, stopped by walls.");
+            ImGui::BeginDisabled(!c.roomscale);
+            slider("Lean deadzone", &c.roomscale_deadzone, 0.02f,
                    0.6f, "%.2f m", L"vr", L"roomscale_deadzone",
-                   "First person: leaning this far moves only your head; "
-                   "beyond it Lara walks to you.");
-            slider("Menu and HUD scale", &c.ui_scale, 0.1f, 2.0f, "%.2f",
-                   L"vr", L"ui_scale", "Size of menus and the HUD in the "
-                   "headset.");
+                   "Leaning this far moves only your head; beyond it Lara "
+                   "moves to you.");
+            toggle("Walk with her animations", &c.roomscale_walk, L"vr",
+                   L"roomscale_walk",
+                   "A real step of more than 0.4 m is walked by the game "
+                   "itself, so Lara turns and walks normally.");
+            ImGui::EndDisabled();
+            toggle("Crouch for real", &c.physical_crouch, L"vr",
+                   L"physical_crouch",
+                   "Crouching about 35 cm down makes Lara crouch.");
+
+            ImGui::SeparatorText("View");
+            bool hardcore = c.first_person_hardcore;
+            if (ImGui::Checkbox("Hardcore view", &hardcore))
+                config_set_first_person_hardcore(hardcore);
+            help("The view turns with Lara through flips, rolls and spins "
+                 "instead of staying level.");
+            ImGui::BeginDisabled(!c.first_person_hardcore);
+            slider("Hardcore threshold",
+                   &c.first_person_hardcore_threshold, 0.0f, 60.0f, "%.0f deg",
+                   L"vr", L"first_person_hardcore_threshold",
+                   "Tilts smaller than this stay level (walking); bigger ones "
+                   "are followed.");
+            ImGui::EndDisabled();
+            toggle("Keep the view up on a ledge pull-up",
+                   &c.first_person_mantle_smoothing, L"vr",
+                   L"first_person_mantle_smoothing",
+                   "Holds the view at standing height while Lara kneels at "
+                   "the top of a ledge. Off follows the game's animation.");
+
+            ImGui::SeparatorText("Play");
+            int secure = c.auto_secure_catch;
+            if (ImGui::Combo("One-hand catches", &secure,
+                             "Grab to secure\0Bars secure themselves\0"
+                             "Bars and ledges secure themselves\0"))
+            {
+                c.auto_secure_catch = secure;
+                config_save_setting(L"vr", L"auto_secure_catch",
+                    secure == 1 ? L"bars" : secure == 2 ? L"all" : L"off");
+            }
+            help("The game's quick-grab prompt when Lara catches something "
+                 "with one hand.");
+            toggle("No bullet spread", &c.first_person_no_spread, L"vr",
+                   L"first_person_no_spread",
+                   "Shots go exactly where the gun points. Off keeps the "
+                   "game's random spread.");
+        }
+
+        void hud_section(Config& c)
+        {
+            slider("Menu scale", &c.ui_scale, 0.1f, 2.0f, "%.2f",
+                   L"vr", L"ui_scale", "Size of menus, loading screens and "
+                   "movies in the headset.");
+            slider("HUD scale", &c.hud_scale, 0.1f, 2.0f, "%.2f",
+                   L"vr", L"hud_scale", "Size of the gameplay HUD (health, "
+                   "ammo, prompts).");
+            slider("Binocular scale", &c.binocular_scale, 0.1f, 2.0f, "%.2f",
+                   L"vr", L"binocular_scale", "Size of the binocular "
+                   "viewfinder. Separate from the HUD and menus.");
+            slider("HUD follow", &c.hud_follow_degrees, 0.0f, 90.0f,
+                   "%.0f deg", L"vr", L"hud_follow_degrees",
+                   "The gameplay HUD stays where it is while you look within "
+                   "this many degrees of it, then glides back in front of "
+                   "you. 0 = stuck to your head. The binoculars always stay "
+                   "fixed to your head.");
             toggle("Pause menu fixed in the room", &c.pause_world_locked,
                    L"vr", L"pause_world_locked",
                    "On: the pause menu stays level where you were looking "
                    "when it opened, like the main menu. Off: it follows the "
-                   "headset. The gameplay HUD always follows the headset.");
+                   "headset. The gameplay HUD has its own HUD follow above.");
             toggle("Hide the gameplay HUD", &c.hide_gameplay_hud, L"vr",
                    L"hide_gameplay_hud",
                    "Turns off the head-locked gameplay HUD (health, ammo, "
@@ -496,12 +595,45 @@ namespace trlvr
                    "and menus are not affected.");
         }
 
-        void camera_section(Config& c)
+        void view_section(Config& c)
         {
-            slider("View switch glide", &c.view_transition_seconds, 0.0f, 2.0f,
-                   "%.2f s", L"vr", L"view_transition_seconds",
+            static const char* const kThird[3] = { "Classic", "Shoulder",
+                                                   "Board" };
+            const int third = camera_third_person_mode();
+            ImGui::Text("Now: %s", camera_view_first_person()
+                ? "First person" : kThird[third >= 0 && third <= 2 ? third : 0]);
+            ImGui::SameLine();
+            ImGui::BeginDisabled(ui_menu_active() ||
+                                 ui_loading_screen_active());
+            if (ImGui::Button("Switch view"))
+                camera_toggle_view("settings menu");
+            ImGui::EndDisabled();
+            help("The same as the view switch on the controller. Not during "
+                 "the game's menus or loading.");
+            int mode = c.view_cycle_all ? 3 : c.third_person_mode;
+            if (ImGui::Combo("View switch goes to", &mode,
+                             "First person and Classic\0"
+                             "First person and Shoulder\0"
+                             "First person and Board\0"
+                             "All four in turn\0"))
+            {
+                config_set_third_person_mode(mode);
+                camera_set_third_person_mode(mode);
+            }
+            help("All four in turn: Classic, Shoulder, Board, First person. "
+                 "The game's VR Settings page sets this too.");
+            slider("Glide between views", &c.view_transition_seconds, 0.0f,
+                   2.0f, "%.2f s", L"vr", L"view_transition_seconds",
                    "How long a view switch takes to glide from one view to "
                    "the next. 0 cuts instantly.");
+            slider("View switch hold", &c.view_switch_hold, 0.15f, 2.0f,
+                   "%.2f s", L"vr", L"view_switch_hold",
+                   "Controller scheme: hold the right stick's click this long "
+                   "to switch view. A quick click recentres.");
+        }
+
+        void camera_section(Config& c)
+        {
             ImGui::SeparatorText("Shoulder camera");
             slider("Distance behind", &c.shoulder_distance, 0.3f, 6.0f,
                    "%.2f m", L"vr", L"shoulder_distance", nullptr);
@@ -745,18 +877,6 @@ namespace trlvr
             slider("Leash height", &c.board_leash_height, 0.0f, 1.0f,
                    "%.2f m", L"vr", L"board_leash_height",
                    "Same for up and down. 0 = height follows at once.");
-            slider("View switch hold", &c.view_switch_hold, 0.15f, 2.0f,
-                   "%.2f s", L"vr", L"view_switch_hold",
-                   "Controller scheme: hold the right stick's click this long "
-                   "to switch view. A quick click resets the angle.");
-            {
-                int control = c.tp_scale_control;
-                if (ImGui::Combo("Scale / zoom control", &control,
-                                 "Both\0Thumbstick\0Palm sliders\0"))
-                    config_set_tp_scale_control(control);
-                help("How scale and zoom are changed: the right thumbstick, "
-                     "the sliders on the off hand's upturned palm, or both.");
-            }
             slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
                    L"vr", L"board_zoom_speed",
                    "Controller scheme: right stick up/down zooms to Lara (up "
@@ -991,20 +1111,49 @@ namespace trlvr
 
         void controls_section(Config& c)
         {
-            int scheme = c.control_scheme;
+            // The scheme is a preset over these three: "Custom" says so when
+            // Gear menu or scale control were changed after choosing it.
+            const bool preset_controller = c.control_scheme == 0 &&
+                c.gear_menu_radial && c.tp_scale_control == 1;
+            const bool preset_interaction = c.control_scheme == 1 &&
+                !c.gear_menu_radial && c.tp_scale_control == 2;
+            const bool preset_underworld = c.control_scheme == 2 &&
+                c.gear_menu_radial && c.tp_scale_control == 1;
+            int scheme = preset_controller ? 0 : preset_interaction ? 1
+                : preset_underworld ? 2 : 3;
             if (ImGui::Combo("Control scheme", &scheme,
-                             "Controller (sticks)\0Interaction (hands)\0"))
+                             "Controller (sticks)\0Interaction (hands)\0"
+                             "Underworld\0Custom\0") && scheme != 3)
                 config_set_control_scheme(scheme);
             help("Controller: right stick click recentres, hold switches "
                  "view, up/down zooms, click-drag sets height or scale; radial "
                  "gear menu. Interaction: right stick click switches weapon, "
                  "long press switches view; the 3D gear cross and palm "
-                 "sliders. Applies at once.");
-            toggle("Immersive controls", &c.immersive_controls, L"controls",
-                   L"immersive_controls",
-                   "Body-relative gestures: holsters, belt items, the chest "
-                   "light, grabbing ledges. Put drawn weapons away before "
-                   "switching this.");
+                 "sliders. Underworld: the Underworld mod's layout: left "
+                 "trigger locks on, right grip interacts, X recentres (double "
+                 "click: PDA), the radial gear menu, right stick click "
+                 "is accurate aim, both stick clicks recentre. Custom: you "
+                 "changed Gear menu or Scale and zoom "
+                 "below; choose a scheme to reset them.");
+            static const bool hands_at_start = c.hands_on_controllers;
+            static const bool gestures_at_start = c.gesture_controls;
+            toggle("Hands on controllers", &c.hands_on_controllers,
+                   L"controls", L"hands_on_controllers",
+                   "In every view, Lara's hands and what they hold follow "
+                   "your controllers. Off: her hands play the game's "
+                   "animation, and god mode, body push and the motorbike "
+                   "handlebars are off too.");
+            toggle("Gesture controls", &c.gesture_controls, L"controls",
+                   L"gesture_controls",
+                   "First person: draw from holsters, take belt and pouch "
+                   "items, chest + left grip for the light, grab ledges and "
+                   "poles. Off: those are on buttons, as a normal gamepad "
+                   "game. Put drawn weapons away before switching this.");
+            if ((c.hands_on_controllers && !hands_at_start) ||
+                (c.gesture_controls && !gestures_at_start))
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                                   "Restart the game for this to apply fully.");
+            ImGui::SeparatorText("Fine-tuning the scheme");
             int menu = c.gear_menu_radial ? 1 : 0;
             if (ImGui::Combo("Gear menu", &menu, "Cross by the hip\0Radial\0"))
             {
@@ -1012,9 +1161,19 @@ namespace trlvr
                 config_save_setting(L"controls", L"gear_menu",
                                     c.gear_menu_radial ? L"radial" : L"cross");
             }
-            help("Immersive third person: the 3D gear cross by your hip, or "
-                 "hold the left stick in and push it toward the item. "
-                 "Without immersive controls the radial menu is always used.");
+            help("Third person: the 3D gear cross by your hip, or hold the "
+                 "left stick in and push it toward the item. First person "
+                 "uses the radial menu and gestures.");
+            {
+                int control = c.tp_scale_control;
+                if (ImGui::Combo("Scale and zoom", &control,
+                                 "Both\0Thumbstick\0Palm sliders\0"))
+                    config_set_tp_scale_control(control);
+                help("Third person: how scale and zoom are changed: the right "
+                     "thumbstick, the sliders on the off hand's upturned "
+                     "palm, or both.");
+            }
+            ImGui::SeparatorText("Fingers");
             toggle("Finger tracking", &c.finger_tracking, L"controls",
                    L"finger_tracking",
                    "Lara's fingers follow yours from the controller's touch "
@@ -1022,6 +1181,105 @@ namespace trlvr
             slider("Relaxed finger curl", &c.finger_rest_curl, 0.0f, 0.6f,
                    "%.2f", L"controls", L"finger_rest_curl",
                    "How curled her fingers are with your hand open.");
+        }
+
+        void weapons_section(Config& c)
+        {
+            bool lefty = c.left_handed;
+            if (ImGui::Checkbox("Left-handed", &lefty))
+                config_set_left_handed(lefty);
+            help("Long guns and aiming follow the left controller; the left "
+                 "trigger fires and the right does Action/aim.");
+            toggle("Two-handed long guns", &c.two_handed_guns, L"controls",
+                   L"two_handed_guns",
+                   "Grip with the free hand near a long gun's front to hold "
+                   "it two-handed; the gun and aim pivot toward that hand.");
+            int aim = c.aim_mode;
+            if (ImGui::Combo("Aim with", &aim,
+                             "Main hand\0Both hands\0Hands and head\0"))
+            {
+                c.aim_mode = aim;
+                config_save_setting(L"controls", L"aim_mode",
+                    aim == 2 ? L"hands_head" : aim == 1 ? L"hands" : L"hand");
+            }
+            help("Both hands: with two pistols drawn, aim between them. Hands "
+                 "and head: averaged with where the headset looks.");
+            toggle("Aim along the controller", &c.controller_aim, L"controls",
+                   L"controller_aim",
+                   "First person: weapons aim along the controller. Off: "
+                   "along the centre of the headset's view.");
+            toggle("3D crosshair", &c.vr_crosshair, L"controls",
+                   L"vr_crosshair",
+                   "A crosshair at the point the shot will hit, instead of "
+                   "the game's flat reticles.");
+            ImGui::BeginDisabled(!c.gesture_controls);
+            int pistols = c.single_pistols ? 1 : 0;
+            if (ImGui::Combo("Pistols from the hips", &pistols,
+                             "Either hip draws both\0Each hip draws its own\0"))
+            {
+                c.single_pistols = pistols == 1;
+                config_save_setting(L"controls", L"pistol_mode",
+                                    pistols == 1 ? L"single" : L"akimbo");
+            }
+            help("Needs Gesture controls. Each hip: a pistol is fired by its "
+                 "own hand's trigger; one pistol fires at half the rate.");
+            ImGui::EndDisabled();
+        }
+
+        void turning_section(Config& c)
+        {
+            int snap = c.snap_turn ? 1 : 0;
+            if (ImGui::Combo("First-person turning", &snap, "Smooth\0Snap\0"))
+            {
+                c.snap_turn = snap == 1;
+                config_save_setting(L"controls", L"turn_mode",
+                                    snap == 1 ? L"snap" : L"smooth");
+            }
+            help("How the right stick turns you in first person.");
+            if (c.snap_turn)
+                slider("Snap angle", &c.snap_turn_degrees, 5.0f, 180.0f,
+                       "%.0f deg", L"controls", L"snap_turn_degrees", nullptr);
+            else
+                slider("Turn speed", &c.smooth_turn_speed, 30.0f, 360.0f,
+                       "%.0f deg/s", L"controls", L"smooth_turn_speed",
+                       "At full stick.");
+            int vignette = c.comfort_vignette;
+            if (ImGui::Combo("Comfort vignette", &vignette,
+                             "Off\0Jumps and rolls\0All movement\0"))
+            {
+                c.comfort_vignette = vignette;
+                config_save_setting(L"vr", L"comfort_vignette",
+                    vignette == 2 ? L"full"
+                    : vignette == 1 ? L"jumps" : L"off");
+            }
+            help("Darkens the edge of your view while Lara moves.");
+        }
+
+        void bike_section(Config& c)
+        {
+            ImGui::BeginDisabled(!c.hands_on_controllers);
+            int bars = c.bike_handlebars;
+            if (ImGui::Combo("Handlebars", &bars,
+                             "Off\0Grab for show\0Hands steer\0"
+                             "Hands steer, grip twists throttle\0"))
+            {
+                static const wchar_t* const kValues[4] = { L"0", L"1", L"2",
+                                                           L"3" };
+                c.bike_handlebars = bars;
+                config_save_setting(L"controls", L"bike_handlebars",
+                                    kValues[bars]);
+            }
+            help("Needs Hands on controllers. Grab for show: the stick still "
+                 "rides.");
+            slider("Steering travel", &c.bike_steer_range, 0.03f, 0.4f,
+                   "%.2f m", L"controls", L"bike_steer_range",
+                   "Hand travel for full steering lock.");
+            slider("Throttle twist", &c.bike_twist_range, 10.0f, 90.0f,
+                   "%.0f deg", L"controls", L"bike_twist_range",
+                   "Twist for full throttle.");
+            toggle("Show grab points", &c.bike_handlebar_markers, L"controls",
+                   L"bike_handlebar_markers", "Rings on the handlebars.");
+            ImGui::EndDisabled();
         }
 
         // OpenXR / Quest settings. The runtime is chosen once at startup, so
@@ -1245,14 +1503,76 @@ namespace trlvr
                  "as a double click of the left stick). This window is put "
                  "in front of you again too.");
             ImGui::Spacing();
-            ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x * 0.5f);
-            if (ImGui::CollapsingHeader("Scale, height and distance",
-                                        ImGuiTreeNodeFlags_DefaultOpen))
-                scale_section(c);
-            if (ImGui::CollapsingHeader("In the headset"))
-                overlay_section(c);
-            if (ImGui::CollapsingHeader("Picture"))
+            if (!ImGui::BeginTabBar("##tabs",
+                                    ImGuiTabBarFlags_FittingPolicyResizeDown))
             {
+                ImGui::End();
+                return;
+            }
+            // Each page scrolls by itself, so the tabs stay in reach.
+            const auto begin_tab = [](const char* name) {
+                if (!ImGui::BeginTabItem(name))
+                    return false;
+                ImGui::BeginChild("##page", ImVec2(0.0f, 0.0f),
+                                  ImGuiChildFlags_NavFlattened);
+                ImGui::PushItemWidth(
+                    ImGui::GetContentRegionAvail().x * 0.5f);
+                return true;
+            };
+            const auto end_tab = []() {
+                ImGui::PopItemWidth();
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+            };
+            if (begin_tab("View"))
+            {
+                view_section(c);
+                ImGui::SeparatorText("World and head scale");
+                scale_section(c);
+                if (ImGui::CollapsingHeader("Third-person cameras"))
+                    camera_section(c);
+                if (ImGui::CollapsingHeader("Cutscene theatre"))
+                    theatre_section(c);
+                if (ImGui::CollapsingHeader("Board diorama"))
+                    diorama_section(c);
+                end_tab();
+            }
+            if (begin_tab("First person"))
+            {
+                first_person_section(c);
+                if (ImGui::CollapsingHeader("Motorbike"))
+                    bike_section(c);
+                end_tab();
+            }
+            if (begin_tab("God mode"))
+            {
+                god_section(c);
+                end_tab();
+            }
+            if (begin_tab("Body"))
+            {
+                body_section(c);
+                end_tab();
+            }
+            if (begin_tab("HUD"))
+            {
+                hud_section(c);
+                if (ImGui::CollapsingHeader("This window in the headset"))
+                    overlay_section(c);
+                end_tab();
+            }
+            if (begin_tab("Controls"))
+            {
+                controls_section(c);
+                if (ImGui::CollapsingHeader("Weapons and aiming"))
+                    weapons_section(c);
+                if (ImGui::CollapsingHeader("Turning and comfort"))
+                    turning_section(c);
+                end_tab();
+            }
+            if (begin_tab("System"))
+            {
+                ImGui::SeparatorText("Picture");
                 slider("Brightness", &c.picture_brightness, -0.5f, 0.5f,
                        "%+.2f", L"vr", L"picture_brightness",
                        "Added to the whole image in the headset.");
@@ -1264,25 +1584,19 @@ namespace trlvr
                        &c.picture_follow_game, L"vr", L"picture_follow_game",
                        "The game's own sliders only work fullscreen; this "
                        "applies what they set to the headset image instead.");
-            }
-            if (ImGui::CollapsingHeader("Third-person cameras"))
-                camera_section(c);
-            if (ImGui::CollapsingHeader("Body physics"))
-                body_section(c);
-            if (ImGui::CollapsingHeader("God mode"))
-                god_section(c);
-            if (ImGui::CollapsingHeader("Cutscene theatre"))
-                theatre_section(c);
-            if (ImGui::CollapsingHeader("Board diorama"))
-                diorama_section(c);
-            if (ImGui::CollapsingHeader("Controls"))
-                controls_section(c);
-            if (ImGui::CollapsingHeader("VR runtime (OpenXR / Quest)"))
+                toggle("Movies and their menus at 4:3",
+                       &c.movie_widen_4x3, L"vr", L"movie_widen_4x3",
+                       "On: while a movie plays (cutscene movies, menus over "
+                       "a movie backdrop) the screen is drawn at 4:3. Off: "
+                       "it fills the headset view, as before 1.1.0.");
+                ImGui::SeparatorText("VR runtime (OpenXR / Quest)");
                 runtime_section(c);
-            if (tr7_menu_hook_present() &&
-                ImGui::CollapsingHeader("TR7-Menu-Hook"))
-                mod_menu_section();
-            ImGui::PopItemWidth();
+                if (tr7_menu_hook_present() &&
+                    ImGui::CollapsingHeader("TR7-Menu-Hook"))
+                    mod_menu_section();
+                end_tab();
+            }
+            ImGui::EndTabBar();
             ImGui::End();
         }
     }

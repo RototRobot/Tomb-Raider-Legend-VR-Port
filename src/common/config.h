@@ -125,6 +125,10 @@ namespace trlvr
         // First-person body: false = hands only, true = Lara's full body
         // (head removed) with her arms bent to reach the tracked hands.
         bool first_person_full_body = false;
+        // Full body: how much her arms may lengthen to reach a controller
+        // past her reach, with a small shoulder reach first. 1 = off, the
+        // gap opens at the wrist. 1..2.
+        float first_person_arm_stretch = 1.4f;
         // 2: hands hang off SteamVR's grip pose (palm pivot, controller-local
         // tuning, left = mirror of right). 1: the original raw-pose model.
         int hand_model = 2;
@@ -179,6 +183,11 @@ namespace trlvr
         float picture_brightness = 0.0f;
         float picture_contrast = 1.0f;
         bool picture_follow_game = true;
+        // Upstream 1.1.0 widens the screen to 4:3 while a Bink movie plays
+        // (cutscene movies, and the menus drawn over a movie backdrop).
+        // false = the old look: the movie fills the eye's nearly square view.
+        // Live.
+        bool movie_widen_4x3 = true;
         float shoulder_distance = 1.3f;         // metres behind the focus
         float shoulder_height = 0.0f;           // metres above it
         float shoulder_side = 0.35f;            // metres to the right
@@ -187,7 +196,7 @@ namespace trlvr
         float board_height = 0.35f;             // table metres up
         float board_hand_back = 0.08f;          // metres, fingertips->palm
         // Board-mode god-hand cheats (pinch pick-up, palm platform, finger
-        // flick). Only with third_person_mode = board, immersive_controls
+        // flick). Only with third_person_mode = board, hands_on_controllers
         // = 1 and first_person = 0 as well.
         bool board_god_hand = true;
         // Board leash: Lara runs free inside this radius (table metres) of
@@ -389,11 +398,20 @@ namespace trlvr
         // Third-person scale / zoom: 0 both, 1 right stick only, 2 palm
         // sliders only.
         int tp_scale_control = 1;
+        // Sizes, each on its own: menus (and movies, loading screens), the
+        // gameplay HUD, and the binocular viewfinder.
         float ui_scale = 0.6f;
-        // 1 follows the headset exactly; lower values leave part of the
-        // current head angle in the gameplay HUD so edge elements move toward
-        // the centre of view. 0 is fully world-relative. Menus have their own
-        // policies.
+        float hud_scale = 0.6f;
+        float binocular_scale = 0.6f;
+        // The gameplay HUD stays put in the room while the gaze is within
+        // this many degrees of it, then glides back in front (as Underworld's
+        // [hud] follow_degrees). 0 = use hud_follow below. 0..90. The
+        // binocular viewfinder is always rigidly head-locked.
+        float hud_follow_degrees = 20.0f;
+        // Only with hud_follow_degrees = 0. 1 follows the headset exactly;
+        // lower values leave part of the current head angle in the gameplay
+        // HUD so edge elements move toward the centre of view. 0 is fully
+        // world-relative. Menus have their own policies.
         float hud_follow = 0.85f;
 
         // The settings overlay in the headset: a square panel placed in the
@@ -419,9 +437,21 @@ namespace trlvr
         bool view_prescale_fix = true;
 
         bool controllers = true;
-        // Opt-in body-relative gestures layered over the normal SteamVR
-        // bindings. The standard bindings remain the default and fallback.
-        bool immersive_controls = true;
+        // Two halves of the old immersive_controls (an INI that only has
+        // that key sets both). hands_on_controllers: Lara's hands and what
+        // they hold follow the controllers, in every view; god mode, body
+        // push and the motorbike handlebars need it. gesture_controls:
+        // first-person body gestures (holsters, belt and pouch items, chest
+        // light, grabbing ledges and poles), layered over the normal
+        // bindings.
+        bool hands_on_controllers = true;
+        bool gesture_controls = true;
+        // Either half: the right stick layouts, the view switch, the
+        // third-person gear and the game's own VR Settings page.
+        bool immersive_any() const
+        {
+            return hands_on_controllers || gesture_controls;
+        }
         // Gear (medipack, binoculars, weapon switch, light) in immersive
         // third person: false = the 3D gear cross, true = the radial menu
         // (left stick long press, then a stick direction, with the game's
@@ -430,7 +460,10 @@ namespace trlvr
         bool gear_menu_radial = true;
         // [controls] control_scheme: 0 controller (the sticks do everything),
         // 1 interaction (hand-based: upstream's right stick, 3D gear cross,
-        // palm sliders). Live.
+        // palm sliders), 2 underworld (the Underworld mod's layout: left
+        // trigger locks on, right grip interacts, X recentres and its
+        // double click is the PDA, a right stick click is accurate aim).
+        // Live.
         int control_scheme = 0;
         // Analog walk (2026-10-10): the game only gets keys, so the stick
         // was run-or-nothing. A light push also holds the game's Walk key

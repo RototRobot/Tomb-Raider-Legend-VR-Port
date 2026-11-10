@@ -355,7 +355,10 @@ namespace trlvr
             log("ui: production HUD/menu/prompt classifier enabled");
         }
         trampoline = nullptr;
-        if (hook_install((void*)kHandleScreenWipes,
+        // TR7-Menu-Hook.asi hooks this function too and loads first (log
+        // 2026-11-09: found E9 ..., so fades went unrecognised and were drawn
+        // as two menu-sized squares).
+        if (hook_install_or_chain((void*)kHandleScreenWipes,
                          (void*)&screen_wipes_detour, &trampoline,
                          kScreenWipeSignature, sizeof(kScreenWipeSignature),
                          "GAMELOOP_HandleScreenWipes (VR overlay)"))

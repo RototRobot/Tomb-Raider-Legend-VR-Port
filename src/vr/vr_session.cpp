@@ -843,6 +843,46 @@ namespace trlvr
                                              tune_ui_scale());
     }
 
+    // [vr] hud_follow_degrees: where the gameplay HUD sits this frame. This
+    // runs for every HUD draw and both eyes, so the state only advances when
+    // a new head pose has arrived; both eyes then agree. After a gap (the HUD
+    // not drawn for a second: menu, binoculars) or a recentre it starts
+    // straight in front again.
+    static Mat4 hud_lazy_relative(const Mat4& head)
+    {
+        static HudFollow state;
+        static Mat4 last_head = Mat4::identity();
+        static ULONGLONG last_seen_ms = 0;
+        static LARGE_INTEGER last_step{};
+        static unsigned recenter = 0;
+
+        const ULONGLONG now_ms = GetTickCount64();
+        if (now_ms - last_seen_ms > 1000 || recenter != g_recenter_generation)
+            state.placed = false;
+        last_seen_ms = now_ms;
+        recenter = g_recenter_generation;
+
+        bool new_pose = !state.placed;
+        for (int r = 0; r < 3 && !new_pose; ++r)
+            for (int c = 0; c < 3; ++c)
+                new_pose = new_pose || head.m[r][c] != last_head.m[r][c];
+        if (new_pose)
+        {
+            LARGE_INTEGER now, frequency;
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            const float dt = state.placed
+                ? fminf((float)(now.QuadPart - last_step.QuadPart) /
+                            (float)frequency.QuadPart, 0.1f)
+                : 0.0f;
+            hud_follow_step(state, head, dt,
+                            config().hud_follow_degrees * 0.01745329f);
+            last_head = head;
+            last_step = now;
+        }
+        return hud_follow_relative(state, head);
+    }
+
     bool vr_substitute_c0_for_eye(const float* in, float* out, Eye eye)
     {
         if (!g_ready || !in || !out || !config().head_tracking)
@@ -882,7 +922,29 @@ namespace trlvr
             (ui_drawing_interface() || movie || screen_wipe))
         {
             const GameProjection ui_gp = projection_from_registers(in);
-            const float scale = screen_wipe ? 1.0f : tune_ui_scale();
+            // Menus, the gameplay HUD and the binocular viewfinder are each
+            // sized on their own.
+            const float scale = screen_wipe ? 1.0f
+                : (movie || ui_menu_active()) ? tune_ui_scale()
+                : hud_binocular_view_active() ? config().binocular_scale
+                : config().hud_scale;
+
+            // A screen wipe (the fade to and from black between scenes) is a
+            // full-screen quad: left as the game drew it, it fills each eye's
+            // whole view, whatever the view or menu is doing. Reprojecting it
+            // through the averaged centre frustum left the outer edge of each
+            // (asymmetric) eye uncovered.
+            if (screen_wipe)
+            {
+                memcpy(out, in, 16 * sizeof(float));
+                static bool reported_wipe = false;
+                if (!reported_wipe)
+                {
+                    reported_wipe = true;
+                    log("ui: screen wipe drawn over each eye's whole view");
+                }
+                return true;
+            }
 
             if (ui_gp.valid)
             {
@@ -987,8 +1049,11 @@ namespace trlvr
                     // screen, and in VR the screen is one eye's nearly
                     // square view, so they came out about 3/4 as wide as
                     // they should. Widened back to 4:3 here.
+                    // [vr] movie_widen_4x3 = 0 turns it off (user
+                    // 2026-11-10: menus over the movie backdrop looked
+                    // squashed at 4:3).
                     Mat4 source = projection_from_game(ui_gp);
-                    if (movie_playing())
+                    if (movie_playing() && config().movie_widen_4x3)
                     {
                         const float box_aspect =
                             (centre.tan_right - centre.tan_left) /
@@ -1095,9 +1160,13 @@ namespace trlvr
                     // The binocular overlay is a viewfinder: it stays
                     // rigidly head-locked (user, 2026-10-02), not on the
                     // gameplay HUD's hud_follow drag.
-                    const float follow = hud_binocular_view_active()
-                        ? 1.0f : tune_hud_follow();
-                    if (!screen_wipe && !ui_menu_active() && follow < 0.999f)
+                    const bool binoculars = hud_binocular_view_active();
+                    const bool lazy = !screen_wipe && !ui_menu_active() &&
+                                      !binoculars &&
+                                      config().hud_follow_degrees > 0.0f;
+                    const float follow = binoculars ? 1.0f : tune_hud_follow();
+                    if (lazy || (!screen_wipe && !ui_menu_active() &&
+                                 follow < 0.999f))
                     {
                         // Leave a small fraction of current head rotation in
                         // the gameplay HUD. This makes edge information move
@@ -1113,8 +1182,10 @@ namespace trlvr
                             target.tan_left, target.tan_right,
                             target.tan_top, target.tan_bottom,
                             hud_near, ui_gp.far_z, ui_gp.sy < 0.0f);
-                        const Mat4 relative = rotation_fraction(
-                            vr_head_rotation(), 1.0f - follow);
+                        const Mat4 relative = lazy
+                            ? hud_lazy_relative(vr_head_rotation())
+                            : rotation_fraction(vr_head_rotation(),
+                                                1.0f - follow);
                         ui = reproject_ndc_to_world_locked(
                             projection_from_game(ui_gp), reference,
                             hud_projection, relative, scale);

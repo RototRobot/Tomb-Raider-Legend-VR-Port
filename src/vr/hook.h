@@ -25,6 +25,15 @@ namespace trlvr
                       const unsigned char* expect, size_t len,
                       const char* name);
 
+    // As hook_install, but when another mod has already hooked `target` with
+    // a 5-byte jmp rel32 (the rest of the signature still retail), our detour
+    // goes in front of it: the trampoline jumps to that mod's detour, which
+    // runs the original itself. Used where TR7-Menu-Hook hooks the same
+    // function first (GAMELOOP_HandleScreenWipes).
+    bool hook_install_or_chain(void* target, void* detour, void** trampoline,
+                               const unsigned char* expect, size_t len,
+                               const char* name);
+
     // The GOG release's crash guard, ported to every copy: in the terrain
     // callback's node matrix builder (0x005C12D0, called from
     // TerrainCallback), a node offset index above 0x100000 skips the node

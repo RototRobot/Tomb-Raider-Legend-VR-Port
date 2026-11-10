@@ -387,6 +387,114 @@ namespace trlvr
         return true;
     }
 
+    void arm_reach_extension(const float* shoulder, float l1, float l2,
+                             const float* target, float max_stretch,
+                             float* slide, float* stretch)
+    {
+        slide[0] = slide[1] = slide[2] = 0.0f;
+        *stretch = 1.0f;
+        const float length = l1 + l2;
+        if (!(max_stretch > 1.001f) || !(length > 2.0f))
+            return;
+        const float to[3] = { target[0] - shoulder[0], target[1] - shoulder[1],
+                              target[2] - shoulder[2] };
+        const float d = sqrtf(to[0]*to[0] + to[1]*to[1] + to[2]*to[2]);
+        // The solver's own full reach is length - 1.
+        const float gap = d - (length - 1.0f);
+        if (!std::isfinite(d) || !(gap > 0.0f))
+            return;
+        const float moved = fminf(gap * 0.4f, 0.12f * length);
+        for (int i = 0; i < 3; ++i)
+            slide[i] = to[i] / d * moved;
+        *stretch = fmaxf(1.0f, fminf(max_stretch, (d - moved + 1.0f) / length));
+    }
+
+    Mat4 stretch_along(const float* axis, float factor, const float* origin)
+    {
+        Mat4 m = Mat4::identity();
+        const float length = sqrtf(axis[0]*axis[0] + axis[1]*axis[1] +
+                                   axis[2]*axis[2]);
+        if (!(length > 1.0e-6f))
+            return m;
+        const float u[3] = { axis[0]/length, axis[1]/length, axis[2]/length };
+        const float extra = factor - 1.0f;
+        const float along = origin[0]*u[0] + origin[1]*u[1] + origin[2]*u[2];
+        for (int r = 0; r < 3; ++r)
+        {
+            for (int c = 0; c < 3; ++c)
+                m.m[r][c] += extra * u[r] * u[c];
+            m.m[3][r] = -extra * along * u[r];
+        }
+        return m;
+    }
+
+    void hud_follow_step(HudFollow& f, const Mat4& head, float dt, float limit)
+    {
+        const float kEaseSeconds = 0.15f;
+        const float kDoneRadians = 0.026f;          // 1.5 degrees
+        const float kStillRadPerSec = 0.17f;        // under ~10 degrees a second
+        const float kSettleRadians = 0.035f;        // 2 degrees
+        const float kSettleSeconds = 1.0f;
+
+        const float yaw = yaw_of(head);
+        const float pitch = asinf(fmaxf(-1.0f, fminf(1.0f, head.m[1][2])));
+        if (!f.placed)
+        {
+            f.yaw = f.head_yaw = yaw;
+            f.pitch = f.head_pitch = pitch;
+            f.still_seconds = 0.0f;
+            f.moving = false;
+            f.placed = true;
+            return;
+        }
+
+        const float cos_pitch = cosf(pitch);
+        const float dy = wrap_pi(yaw - f.yaw);
+        const float dp = pitch - f.pitch;
+        const float across = dy * cos_pitch;
+        const float off = sqrtf(across * across + dp * dp);
+        if (off > limit)
+            f.moving = true;
+
+        const float head_across = wrap_pi(yaw - f.head_yaw) * cos_pitch;
+        const float head_up = pitch - f.head_pitch;
+        const float turn = sqrtf(head_across * head_across + head_up * head_up);
+        if (dt > 0.0f)
+            f.still_seconds = turn / dt > kStillRadPerSec
+                ? 0.0f : f.still_seconds + dt;
+        if (!f.moving && off > kSettleRadians &&
+            f.still_seconds > kSettleSeconds)
+            f.moving = true;
+
+        if (f.moving)
+        {
+            const float k = 1.0f - expf(-dt / kEaseSeconds);
+            f.yaw = wrap_pi(f.yaw + dy * k);
+            f.pitch += dp * k;
+            if (off < kDoneRadians)
+                f.moving = false;
+        }
+        f.head_yaw = yaw;
+        f.head_pitch = pitch;
+    }
+
+    Mat4 hud_follow_relative(const HudFollow& f, const Mat4& head)
+    {
+        // The HUD's own view rotation has columns right, up, forward; this
+        // is its transpose (rows) times the head, so rays fixed in the HUD's
+        // frame stay fixed in the room.
+        const float sy = sinf(f.yaw), cy = cosf(f.yaw);
+        const float sp = sinf(f.pitch), cp = cosf(f.pitch);
+        Mat4 from_hud = Mat4::identity();
+        from_hud.m[0][0] = cy;        from_hud.m[0][1] = 0.0f;
+        from_hud.m[0][2] = -sy;
+        from_hud.m[1][0] = -sy * sp;  from_hud.m[1][1] = cp;
+        from_hud.m[1][2] = -cy * sp;
+        from_hud.m[2][0] = sy * cp;   from_hud.m[2][1] = sp;
+        from_hud.m[2][2] = cy * cp;
+        return from_hud * head;
+    }
+
     Mat4 rotation_fraction(const Mat4& rotation, float fraction)
     {
         if (fraction <= 0.0f)

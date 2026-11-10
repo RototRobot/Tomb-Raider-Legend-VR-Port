@@ -97,10 +97,40 @@ namespace trlvr
                             const float* wrist3, const float* target3,
                             float* solved_elbow3, float* solved_wrist3);
 
+    // When `target` is past the arm's reach: how far to slide the shoulder
+    // toward it (at most 12% of the arm, written to slide3) and how much to
+    // lengthen both bones (1 .. max_stretch) so the wrist gets there. Zero
+    // and 1 when it is in reach or max_stretch is 1.
+    void arm_reach_extension(const float* shoulder3, float upper_length,
+                             float lower_length, const float* target3,
+                             float max_stretch, float* slide3, float* stretch);
+    // Scale by `factor` along `axis3` (any length), through `origin3`.
+    Mat4 stretch_along(const float* axis3, float factor, const float* origin3);
+
     // The shortest rigid rotation from identity to `rotation`, scaled by a
     // fraction. Used by the gameplay HUD to retain a small, comfortable part
     // of the current head angle without temporal smoothing or drift.
     Mat4 rotation_fraction(const Mat4& rotation, float fraction);
+
+    // The gameplay HUD's lazy follow (from Underworld's [hud] follow_degrees).
+    // The HUD keeps a direction (yaw_of's heading, pitch from view column 2)
+    // and stays there while the gaze is within limit_radians of it, then eases
+    // back onto the gaze. Once the head has held still for a second, a HUD
+    // left off to one side also glides back.
+    struct HudFollow
+    {
+        float yaw = 0.0f, pitch = 0.0f;
+        float head_yaw = 0.0f, head_pitch = 0.0f;
+        float still_seconds = 0.0f;
+        bool placed = false;
+        bool moving = false;
+    };
+    void hud_follow_step(HudFollow& follow, const Mat4& head_view_rotation,
+                         float dt_seconds, float limit_radians);
+    // The rotation for reproject_ndc_to_world_locked that puts the HUD at the
+    // kept direction, level. Identity when the head looks along it, level.
+    Mat4 hud_follow_relative(const HudFollow& follow,
+                             const Mat4& head_view_rotation);
 
     // Strip a heading out of a view matrix, keeping pitch and roll. Used
     // when the game camera has been given the yaw and the projection must

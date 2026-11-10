@@ -977,7 +977,7 @@ namespace trlvr
         {
             if (!g_first_person_active || laras_long_gun_held())
                 return false;
-            if (config().immersive_controls)
+            if (config().gesture_controls)
                 return vr_input_holster_hand_drawn(true) &&
                        vr_input_holster_hand_drawn(false);
             // The combat state is never zero (0x23/0x24/0x2D walking,
@@ -990,7 +990,7 @@ namespace trlvr
         // drawn, where it is that pistol's hand.
         bool aim_hand_left()
         {
-            if (config().single_pistols && config().immersive_controls &&
+            if (config().single_pistols && config().gesture_controls &&
                 g_first_person_active && !laras_long_gun_held())
             {
                 const bool l = vr_input_holster_hand_drawn(true);
@@ -1861,7 +1861,7 @@ namespace trlvr
             // it is drawn AND its own trigger is held; with one such pistol
             // every other request fires from it (half rate), with two the
             // retail alternation stands.
-            if (config().single_pistols && config().immersive_controls &&
+            if (config().single_pistols && config().gesture_controls &&
                 g_first_person_active)
             {
                 const int side = pistol_side(weapon);
@@ -3658,7 +3658,7 @@ namespace trlvr
                         ++g_auto_secure_pulses;
                     }
                 }
-                if (traversal.prompt && config().immersive_controls)
+                if (traversal.prompt && config().gesture_controls)
                 {
                     // The retail prompt (a giant glyph at the player's face
                     // that no draw hook reaches) is replaced by the mod's
@@ -5403,7 +5403,7 @@ namespace trlvr
             if (g_bike.frame == g_present_count)
                 return;
             g_bike.frame = g_present_count;
-            const bool riding = config().immersive_controls &&
+            const bool riding = config().hands_on_controllers &&
                 config().bike_handlebars > 0 && g_first_person_active &&
                 lara_riding_vehicle();
             if (riding != g_bike.riding)
@@ -5646,7 +5646,7 @@ namespace trlvr
                                      const Mat4& controller)
         {
             // Immersive controls off: her animated hands, untracked.
-            if (!config().immersive_controls)
+            if (!config().hands_on_controllers)
                 return Mat4::identity();
             // On the handlebar: her hand on the bar (the bar pose learned
             // while she was not shooting).
@@ -5879,14 +5879,14 @@ namespace trlvr
             // On the motorbike retail shoots one pistol (her left); in VR
             // it is the main hand's, whichever hand drew it, and the off
             // hand stays free for the handlebar (user 2026-10-12).
-            if (config().immersive_controls && g_bike.riding)
+            if (config().gesture_controls && g_bike.riding)
             {
                 const int main = config().left_handed ? 0 : 1;
                 return hand == main &&
                     (vr_input_holster_hand_drawn(true) ||
                      vr_input_holster_hand_drawn(false));
             }
-            if (config().immersive_controls)
+            if (config().gesture_controls)
                 return vr_input_holster_hand_drawn(hand == 0);
             return retail_weapons_out();
         }
@@ -5910,12 +5910,12 @@ namespace trlvr
             const bool long_gun_out = laras_long_gun_held();
             if (link_marker == 4 &&
                 weapon_is_pistol(name) &&
-                config().immersive_controls &&
+                config().gesture_controls &&
                 (!vr_input_holster_hand_drawn(true) || long_gun_out))
                 gear = 0;
             else if (link_marker == 6 &&
                      weapon_is_pistol(name) &&
-                     config().immersive_controls &&
+                     config().gesture_controls &&
                      (!vr_input_holster_hand_drawn(false) || long_gun_out))
                 gear = 1;
             else if ((link_marker == 9 ||
@@ -6405,7 +6405,7 @@ namespace trlvr
                        wrist * first_person_hand_delta(side, wrist,
                                                        controller);
             }
-            else if (config().single_pistols && config().immersive_controls)
+            else if (config().single_pistols && config().gesture_controls)
                 root = translation(0.0f, 0.0f, -100000.0f); // out of sight
             else
                 return;
@@ -6519,7 +6519,7 @@ namespace trlvr
             g_build_transforms(instance);
             // Immersive controls off: guns stay where her animation holds
             // them (the drawn copy is the gameplay copy).
-            if (!config().immersive_controls)
+            if (!config().hands_on_controllers)
                 return;
             if (!g_first_person_active || !g_first_person_instance ||
                 !instance || instance == g_first_person_instance ||
@@ -6792,7 +6792,7 @@ namespace trlvr
             // Immersive controls off: her hands are her animated ones, so
             // her guns are drawn where the game holds them (user
             // 2026-10-12: they did not show in her hands).
-            if (!config().immersive_controls)
+            if (!config().hands_on_controllers)
                 return false;
             // Evidence for how each weapon is attached, once per name and
             // drawn state: parent (Lara or not), link bone/marker, and its
@@ -8698,39 +8698,78 @@ namespace trlvr
                     out[0] = out[1] = 0.0f;
                 float hint[3] = { 0.6f * out[0], 0.6f * out[1], -1.0f };
                 normalise3(hint);
+                // A controller past her reach: the hand is drawn on it
+                // regardless, so without this the whole gap opened at the
+                // wrist. Reach from the shoulder a little, then lengthen
+                // both arm bones evenly.
+                float slide[3], stretch = 1.0f;
+                arm_reach_extension(S, l1, l2, target,
+                                    config().first_person_arm_stretch,
+                                    slide, &stretch);
+                float Sp[3];
+                for (int k = 0; k < 3; ++k)
+                    Sp[k] = S[k] + slide[k];
                 float fake_e[3], fake_w[3], solved_e[3], solved_w[3];
                 for (int k = 0; k < 3; ++k)
                 {
-                    fake_e[k] = S[k] + hint[k] * l1;
-                    fake_w[k] = fake_e[k] + hint[k] * l2;
+                    fake_e[k] = Sp[k] + hint[k] * l1 * stretch;
+                    fake_w[k] = fake_e[k] + hint[k] * l2 * stretch;
                 }
-                if (!solve_two_bone_arm(S, fake_e, fake_w, target, solved_e,
+                if (!solve_two_bone_arm(Sp, fake_e, fake_w, target, solved_e,
                                         solved_w))
                     continue;
+                // The turns are worked out at the bones' own lengths; the
+                // lengthening goes on last.
                 float from1[3], to1[3];
                 for (int k = 0; k < 3; ++k)
                 {
                     from1[k] = E[k] - S[k];
-                    to1[k] = solved_e[k] - S[k];
+                    to1[k] = (solved_e[k] - Sp[k]) / stretch;
                 }
-                upper[hand] = translation(-S[0], -S[1], -S[2]) *
-                              rotation_between(from1, to1) *
-                              translation(S[0], S[1], S[2]);
+                const Mat4 upper_rigid =
+                    translation(slide[0], slide[1], slide[2]) *
+                    translation(-Sp[0], -Sp[1], -Sp[2]) *
+                    rotation_between(from1, to1) *
+                    translation(Sp[0], Sp[1], Sp[2]);
+                float e1[3];
+                for (int k = 0; k < 3; ++k)
+                    e1[k] = E[0] * upper_rigid.m[0][k] +
+                            E[1] * upper_rigid.m[1][k] +
+                            E[2] * upper_rigid.m[2][k] + upper_rigid.m[3][k];
+                const Mat4 forearm_base = upper_rigid *
+                    translation(solved_e[0] - e1[0], solved_e[1] - e1[1],
+                                solved_e[2] - e1[2]);
                 float w1[3];
                 for (int k = 0; k < 3; ++k)
-                    w1[k] = W[0] * upper[hand].m[0][k] +
-                            W[1] * upper[hand].m[1][k] +
-                            W[2] * upper[hand].m[2][k] + upper[hand].m[3][k];
+                    w1[k] = W[0] * forearm_base.m[0][k] +
+                            W[1] * forearm_base.m[1][k] +
+                            W[2] * forearm_base.m[2][k] + forearm_base.m[3][k];
                 float from2[3], to2[3];
                 for (int k = 0; k < 3; ++k)
                 {
                     from2[k] = w1[k] - solved_e[k];
-                    to2[k] = solved_w[k] - solved_e[k];
+                    to2[k] = (solved_w[k] - solved_e[k]) / stretch;
                 }
-                forearm[hand] = upper[hand] *
+                upper[hand] = upper_rigid;
+                forearm[hand] = forearm_base *
                     translation(-solved_e[0], -solved_e[1], -solved_e[2]) *
                     rotation_between(from2, to2) *
                     translation(solved_e[0], solved_e[1], solved_e[2]);
+                if (stretch > 1.0001f)
+                {
+                    upper[hand] = upper[hand] *
+                        stretch_along(to1, stretch, Sp);
+                    forearm[hand] = forearm[hand] *
+                        stretch_along(to2, stretch, solved_e);
+                    static bool stretch_logged = false;
+                    if (!stretch_logged)
+                    {
+                        stretch_logged = true;
+                        log("first-person: arm lengthened to reach the "
+                            "controller (x%.2f, limit x%.2f)", stretch,
+                            config().first_person_arm_stretch);
+                    }
+                }
                 arm_ok[hand] = true;
             }
 
@@ -10703,7 +10742,7 @@ namespace trlvr
 
         bool third_person_gear_hud_hidden()
         {
-            return config().immersive_controls &&
+            return config().immersive_any() &&
                    !config().gear_menu_radial && !g_first_person_active &&
                    !g_first_person_instance;
         }
@@ -10913,7 +10952,7 @@ namespace trlvr
                                      int a4, int a5, void* model, float a7,
                                      void* colour, void* transform)
         {
-            if (!config().immersive_controls || g_first_person_active ||
+            if (!config().hands_on_controllers || g_first_person_active ||
                 g_first_person_instance || !instance)
                 return;
             bool cinematic = false;
@@ -14866,7 +14905,7 @@ namespace trlvr
             const Config& cfg = config();
             const float metre = cfg.world_scale;
             // Board view's god hands, she is free.
-            const bool allowed = cfg.body_push && cfg.immersive_controls &&
+            const bool allowed = cfg.body_push && cfg.hands_on_controllers &&
                 cfg.board_god_hand && camera_third_person_mode() == 2 &&
                 camera_world_scale_factor() >= 1.0f && g_pluck.hand < 0 &&
                 g_pluck.palm < 0 && !g_pluck.god.flying &&
@@ -15654,7 +15693,7 @@ namespace trlvr
         // Called while Lara's first-person model is drawn.
         void pouch_items_draw(int a2, float a3, int a4, int a5)
         {
-            if (!config().immersive_controls || !g_draw_instance)
+            if (!config().gesture_controls || !g_draw_instance)
                 return;
             for (int item = 0; item < 2; ++item)
             {
@@ -15783,7 +15822,7 @@ namespace trlvr
             // 2026-10-12: hands / body did not show): her own animated
             // hands and body are drawn (first_person_hand_delta is the
             // identity), and lost controller tracking does not hide them.
-            const bool animated_hands = !config().immersive_controls;
+            const bool animated_hands = !config().hands_on_controllers;
             Mat4 controllers[2];
             if (animated_hands)
             {
@@ -15980,7 +16019,7 @@ namespace trlvr
             const Mat4 right_wrist = matrix_from_floats(
                 matrices + g_first_person_wrist_segment[1] * 16);
             HandholdBox box{};
-            box.valid = config().immersive_controls && scale > 0.0f &&
+            box.valid = config().gesture_controls && scale > 0.0f &&
                 (g_first_person_ledge_hanging ||
                  g_first_person_bar_hanging ||
                  g_first_person_vine_climbing);
@@ -16672,7 +16711,7 @@ namespace trlvr
             if (!g_hpole_desired_direction)
                 return;
             g_hpole_desired_direction(pole);
-            if (!config().immersive_controls || !g_first_person_active ||
+            if (!config().gesture_controls || !g_first_person_active ||
                 !g_first_person_bar_hanging ||
                 !g_first_person_bar_axis_valid ||
                 !(g_ledge_hand_grip[0].held || g_ledge_hand_grip[1].held))
@@ -16782,7 +16821,7 @@ namespace trlvr
                                                        void* message)
         {
             void* result = g_wall_vert_pole_message(self, player, message);
-            if (!config().immersive_controls || !g_first_person_active)
+            if (!config().gesture_controls || !g_first_person_active)
                 return result;
             __try
             {
@@ -16889,7 +16928,7 @@ namespace trlvr
         float __cdecl detour_calc_jump_facing()
         {
             const float native = g_calc_jump_facing();
-            if (!config().immersive_controls || !g_first_person_active)
+            if (!config().gesture_controls || !g_first_person_active)
                 return native;
             __try
             {
@@ -20960,7 +20999,7 @@ namespace trlvr
         void* lara = nullptr;
         bool ok = active && factor >= 1.0f && god_hand_scale() &&
                   !g_first_person_active &&
-                  config().immersive_controls && config().board_god_hand;
+                  config().hands_on_controllers && config().board_god_hand;
         __try
         {
             lara = *reinterpret_cast<void**>(kPlayerInstance);
@@ -21022,7 +21061,7 @@ namespace trlvr
             // Board view without the pick-up (board_god_hand off): a hand
             // near or on her still keeps its grip and trigger from the game.
             bool board = active && lara && god_hand_scale() &&
-                !g_first_person_active && config().immersive_controls;
+                !g_first_person_active && config().hands_on_controllers;
             for (int k = 0; k < 3; ++k)
                 board = board && std::isfinite(g_pluck.root[k]);
             if (board)
@@ -21921,7 +21960,7 @@ namespace trlvr
             }
         }
         const bool board = active && god_hand_scale() &&
-            !g_first_person_active && config().immersive_controls &&
+            !g_first_person_active && config().hands_on_controllers &&
             config().board_god_hand && g_pluck.hand != 0 &&
             g_torso.god.hand != 0;
         if (!board)
@@ -22905,7 +22944,7 @@ namespace trlvr
         const bool first_person = camera_first_person_active();
         // Retail combat state can outlive the holster (it only gates its
         // own reticle). With immersive holsters, the drawn guns decide.
-        if (first_person && config().immersive_controls &&
+        if (first_person && config().gesture_controls &&
             !vr_input_holster_combat_held())
             return false;
         const DWORD now = GetTickCount();
@@ -22990,7 +23029,7 @@ namespace trlvr
     bool camera_first_person_secure_grab_point(float centre[3])
     {
         if (!centre || !g_first_person_active ||
-            !config().immersive_controls || !g_first_person_grip_precarious ||
+            !config().gesture_controls || !g_first_person_grip_precarious ||
             !g_grab_zone_centre_valid ||
             g_ledge_hand_grip[0].held || g_ledge_hand_grip[1].held)
             return false;
@@ -23001,7 +23040,7 @@ namespace trlvr
     bool camera_first_person_grab_box(float corners[8][3], int* state)
     {
         if (!corners || !state || !g_first_person_active ||
-            !config().immersive_controls ||
+            !config().gesture_controls ||
             !(g_first_person_ledge_hanging || g_first_person_bar_hanging ||
               g_first_person_vine_climbing))
             return false;
@@ -23677,7 +23716,7 @@ namespace trlvr
 
         // Third-person immersive draws controller hands from this hook too.
         if (config().first_person_tracked_hands ||
-            config().immersive_controls)
+            config().immersive_any())
         {
             tramp = nullptr;
             if (hook_install((void*)kDrawInstance,
@@ -23687,7 +23726,7 @@ namespace trlvr
             {
                 g_draw_instance = (PFN_DrawInstance)tramp;
             }
-            if (config().immersive_controls)
+            if (config().hands_on_controllers)
             {
                 // Bike::Process: push ebp / mov ebp, esp / and esp, -16.
                 static const unsigned char kBikeProcessSig[] = {
@@ -23736,7 +23775,7 @@ namespace trlvr
                 g_process_movement =
                     reinterpret_cast<PFN_ProcessMovement>(tramp);
 
-            if (config().immersive_controls)
+            if (config().gesture_controls)
             {
                 tramp = nullptr;
                 if (hook_install((void*)kHPoleDesiredDirection,
@@ -23798,7 +23837,7 @@ namespace trlvr
                     reinterpret_cast<PFN_DrawCombatReticle>(tramp);
         }
 
-        if (config().immersive_controls)
+        if (config().gesture_controls)
         {
             tramp = nullptr;
             if (hook_install((void*)kPlayerInvEndCombatMode,
@@ -23809,7 +23848,7 @@ namespace trlvr
                 g_end_combat = reinterpret_cast<PFN_EndCombat>(tramp);
         }
 
-        if (config().immersive_controls)
+        if (config().gesture_controls)
         {
             tramp = nullptr;
             if (hook_install((void*)kUIFadeGroupTrigger,

@@ -43,6 +43,7 @@ namespace trlvr
             { L"vr", L"picture_brightness", L"0" },
             { L"vr", L"picture_contrast", L"1" },
             { L"vr", L"picture_follow_game", L"1" },
+            { L"vr", L"movie_widen_4x3", L"1" },
             { L"vr", L"body_soft_sway_hz", L"3" },
             { L"vr", L"body_soft_damping", L"0.53" },
             { L"vr", L"body_soft_stretch", L"0.35" },
@@ -64,6 +65,7 @@ namespace trlvr
             { L"vr", L"camera_shake", L"0" },
             { L"vr", L"first_person", L"0" },
             { L"vr", L"first_person_tracked_hands", L"1" },
+            { L"vr", L"first_person_arm_stretch", L"1.4" },
             { L"vr", L"first_person_body", L"hands" },
             { L"vr", L"hand_model", L"2" },
             { L"vr", L"first_person_mantle_smoothing", L"1" },
@@ -212,6 +214,9 @@ namespace trlvr
             { L"vr", L"hide_gameplay_hud", L"0" },
             { L"vr", L"tp_scale_control", L"stick" },
             { L"vr", L"ui_scale", L"0.6" },
+            { L"vr", L"hud_scale", L"0.6" },
+            { L"vr", L"binocular_scale", L"0.6" },
+            { L"vr", L"hud_follow_degrees", L"20" },
             { L"vr", L"hud_follow", L"0.85" },
             { L"vr", L"overlay_vr_distance", L"1.0" },
             { L"vr", L"overlay_vr_width_degrees", L"38" },
@@ -221,7 +226,6 @@ namespace trlvr
             { L"vr", L"cull_fov_degrees", L"120" },
 
             { L"controls", L"controllers", L"1" },
-            { L"controls", L"immersive_controls", L"1" },
             { L"controls", L"left_handed", L"0" },
             { L"controls", L"two_handed_guns", L"1" },
             { L"controls", L"pistol_mode", L"akimbo" },
@@ -297,6 +301,9 @@ namespace trlvr
             L"; 0 = use the runtime's own OpenXR grip pose (Quest / Virtual Desktop).\r\n"
             L"; 1 = convert it to SteamVR's grip pose (Reverb G2 and Touch only).\r\n"
             L"xr_grip_match_openvr = 0\r\n"
+            L"; 1 = movies (and menus over a movie backdrop) drawn at 4:3; 0 = they\r\n"
+            L"; fill the headset view, as before 1.1.0.\r\n"
+            L"movie_widen_4x3 = 1\r\n"
             L"stereo = 1\r\n"
             L"; Both eyes in one game frame. Keep Depth of Field and Fullscreen Effects off.\r\n"
             L"stereo_same_frame = 1\r\n"
@@ -320,6 +327,9 @@ namespace trlvr
             L"first_person = 0\r\n"
             L"; Experimental hands cut from Lara's source mesh at controller poses.\r\n"
             L"first_person_tracked_hands = 1\r\n"
+            L"; Full body: how much her arms may lengthen to reach a controller past\r\n"
+            L"; her reach (with a small shoulder reach first). 1 = off. 1 to 2.\r\n"
+            L"first_person_arm_stretch = 1.4\r\n"
             L"; hands = only Lara's hands are drawn in first person; full = her\r\n"
             L"; whole body (head removed), arms bent to reach the controllers.\r\n"
             L"first_person_body = hands\r\n"
@@ -686,8 +696,16 @@ namespace trlvr
             L"; Third-person scale and zoom: stick (right thumbstick only), sliders\r\n"
             L"; (the palm sliders only) or both.\r\n"
             L"tp_scale_control = stick\r\n"
+            L"; Sizes (0.1 to 2): menus, the gameplay HUD, the binocular viewfinder.\r\n"
             L"ui_scale = 0.6\r\n"
-            L"; 1.0 is rigidly head-locked; 0.85 gives the gameplay HUD gentle drag.\r\n"
+            L"hud_scale = 0.6\r\n"
+            L"binocular_scale = 0.6\r\n"
+            L"; The gameplay HUD stays put while you look within this many degrees\r\n"
+            L"; of it, then glides back in front of you. 0 to 90; 0 = use hud_follow.\r\n"
+            L"; The binocular viewfinder always stays fixed to your head.\r\n"
+            L"hud_follow_degrees = 20\r\n"
+            L"; Only with hud_follow_degrees = 0: 1.0 is rigidly head-locked; 0.85\r\n"
+            L"; gives the gameplay HUD gentle drag.\r\n"
             L"hud_follow = 0.85\r\n"
             L"\r\n"
             L"; The settings window (Insert) in the headset: a panel placed in front\r\n"
@@ -710,19 +728,26 @@ namespace trlvr
             L"\r\n"
             L"[controls]\r\n"
             L"controllers = 1\r\n"
-            L"; 1 enables body-relative gestures. Chest + left grip toggles the personal light.\r\n"
-            L"immersive_controls = 1\r\n"
+            L"; live: 1 = Lara's hands and what they hold follow your controllers, in\r\n"
+            L"; every view. God mode, body push and the handlebars need it.\r\n"
+            L"hands_on_controllers = 1\r\n"
+            L"; live: 1 = first-person body gestures: holsters, belt and pouch items,\r\n"
+            L"; chest + left grip for the light, grabbing ledges and poles.\r\n"
+            L"gesture_controls = 1\r\n"
             L"; live: controller = the sticks do everything: right stick click\r\n"
             L"; recentres, hold switches view, up/down zooms, click-drag sets height\r\n"
             L"; or scale. interaction = upstream's hand-based layout: right stick\r\n"
             L"; click switches weapon, long press switches view; the 3D gear cross\r\n"
             L"; and palm sliders. The Controls menu also sets gear_menu and\r\n"
             L"; tp_scale_control when you change this; those can then be fine-tuned.\r\n"
+            L"; underworld = the Underworld mod's layout: left trigger locks on, right\r\n"
+            L"; grip interacts, X recentres (double click: PDA), the radial gear menu,\r\n"
+            L"; right stick click is accurate aim, both stick clicks recentre.\r\n"
             L"control_scheme = controller\r\n"
             L"; Gear in immersive third person: cross (the 3D gear cross by your\r\n"
             L"; hip) or radial (hold the left stick in, then push it toward the\r\n"
             L"; item: up medipack, right binoculars, down weapon, left light).\r\n"
-            L"; With immersive_controls = 0 the radial menu is always used.\r\n"
+            L"; With both of the settings above off the radial menu is always used.\r\n"
             L"gear_menu = radial\r\n"
             L"; 1 = a light push of the move stick walks (holds the game's Walk\r\n"
             L"; key), a full push runs. walk_key = shift or ctrl.\r\n"
@@ -962,9 +987,10 @@ namespace trlvr
     void config_set_control_scheme(int scheme)
     {
         const bool interaction = scheme == 1;
-        g_config.control_scheme = interaction ? 1 : 0;
+        g_config.control_scheme = scheme == 1 || scheme == 2 ? scheme : 0;
         config_save_setting(L"controls", L"control_scheme",
-                            interaction ? L"interaction" : L"controller");
+                            interaction ? L"interaction"
+                            : scheme == 2 ? L"underworld" : L"controller");
         g_config.gear_menu_radial = !interaction;
         config_save_setting(L"controls", L"gear_menu",
                             interaction ? L"cross" : L"radial");
@@ -1215,6 +1241,8 @@ namespace trlvr
             ? (value < 0.5f ? 0.5f : value > 2.0f ? 2.0f : value) : 1.0f;
         g_config.picture_follow_game =
             read_bool(L"vr", L"picture_follow_game", true, path);
+        g_config.movie_widen_4x3 =
+            read_bool(L"vr", L"movie_widen_4x3", true, path);
         value = read_float(L"vr", L"body_soft_stretch", L"0.35", path);
         g_config.body_soft_stretch = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value) : 0.35f;
@@ -1460,10 +1488,20 @@ namespace trlvr
             GetPrivateProfileStringW(L"controls", L"control_scheme",
                                      L"controller", text, 32, path);
             g_config.control_scheme =
-                _wcsicmp(text, L"interaction") == 0 ? 1 : 0;
+                _wcsicmp(text, L"interaction") == 0 ? 1
+                : _wcsicmp(text, L"underworld") == 0 ? 2 : 0;
         }
         value = read_float(L"vr", L"ui_scale", L"0.6", path);
         g_config.ui_scale = value >= 0.1f && value <= 2.0f ? value : 0.6f;
+        value = read_float(L"vr", L"first_person_arm_stretch", L"1.4", path);
+        g_config.first_person_arm_stretch =
+            value >= 1.0f && value <= 2.0f ? value : 1.4f;
+        value = read_float(L"vr", L"hud_scale", L"0.6", path);
+        g_config.hud_scale = value >= 0.1f && value <= 2.0f ? value : 0.6f;
+        value = read_float(L"vr", L"binocular_scale", L"0.6", path);
+        g_config.binocular_scale = value >= 0.1f && value <= 2.0f ? value : 0.6f;
+        value = read_float(L"vr", L"hud_follow_degrees", L"20", path);
+        g_config.hud_follow_degrees = value >= 0.0f && value <= 90.0f ? value : 20.0f;
         value = read_float(L"vr", L"hud_follow", L"0.85", path);
         g_config.hud_follow = value >= 0.0f && value <= 1.0f ? value : 0.85f;
         {
@@ -1495,8 +1533,16 @@ namespace trlvr
             read_bool(L"vr", L"view_prescale_fix", true, path);
 
         g_config.controllers = read_bool(L"controls", L"controllers", true, path);
-        g_config.immersive_controls =
-            read_bool(L"controls", L"immersive_controls", true, path);
+        {
+            // Deliberately not in kDefaults: writing the new keys' defaults
+            // into an older INI would override its immersive_controls.
+            const bool legacy =
+                read_bool(L"controls", L"immersive_controls", true, path);
+            g_config.hands_on_controllers =
+                read_bool(L"controls", L"hands_on_controllers", legacy, path);
+            g_config.gesture_controls =
+                read_bool(L"controls", L"gesture_controls", legacy, path);
+        }
         {
             wchar_t menu[32] = {};
             GetPrivateProfileStringW(L"controls", L"gear_menu", L"radial",

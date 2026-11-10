@@ -90,7 +90,8 @@ place under both. The main menu shows the version and the runtime in use.
 - **Picture controls**: brightness and contrast for the headset image, which
   follow the game's own brightness setting by default.
 - **Movies at their real shape**: the 4:3 movies are no longer squeezed on the
-  movie screen.
+  movie screen. `[vr] movie_widen_4x3 = 0` (System tab: "Movies and their
+  menus at 4:3") turns this off and lets them fill the view again.
 
 
 ### Third person (default)
@@ -308,6 +309,22 @@ Index, WMR and per-controller details are in
 [`release/VR CONTROLLER BINDINGS.txt`](release/VR%20CONTROLLER%20BINDINGS.txt).
 The keyboard keeps working alongside the controllers, and **F1** recentres.
 
+### Underworld control scheme
+
+`control_scheme = underworld` (Settings > Controls) matches the Underworld VR
+mod. Differences from the table above:
+
+| Control | Action |
+|---|---|
+| Left trigger | Combat lock-on |
+| Right grip | Action, interact |
+| Hold the left stick in and push it | Gear: up medipack, right binoculars, down weapon, left light |
+| X | Recentre (double click: PDA) |
+| Right stick click | Accurate aim (hold: switch view) |
+| Both stick clicks | Recentre |
+
+First-person gestures, when on, replace these as they do the other layouts.
+
 ### Immersive controls
 
 With `immersive_controls = 1` the grips become your hands. In first person:
@@ -371,6 +388,7 @@ first and third person at any time in gameplay.
 | `first_person` | `0` | First-person view through Lara's eyes |
 | `first_person_tracked_hands` | `1` | Lara's hands follow your controllers (first person) |
 | `immersive_controls` | `1` | Hand gestures: holsters, belt gear, pouches, hand climbing, gear menu; `0` = the classic button layout |
+| `hands_on_controllers` / `gesture_controls` | `1` | These two override `immersive_controls` when present: Lara's hands follow your controllers (needed for god mode), and first-person body gestures |
 | `first_person_body` | `hands` | `full` draws Lara's whole body below the view |
 | `third_person_mode` | `all` | `classic`, `shoulder` or `board`; `all` makes the right-stick long press cycle classic → shoulder → board → first person |
 | `left_handed` | `0` | Main hand on the left; swaps the triggers' roles |
@@ -402,8 +420,12 @@ first and third person at any time in gameplay.
 | `camera_collision` | `1` | Third-person view stops short of walls |
 | `wall_touch` | `1` | Third person: Lara runs her hand along walls she walks beside |
 | `gear_menu` | `radial` | Immersive third person: `radial` = click the left stick and push towards an item; `cross` = the 3D gear cross |
-| `ui_scale` | `0.6` | Size of the HUD and menus |
-| `hud_follow` | `0.85` | How closely the HUD follows your head (1 = locked) |
+| `first_person_arm_stretch` | `1.4` | Full-body first person: how much Lara's arms may lengthen to reach your controllers (1 = off) |
+| `ui_scale` | `0.6` | Size of menus, loading screens and movies |
+| `hud_scale` | `0.6` | Size of the gameplay HUD |
+| `binocular_scale` | `0.6` | Size of the binocular viewfinder |
+| `hud_follow_degrees` | `20` | The gameplay HUD stays put while you look within this many degrees of it, then glides back in front (0 = use `hud_follow`) |
+| `hud_follow` | `0.85` | With `hud_follow_degrees = 0`: how closely the HUD follows your head (1 = locked) |
 | `fsaa` | `on` | The game's anti-aliasing: `on`, `off` or `game` (the Setup dialog's choice) |
 | `msaa` | `4` | Anti-aliasing strength while FSAA is on: `0` (off), `2`, `4` or `8` |
 | `fullscreen_effects` | `off` | The game's glow/bloom: `on`, `off` or `game` |

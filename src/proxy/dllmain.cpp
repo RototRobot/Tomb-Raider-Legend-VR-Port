@@ -181,9 +181,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
                 "drives_position=%d",
                 config().head_position, config().head_position_scale,
                 config().hmd_drives_position);
-            log("config: [controls] controllers=%d immersive_controls=%d "
+            log("config: [controls] controllers=%d immersive_any=%d "
                 "look_speed=%.0f look_vertical=%d",
-                config().controllers, config().immersive_controls,
+                config().controllers, config().immersive_any(),
                 config().look_speed, config().look_vertical);
         }
         hook_apply_settings_overrides();

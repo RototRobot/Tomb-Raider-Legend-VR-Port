@@ -147,7 +147,7 @@ namespace trlvr
         void draw_holster_debug(IDirect3DSurface9* back)
         {
             const VrHolsterZone& zone = tune_holster_zone();
-            if (!zone.debug_draw || !config().immersive_controls ||
+            if (!zone.debug_draw || !config().gesture_controls ||
                 !camera_first_person_active() || !stereo_same_frame_active())
                 return;
             D3DSURFACE_DESC desc{};
@@ -352,7 +352,7 @@ namespace trlvr
         void draw_handhold_debug(IDirect3DSurface9* back)
         {
             if (!tune_ledge_grab_debug_draw() ||
-                !config().immersive_controls ||
+                !config().gesture_controls ||
                 !camera_first_person_active() || !stereo_same_frame_active())
                 return;
             D3DSURFACE_DESC desc{};
@@ -4208,7 +4208,7 @@ namespace trlvr
         void draw_pouch_items(IDirect3DSurface9* back)
         {
             if (!stereo_same_frame_active() || !camera_first_person_active() ||
-                !config().immersive_controls)
+                !config().gesture_controls)
                 return;
             D3DSURFACE_DESC desc{};
             if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
