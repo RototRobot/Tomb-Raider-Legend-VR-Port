@@ -16,6 +16,7 @@
 #include "imgui_overlay.h"
 #include "../vr/reflection_stereo.h"
 #include "../vr/water_waves.h"
+#include "../vr/env_reflect.h"
 #include "msaa_cap.h"
 #include "gpu_profile.h"
 #include "overlay.h"
@@ -203,6 +204,18 @@ namespace trlvr
             PerfCpuScope perf_scope(PerfDrawCalls);
             // The menu stack is read once for the whole draw, both eyes.
             const UiStateScope ui_state;
+            // Camera-synced reflections: the game camera's axes without
+            // the head's turn, for this draw only (env_reflect.h).
+            struct EnvReflectScope
+            {
+                IDirect3DDevice9* device;
+                bool applied;
+                ~EnvReflectScope()
+                {
+                    if (applied)
+                        env_reflect_after_draw(device);
+                }
+            } env_reflect_scope{ _device, env_reflect_before_draw(_device) };
             camera_first_person_note_gpu_draw();
             // The theatre and diorama surrounds are drawn from here on the
             // real device, against the game's viewport and constants; the
@@ -471,8 +484,8 @@ namespace trlvr
         STDMETHOD(GetVertexDeclaration)(THIS_ IDirect3DVertexDeclaration9** ppDecl) { return _device->GetVertexDeclaration(ppDecl); }
         STDMETHOD(SetFVF)(THIS_ DWORD FVF) { imgui_state().fvf = FVF; return _device->SetFVF(FVF); }
         STDMETHOD(GetFVF)(THIS_ DWORD* pFVF) { return _device->GetFVF(pFVF); }
-        STDMETHOD(CreateVertexShader)(THIS_ CONST DWORD* pFunction, IDirect3DVertexShader9** ppShader) { return _device->CreateVertexShader(pFunction, ppShader); }
-        STDMETHOD(SetVertexShader)(THIS_ IDirect3DVertexShader9* pShader) { imgui_state().vertex_shader = pShader != nullptr; return _device->SetVertexShader(pShader); }
+        STDMETHOD(CreateVertexShader)(THIS_ CONST DWORD* pFunction, IDirect3DVertexShader9** ppShader) { const HRESULT hr = _device->CreateVertexShader(pFunction, ppShader); if (SUCCEEDED(hr) && ppShader) env_reflect_shader_created(*ppShader, pFunction); return hr; }
+        STDMETHOD(SetVertexShader)(THIS_ IDirect3DVertexShader9* pShader) { imgui_state().vertex_shader = pShader != nullptr; env_reflect_shader_set(pShader); return _device->SetVertexShader(pShader); }
         STDMETHOD(GetVertexShader)(THIS_ IDirect3DVertexShader9** ppShader) { return _device->GetVertexShader(ppShader); }
         STDMETHOD(GetVertexShaderConstantF)(THIS_ UINT StartRegister, float* pConstantData, UINT Vector4fCount) { stereo_restore_game_state(_device); return _device->GetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount); }
         STDMETHOD(SetVertexShaderConstantI)(THIS_ UINT StartRegister, CONST int* pConstantData, UINT Vector4iCount) { return _device->SetVertexShaderConstantI(StartRegister, pConstantData, Vector4iCount); }

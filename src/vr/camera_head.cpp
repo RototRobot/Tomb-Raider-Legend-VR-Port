@@ -17541,6 +17541,10 @@ namespace trlvr
         }
 
         float g_view_prescale[2] = { 1.0f, 1.0f };
+        // The head transform last composed onto the main camera's view
+        // (head pose and any recentre glide), for camera_head_view_applied.
+        Mat4 g_applied_head_view = Mat4::identity();
+        bool g_applied_head_view_valid = false;
 
         // Hardcore first person (a user's request, 2026-10-10): the view
         // turns with Lara's body -- back flips, side flips, spins -- not
@@ -18056,6 +18060,9 @@ namespace trlvr
                     {
                         g_glide.last = m;
                         g_glide.last_valid = true;
+                        g_applied_head_view =
+                            glide ? head_view * glide_k : head_view;
+                        g_applied_head_view_valid = true;
                     }
                 }
                 store_matrix(cam, targets[t], m);
@@ -20584,6 +20591,14 @@ namespace trlvr
     float camera_marker_depth()
     {
         return g_marker_depth;
+    }
+
+    bool camera_head_view_applied(Mat4* out)
+    {
+        if (!out || !g_applied_head_view_valid)
+            return false;
+        *out = g_applied_head_view;
+        return true;
     }
 
     float camera_world_scale_factor()

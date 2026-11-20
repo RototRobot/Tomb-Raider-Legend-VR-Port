@@ -182,6 +182,7 @@ namespace trlvr
                                                   CONST float* pConstantData,
                                                   UINT Vector4fCount)
     {
+        env_reflect_constants(StartRegister, pConstantData, Vector4fCount);
         // A same-frame stereo pass may have left its own c0..c3 on the
         // device. An upload that covers all four replaces them; one that
         // covers only some leaves the rest, which must be the game's.

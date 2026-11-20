@@ -7,6 +7,8 @@
 
 namespace trlvr
 {
+    struct Mat4;
+
     void camera_head_init();
 
     // Optional positional stereo multiplier for accurate aim. It defaults to
@@ -71,6 +73,11 @@ namespace trlvr
     // 1 normally; the tabletop factor (Lara's real height / board height)
     // while the board-game third-person camera is in use.
     float camera_world_scale_factor();
+    // The head transform last composed onto the main camera's view
+    // (world-to-view = game view * this, row vectors, camera space): what
+    // turns the game's own camera into the headset's. False before the
+    // first camera update.
+    bool camera_head_view_applied(Mat4* out);
     // Third-person scale and zoom (palm sliders, 2026-10-10), for the
     // current preset: scale = the world factor (1 = life size), zoom = the
     // preset's camera-distance multiplier. Available in third-person
