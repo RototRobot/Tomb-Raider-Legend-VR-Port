@@ -206,6 +206,11 @@ namespace trlvr
         // is the same for up/down. 0 = the old 12 cm leash.
         float board_leash = 0.35f;
         float board_leash_height = 0.1f;
+        // Board view heading (user 2026-11-12, as Underworld): 0 = the board
+        // keeps its own heading (right stick and recentre turn it, Lara
+        // never does) and her movement follows the headset; 1 = the board
+        // turns with the game's camera, which swings round behind Lara.
+        bool board_follow_lara = false;
         // God-hand pick-up (board mode with board_god_hand only). Zones are
         // metres at her size: head grip zone, claim zone (a hand this close
         // keeps its grip/trigger from the game) and arm grip zone (0 = no
@@ -348,6 +353,9 @@ namespace trlvr
         // Third-person camera collision: the board seat and the head-moved
         // eye stop short of geometry (0 = allow clipping into it).
         bool camera_collision = true;
+        // God mode (board view) only: the same, 0 = the board camera passes
+        // through walls (camera_collision still applies to the others).
+        bool board_camera_collision = true;
         // First person: bullets go exactly where the gun points (0 = keep
         // the game's random spread).
         bool first_person_no_spread = true;

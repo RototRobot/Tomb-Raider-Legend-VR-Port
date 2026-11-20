@@ -5125,7 +5125,9 @@ namespace trlvr
                         g_first_person_turn * 57.2957795f);
                 }
             }
-            if (camera_first_person_active())
+            // The board view with its own heading turns the same way
+            // (camera_head reads the turn as a delta).
+            if (camera_first_person_active() || camera_board_owns_heading())
             {
                 // Independent first-person heading. Letting the third-person
                 // camera own yaw made strafing and jumps swing the headset.

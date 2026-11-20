@@ -90,6 +90,9 @@ namespace trlvr
     // Reset view: the live third-person preset's zoom, side and seat height
     // back to defaults (scale kept). True when that preset is the board.
     bool camera_reset_view_adjust();
+    // Board view with its own heading (board_follow_lara off): the right
+    // stick turns the board instead of orbiting the game camera.
+    bool camera_board_owns_heading();
     // How much a drawn third-person hand's palm faces up (-2 unknown).
     float camera_palm_up(int hand);
     // A third-person hand's index fingertip as drawn (Lara's bone, or the

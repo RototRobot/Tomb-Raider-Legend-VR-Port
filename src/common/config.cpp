@@ -90,6 +90,7 @@ namespace trlvr
             { L"vr", L"board_god_hand", L"1" },
             { L"vr", L"board_leash", L"0.35" },
             { L"vr", L"board_leash_height", L"0.1" },
+            { L"vr", L"board_follow_lara", L"0" },
             { L"vr", L"god_head_zone", L"0.3" },
             { L"vr", L"god_claim_zone", L"0.6" },
             { L"vr", L"god_arm_zone", L"0.25" },
@@ -166,6 +167,7 @@ namespace trlvr
             { L"vr", L"body_rear_test_cm", L"0" },
             { L"vr", L"body_rear_dent", L"0.5" },
             { L"vr", L"camera_collision", L"1" },
+            { L"vr", L"board_camera_collision", L"1" },
             { L"vr", L"first_person_no_spread", L"1" },
             { L"vr", L"weapon_recoil", L"1.0" },
             { L"vr", L"weapon_haptics", L"1" },
@@ -399,6 +401,11 @@ namespace trlvr
             L"; live: board view, how far she can go up or down from the board's centre\r\n"
             L"; before its height follows, in table metres. 0 = at once. 0 .. 1.\r\n"
             L"board_leash_height = 0.1\r\n"
+            L"; live: board view heading. 0 = the board keeps its own heading (the\r\n"
+            L"; right stick and a recentre turn it, Lara never does) and the move\r\n"
+            L"; stick follows the headset; 1 = it turns with the game's camera,\r\n"
+            L"; which swings round behind Lara.\r\n"
+            L"board_follow_lara = 0\r\n"
             L"; live: god mode (board view with board_god_hand), the pick-up zone round\r\n"
             L"; her head, metres at her size. 0.05 .. 1.\r\n"
             L"god_head_zone = 0.3\r\n"
@@ -603,6 +610,9 @@ namespace trlvr
             L"; Third-person camera collision: the view stops short of rock\r\n"
             L"; and walls instead of passing into them (0 = allow clipping).\r\n"
             L"camera_collision = 1\r\n"
+            L"; God mode (board view) camera collision; 0 = the board camera\r\n"
+            L"; passes through walls. camera_collision = 0 turns it off too.\r\n"
+            L"board_camera_collision = 1\r\n"
             L"; First person: no random bullet spread -- shots go exactly where\r\n"
             L"; the gun points (0 = keep the game's spread).\r\n"
             L"first_person_no_spread = 1\r\n"
@@ -1207,6 +1217,8 @@ namespace trlvr
                 L"vr", L"board_god_hand", true, path);
             g_config.camera_collision = read_bool(
                 L"vr", L"camera_collision", true, path);
+            g_config.board_camera_collision = read_bool(
+                L"vr", L"board_camera_collision", true, path);
             g_config.first_person_no_spread = read_bool(
                 L"vr", L"first_person_no_spread", true, path);
         }
@@ -1270,6 +1282,7 @@ namespace trlvr
             c.board_leash = rf(L"board_leash", L"0.35", 0.0f, 2.0f, 0.35f);
             c.board_leash_height =
                 rf(L"board_leash_height", L"0.1", 0.0f, 1.0f, 0.1f);
+            c.board_follow_lara = rb(L"board_follow_lara", false);
             c.god_head_zone = rf(L"god_head_zone", L"0.3", 0.05f, 1.0f, 0.3f);
             c.god_claim_zone = rf(L"god_claim_zone", L"0.6", 0.0f, 3.0f, 0.6f);
             c.god_arm_zone = rf(L"god_arm_zone", L"0.25", 0.0f, 0.5f, 0.25f);

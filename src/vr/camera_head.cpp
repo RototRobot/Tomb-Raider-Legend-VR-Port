@@ -18370,35 +18370,151 @@ namespace trlvr
             if (mode == 2 || zoom > 1.0f)
             {
                 const float table = metre * camera_world_scale_factor();
-                const float from[3] = { focus[0], focus[1],
-                                        focus[2] + 0.3f * metre };
-                float ray[3] = { target[0] - from[0], target[1] - from[1],
-                                 target[2] - from[2] };
-                const float reach = sqrtf(ray[0] * ray[0] + ray[1] * ray[1] +
-                                          ray[2] * ray[2]);
-                if (reach > 1.0f && config().camera_collision)
+                // Geometry between the seat and Lara must not pull the seat
+                // in (a pillar in the view: user, 2026-11-12). The sweep
+                // starts at the seat's last collision-free position, so it
+                // only stops the seat moving INTO floor, wall or ceiling.
+                // Without a usable last position (first frame, a view
+                // change, a jump), or when the sweep would hold the seat
+                // more than 2 table-m short of where it wants to be (stuck
+                // behind a corner), it starts above Lara as before.
+                static float s_free[3]{};
+                static bool s_free_valid = false;
+                static int s_free_mode = -1;
+                static DWORD s_free_tick = 0;
+                const DWORD tick_now = GetTickCount();
+                const float lara_from[3] = { focus[0], focus[1],
+                                             focus[2] + 0.3f * metre };
+                float want[3] = { target[0], target[1], target[2] };
+                // Sweep from `from` to `want`; returns true on a hit and the
+                // point 0.3 m (her scale) short of it in `out`.
+                auto sweep = [&](const float from[3], float out[3],
+                                 float* reach_out) -> bool
                 {
+                    float ray[3] = { want[0] - from[0], want[1] - from[1],
+                                     want[2] - from[2] };
+                    const float reach = sqrtf(ray[0] * ray[0] +
+                                              ray[1] * ray[1] +
+                                              ray[2] * ray[2]);
+                    *reach_out = reach;
+                    if (!(reach > 1.0f))
+                        return false;
                     for (float& r : ray)
                         r /= reach;
                     float hit[3]{};
-                    if (aim_probe(from, ray, reach, hit, nullptr))
+                    if (!aim_probe(from, ray, reach, hit, nullptr))
+                        return false;
+                    const float hx = hit[0] - from[0];
+                    const float hy = hit[1] - from[1];
+                    const float hz = hit[2] - from[2];
+                    const float keep = fmaxf(0.0f,
+                        sqrtf(hx * hx + hy * hy + hz * hz) - 0.3f * metre);
+                    for (int k = 0; k < 3; ++k)
+                        out[k] = from[k] + ray[k] * keep;
+                    return true;
+                };
+                // The fallback from above Lara. Something between her and
+                // the seat holds the seat only if the seat is in rock: seen
+                // back from the seat, the obstacle must have a far side at
+                // least 5 cm (her scale) past its near side and 0.3 m from
+                // the seat (a pillar in the open), else it is clamped.
+                auto sweep_from_lara = [&](float out[3], float* reach_out)
+                    -> bool
+                {
+                    if (!sweep(lara_from, out, reach_out))
+                        return false;
+                    const float reach = *reach_out;
+                    float back[3] = { lara_from[0] - want[0],
+                                      lara_from[1] - want[1],
+                                      lara_from[2] - want[2] };
+                    for (float& b : back)
+                        b /= reach;
+                    float hit[3]{};
+                    if (!aim_probe(want, back, reach, hit, nullptr))
+                        return true;    // nothing seen from the seat: in rock
+                    const float bx = hit[0] - want[0];
+                    const float by = hit[1] - want[1];
+                    const float bz = hit[2] - want[2];
+                    const float from_seat = sqrtf(bx * bx + by * by + bz * bz);
+                    const float ox = out[0] - lara_from[0];
+                    const float oy = out[1] - lara_from[1];
+                    const float oz = out[2] - lara_from[2];
+                    const float near_side = sqrtf(ox * ox + oy * oy + oz * oz) +
+                                            0.3f * metre;
+                    const float far_side = reach - from_seat;
+                    if (from_seat > 0.3f * metre &&
+                        far_side > near_side + 0.05f * metre)
                     {
-                        const float hx = hit[0] - from[0];
-                        const float hy = hit[1] - from[1];
-                        const float hz = hit[2] - from[2];
-                        const float keep = fmaxf(0.0f,
-                            sqrtf(hx * hx + hy * hy + hz * hz) - 0.3f * metre);
-                        for (int k = 0; k < 3; ++k)
-                            target[k] = from[k] + ray[k] * keep;
-                        static DWORD last_report = 0;
-                        if (GetTickCount() - last_report > 3000)
+                        static DWORD last_open = 0;
+                        if (GetTickCount() - last_open > 3000)
                         {
-                            last_report = GetTickCount();
-                            log("board: camera pulled in by geometry to "
-                                "%.2f of its %.2f table-m", keep / table,
-                                reach / table);
+                            last_open = GetTickCount();
+                            log("camera collision: something between Lara "
+                                "and the seat (%.2f m thick); the seat is in "
+                                "the open, left alone",
+                                (far_side - near_side) / metre);
+                        }
+                        return false;
+                    }
+                    return true;
+                };
+                if (config().camera_collision &&
+                    (mode != 2 || config().board_camera_collision))
+                {
+                    const float jx2 = want[0] - s_free[0];
+                    const float jy2 = want[1] - s_free[1];
+                    const float jz2 = want[2] - s_free[2];
+                    const bool usable = s_free_valid && s_free_mode == mode &&
+                        tick_now - s_free_tick < 500 &&
+                        jx2 * jx2 + jy2 * jy2 + jz2 * jz2 <
+                            16.0f * table * table;
+                    float held[3]{};
+                    float reach = 0.0f;
+                    bool hit = false;
+                    if (usable)
+                    {
+                        // A hit on the way from the last free seat goes
+                        // straight to the pull-in towards Lara (user
+                        // 2026-11-13: orbiting into a wall held the seat at
+                        // the wall and the view turned in place for a
+                        // second or two, until the wanted seat was 2
+                        // table-m past it). The pull-in keeps the pillar
+                        // test, so a pillar in the open still leaves the
+                        // seat alone.
+                        hit = sweep(s_free, held, &reach);
+                        if (hit)
+                            hit = sweep_from_lara(held, &reach);
+                    }
+                    else
+                    {
+                        hit = sweep_from_lara(held, &reach);
+                    }
+                    if (hit)
+                    {
+                        for (int k = 0; k < 3; ++k)
+                            target[k] = held[k];
+                        static DWORD last_report = 0;
+                        if (tick_now - last_report > 3000)
+                        {
+                            last_report = tick_now;
+                            const float dx2 = want[0] - held[0];
+                            const float dy2 = want[1] - held[1];
+                            const float dz2 = want[2] - held[2];
+                            log("camera collision: board seat held out of "
+                                "geometry, moved %.2f of %.2f table-m",
+                                sqrtf(dx2 * dx2 + dy2 * dy2 + dz2 * dz2) /
+                                    table, reach / table);
                         }
                     }
+                    for (int k = 0; k < 3; ++k)
+                        s_free[k] = target[k];
+                    s_free_valid = true;
+                    s_free_mode = mode;
+                    s_free_tick = tick_now;
+                }
+                else
+                {
+                    s_free_valid = false;
                 }
             }
 
@@ -19419,6 +19535,46 @@ namespace trlvr
         // build, in follow mode only.
         bool g_classic_orbit_reset_pending = false;
 
+        // Board view with its own heading (board_follow_lara off, user
+        // 2026-11-12, as Underworld): the drawn board is built at
+        // g_board.heading (camera Euler, Rotation +0x278), which only the
+        // right stick and a recentre change -- never Lara or the game's
+        // auto-centre. The game's camera heading, which retail movement is
+        // relative to, is then set to the headset's facing (as first person
+        // does), in the Euler and the follow orbit (yaw +0x508 current,
+        // +0x608 target, +0x628 goal; springs +0x598/+0x5A8; word +0x1190
+        // holds auto-centre off -- see classic_orbit_reset_apply).
+        struct BoardHeading
+        {
+            bool owned = false;         // this frame
+            bool valid = false;
+            float heading = 0.0f;
+            float stick = 0.0f;         // vr_input_first_person_turn last frame
+            unsigned recentre = 0;
+            bool sign_ready = false;
+            float sign = 1.0f;          // Euler change per viewing-yaw change
+        };
+        BoardHeading g_board;
+
+        void board_write_game_heading(void* cam, float heading)
+        {
+            __try
+            {
+                float* f = reinterpret_cast<float*>(cam);
+                f[0x278 / 4] = heading;
+                f[0x508 / 4] = heading;
+                f[0x608 / 4] = heading;
+                f[0x628 / 4] = heading;
+                f[0x598 / 4] = 0.0f;
+                f[0x5A8 / 4] = 0.0f;
+                *reinterpret_cast<short*>(
+                    static_cast<unsigned char*>(cam) + 0x1190) = 1;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+        }
+
         void classic_orbit_reset_apply(void* cam)
         {
             g_classic_orbit_reset_pending = false;
@@ -19577,6 +19733,39 @@ namespace trlvr
                     first_person_leave();
             }
 
+            // Board view with its own heading: gameplay follow camera only.
+            if (main_camera)
+            {
+                bool focus_lara = false;
+                __try
+                {
+                    const void* lara =
+                        *reinterpret_cast<void* const*>(kPlayerInstance);
+                    focus_lara = lara && *reinterpret_cast<const void* const*>(
+                        static_cast<const unsigned char*>(cam) +
+                        kOffFocusInstance) == lara;
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    focus_lara = false;
+                }
+                const bool owned = drive && !first_person && !flat_screen &&
+                    !theatre && !config().board_follow_lara &&
+                    !camera_view_first_person() &&
+                    camera_third_person_mode() == 2 && mode == 0 &&
+                    focus_lara && std::isfinite(saved[2]) &&
+                    !camera_cinematic_playing() &&
+                    !(ui_menu_active() && !ui_pause_menu_active());
+                if (owned != g_board.owned)
+                    log("board: heading %s", owned
+                        ? "is the board's own (right stick / recentre); "
+                          "movement follows the headset"
+                        : "follows the game's camera");
+                if (!owned)
+                    g_board.valid = false;
+                g_board.owned = owned;
+            }
+
             Mat4 base_camera = Mat4::identity();
             if (!first_person)
             {
@@ -19586,6 +19775,46 @@ namespace trlvr
                     rot[1] = 0.0f;
                 }
 
+                const bool board_owned = main_camera && g_board.owned;
+                if (board_owned)
+                {
+                    const float stick = vr_input_first_person_turn();
+                    if (!g_board.sign_ready)
+                    {
+                        // Which way an Euler change turns the view, from
+                        // the engine's own builder (as first person).
+                        const float epsilon = 0.01f;
+                        rot[2] = wrap_heading(saved[2] + epsilon);
+                        g_original(cam);
+                        const Mat4 plus = load_matrix(cam, kOffWcTransform);
+                        rot[2] = saved[2];
+                        g_original(cam);
+                        const Mat4 at = load_matrix(cam, kOffWcTransform);
+                        g_board.sign = rotation_error(plus,
+                                at * yaw_rotation(epsilon)) <=
+                            rotation_error(plus, at * yaw_rotation(-epsilon))
+                            ? 1.0f : -1.0f;
+                        g_board.sign_ready = true;
+                        log("board: camera Euler heading turns the view with "
+                            "sign %+.0f", g_board.sign);
+                    }
+                    // Entering the board, or a recentre: the board looks
+                    // where the game's camera looks now (the headset's
+                    // facing), so nothing jumps.
+                    if (!g_board.valid ||
+                        g_board.recentre != vr_recenter_generation())
+                    {
+                        g_board.heading = saved[2];
+                        g_board.stick = stick;
+                        g_board.recentre = vr_recenter_generation();
+                        g_board.valid = true;
+                    }
+                    g_board.heading = wrap_heading(g_board.heading +
+                        g_board.sign * (stick - g_board.stick));
+                    g_board.stick = stick;
+                    rot[2] = g_board.heading;
+                }
+
                 g_original(cam);
 
                 base_camera = load_matrix(cam, kOffWcTransform);
@@ -19593,6 +19822,16 @@ namespace trlvr
                 rot[0] = saved[0];
                 rot[1] = saved[1];
                 rot[2] = saved[2];
+                if (board_owned)
+                {
+                    // The game's heading = the headset's facing on the
+                    // board (one copy of head yaw: the view gets it from
+                    // apply_head_pose, gameplay from here).
+                    const float wanted = wrap_heading(g_board.heading -
+                        g_board.sign * first_person_hmd_heading());
+                    rot[2] = wanted;
+                    board_write_game_heading(cam, wanted);
+                }
             }
 
             if (first_person)
@@ -19660,6 +19899,8 @@ namespace trlvr
             // crouching); the scene there stays rigid.
             if (tp_override && drive && !flat_screen &&
                 config().camera_collision && !theatre &&
+                (camera_third_person_mode() != 2 ||
+                 config().board_camera_collision) &&
                 !g_view_tween.active)
                 third_person_eye_collision(base_camera, tp_position);
 
@@ -20201,6 +20442,11 @@ namespace trlvr
     bool camera_accurate_aim_active()
     {
         return g_accurate_aim_active;
+    }
+
+    bool camera_board_owns_heading()
+    {
+        return g_board.owned;
     }
 
     void camera_view_prescale(float* x, float* y)
