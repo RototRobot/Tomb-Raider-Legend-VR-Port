@@ -233,6 +233,7 @@ namespace trlvr
             { L"vr", L"overlay_vr_yaw_degrees", L"15" },
             { L"vr", L"overlay_vr_pitch_degrees", L"-10" },
             { L"vr", L"overlay_vr_open_hold", L"0.6" },
+            { L"vr", L"overlay_show_advanced", L"0" },
             { L"vr", L"cull_fov_degrees", L"120" },
 
             { L"controls", L"controllers", L"1" },
@@ -759,6 +760,10 @@ namespace trlvr
             L"; Hold the controller menu (pause) button this many seconds to open\r\n"
             L"; it; a quicker press still pauses the game. 0 = off (0 to 3).\r\n"
             L"overlay_vr_open_hold = 0.6\r\n"
+            L"; The settings window shows every setting (tuning, experiments, test\r\n"
+            L"; tools). 0 = only the everyday ones; the rest keep their values.\r\n"
+            L"; System tab: \"Show advanced settings\".\r\n"
+            L"overlay_show_advanced = 0\r\n"
             L"\r\n"
             L"; Object visibility only. Room culling is conservatively bypassed for VR.\r\n"
             L"cull_fov_degrees = 120\r\n"
@@ -1595,6 +1600,8 @@ namespace trlvr
             g_config.overlay_vr_open_hold = clamped(
                 read_float(L"vr", L"overlay_vr_open_hold", L"0.6", path),
                 0.0f, 3.0f, 0.6f);
+            g_config.overlay_show_advanced =
+                read_bool(L"vr", L"overlay_show_advanced", false, path);
         }
         value = read_float(L"vr", L"cull_fov_degrees", L"120", path);
         g_config.cull_fov_degrees =

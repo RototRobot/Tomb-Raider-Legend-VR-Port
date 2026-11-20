@@ -456,6 +456,7 @@ namespace trlvr
         float overlay_vr_yaw_degrees = 15.0f;
         float overlay_vr_pitch_degrees = -10.0f;
         float overlay_vr_open_hold = 0.6f;
+        bool overlay_show_advanced = false;    // the settings window shows every setting
 
         // The safe production policy keeps portal/room culling bypassed and
         // widens only the engine's much cheaper object frustum.

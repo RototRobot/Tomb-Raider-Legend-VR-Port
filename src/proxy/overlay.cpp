@@ -431,6 +431,11 @@ namespace trlvr
             config_save_setting(section, key, text);
         }
 
+        // Show advanced settings (System tab), as in the Underworld mod. Off:
+        // only the settings a player who just wants to play would touch;
+        // the hidden ones keep their values. Set at the top of build_ui.
+        bool g_adv = false;
+
         void help(const char* text)
         {
             if (text && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
@@ -504,22 +509,26 @@ namespace trlvr
                    L"first_person_tracked_hands",
                    "First person only. Off: her arms keep the game's "
                    "animation. Needs Hands on controllers.");
-            ImGui::BeginDisabled(!c.first_person_full_body);
-            slider("Arm stretch", &c.first_person_arm_stretch,
-                   1.0f, 2.0f, "x%.2f", L"vr", L"first_person_arm_stretch",
-                   "Full body only: how much her arms may lengthen so her "
-                   "hands reach your controllers without stretching at the "
-                   "wrist. 1 = off.");
-            ImGui::EndDisabled();
+            if (g_adv)
+            {
+                ImGui::BeginDisabled(!c.first_person_full_body);
+                slider("Arm stretch", &c.first_person_arm_stretch,
+                       1.0f, 2.0f, "x%.2f", L"vr", L"first_person_arm_stretch",
+                       "Full body only: how much her arms may lengthen so her "
+                       "hands reach your controllers without stretching at the "
+                       "wrist. 1 = off.");
+                ImGui::EndDisabled();
+            }
 
             ImGui::SeparatorText("Moving your body");
             toggle("Roomscale", &c.roomscale, L"vr", L"roomscale",
                    "Walking around your room moves Lara, stopped by walls.");
             ImGui::BeginDisabled(!c.roomscale);
-            slider("Lean deadzone", &c.roomscale_deadzone, 0.02f,
-                   0.6f, "%.2f m", L"vr", L"roomscale_deadzone",
-                   "Leaning this far moves only your head; beyond it Lara "
-                   "moves to you.");
+            if (g_adv)
+                slider("Lean deadzone", &c.roomscale_deadzone, 0.02f,
+                       0.6f, "%.2f m", L"vr", L"roomscale_deadzone",
+                       "Leaning this far moves only your head; beyond it "
+                       "Lara moves to you.");
             toggle("Walk with her animations", &c.roomscale_walk, L"vr",
                    L"roomscale_walk",
                    "A real step of more than 0.4 m is walked by the game "
@@ -535,18 +544,22 @@ namespace trlvr
                 config_set_first_person_hardcore(hardcore);
             help("The view turns with Lara through flips, rolls and spins "
                  "instead of staying level.");
-            ImGui::BeginDisabled(!c.first_person_hardcore);
-            slider("Hardcore threshold",
-                   &c.first_person_hardcore_threshold, 0.0f, 60.0f, "%.0f deg",
-                   L"vr", L"first_person_hardcore_threshold",
-                   "Tilts smaller than this stay level (walking); bigger ones "
-                   "are followed.");
-            ImGui::EndDisabled();
-            toggle("Keep the view up on a ledge pull-up",
-                   &c.first_person_mantle_smoothing, L"vr",
-                   L"first_person_mantle_smoothing",
-                   "Holds the view at standing height while Lara kneels at "
-                   "the top of a ledge. Off follows the game's animation.");
+            if (g_adv)
+            {
+                ImGui::BeginDisabled(!c.first_person_hardcore);
+                slider("Hardcore threshold",
+                       &c.first_person_hardcore_threshold, 0.0f, 60.0f,
+                       "%.0f deg", L"vr", L"first_person_hardcore_threshold",
+                       "Tilts smaller than this stay level (walking); bigger "
+                       "ones are followed.");
+                ImGui::EndDisabled();
+                toggle("Keep the view up on a ledge pull-up",
+                       &c.first_person_mantle_smoothing, L"vr",
+                       L"first_person_mantle_smoothing",
+                       "Holds the view at standing height while Lara kneels "
+                       "at the top of a ledge. Off follows the game's "
+                       "animation.");
+            }
 
             ImGui::SeparatorText("Play");
             int secure = c.auto_secure_catch;
@@ -574,20 +587,24 @@ namespace trlvr
             slider("HUD scale", &c.hud_scale, 0.1f, 2.0f, "%.2f",
                    L"vr", L"hud_scale", "Size of the gameplay HUD (health, "
                    "ammo, prompts).");
-            slider("Binocular scale", &c.binocular_scale, 0.1f, 2.0f, "%.2f",
-                   L"vr", L"binocular_scale", "Size of the binocular "
-                   "viewfinder. Separate from the HUD and menus.");
+            if (g_adv)
+                slider("Binocular scale", &c.binocular_scale, 0.1f, 2.0f,
+                       "%.2f", L"vr", L"binocular_scale", "Size of the "
+                       "binocular viewfinder. Separate from the HUD and "
+                       "menus.");
             slider("HUD follow", &c.hud_follow_degrees, 0.0f, 90.0f,
                    "%.0f deg", L"vr", L"hud_follow_degrees",
                    "The gameplay HUD stays where it is while you look within "
                    "this many degrees of it, then glides back in front of "
                    "you. 0 = stuck to your head. The binoculars always stay "
                    "fixed to your head.");
-            toggle("Pause menu fixed in the room", &c.pause_world_locked,
-                   L"vr", L"pause_world_locked",
-                   "On: the pause menu stays level where you were looking "
-                   "when it opened, like the main menu. Off: it follows the "
-                   "headset. The gameplay HUD has its own HUD follow above.");
+            if (g_adv)
+                toggle("Pause menu fixed in the room", &c.pause_world_locked,
+                       L"vr", L"pause_world_locked",
+                       "On: the pause menu stays level where you were looking "
+                       "when it opened, like the main menu. Off: it follows "
+                       "the headset. The gameplay HUD has its own HUD follow "
+                       "above.");
             toggle("Hide the gameplay HUD", &c.hide_gameplay_hud, L"vr",
                    L"hide_gameplay_hud",
                    "Turns off the head-locked gameplay HUD (health, ammo, "
@@ -622,6 +639,8 @@ namespace trlvr
             }
             help("All four in turn: Classic, Shoulder, Board, First person. "
                  "The game's VR Settings page sets this too.");
+            if (!g_adv)
+                return;
             slider("Glide between views", &c.view_transition_seconds, 0.0f,
                    2.0f, "%.2f s", L"vr", L"view_transition_seconds",
                    "How long a view switch takes to glide from one view to "
@@ -767,60 +786,70 @@ namespace trlvr
             toggle("Chest spring", &c.body_spring, L"vr", L"body_spring",
                    "First-person full body: her chest sways a little on a "
                    "spring.");
-            slider("Chest spring limit", &c.body_spring_angle, 0.0f, 15.0f,
-                   "%.1f deg", L"vr", L"body_spring_angle", nullptr);
+            if (g_adv)
+                slider("Chest spring limit", &c.body_spring_angle, 0.0f,
+                       15.0f, "%.1f deg", L"vr", L"body_spring_angle",
+                       nullptr);
             toggle("Soft parts", &c.body_soft, L"vr", L"body_soft",
-                   "Her soft parts bounce, in first and third person; in first" 
+                   "Her soft parts bounce, in first and third person; in first "
                    "person they also give under your hands.");
-            slider("Soft parts limit", &c.body_soft_angle, 0.0f, 30.0f,
-                   "%.1f deg", L"vr", L"body_soft_angle", nullptr);
-            slider("Squash and stretch", &c.body_soft_stretch, 0.0f, 1.0f,
-                   "%.2f", L"vr", L"body_soft_stretch",
-                   "Shape change as well as swing: longer and narrower "
-                   "pulled out, shorter and wider pushed in, same volume.");
-            slider("Ripple", &c.body_soft_ripple, 0.0f, 1.0f, "%.2f", L"vr",
-                   L"body_soft_ripple",
-                   "A lighter second motion on top of the swing: the outer "
-                   "part catching up and overrunning.");
-            ImGui::SeparatorText("Third person");
-            slider("Sideways looseness", &c.body_soft_sway_hz, 0.8f, 4.0f,
-                   "%.1f Hz", L"vr", L"body_soft_sway_hz",
-                   "Side-to-side spring rate. Lower swings wider and slower "
-                   "and is carried by her stride; 3 is the old, stiff value.");
-            slider("Damping", &c.body_soft_damping, 0.03f, 0.6f, "%.2f",
-                   L"vr", L"body_soft_damping",
-                   "How quickly a swing dies away. Lower rings longer; 0.22 "
-                   "is the old value.");
+            if (g_adv)
+            {
+                slider("Soft parts limit", &c.body_soft_angle, 0.0f, 30.0f,
+                       "%.1f deg", L"vr", L"body_soft_angle", nullptr);
+                slider("Squash and stretch", &c.body_soft_stretch, 0.0f, 1.0f,
+                       "%.2f", L"vr", L"body_soft_stretch",
+                       "Shape change as well as swing: longer and narrower "
+                       "pulled out, shorter and wider pushed in, same volume.");
+                slider("Ripple", &c.body_soft_ripple, 0.0f, 1.0f, "%.2f", L"vr",
+                       L"body_soft_ripple",
+                       "A lighter second motion on top of the swing: the outer "
+                       "part catching up and overrunning.");
+                ImGui::SeparatorText("Third person");
+                slider("Sideways looseness", &c.body_soft_sway_hz, 0.8f, 4.0f,
+                       "%.1f Hz", L"vr", L"body_soft_sway_hz",
+                       "Side-to-side spring rate. Lower swings wider and slower "
+                       "and is carried by her stride; 3 is the old, stiff value.");
+                slider("Damping", &c.body_soft_damping, 0.03f, 0.6f, "%.2f",
+                       L"vr", L"body_soft_damping",
+                       "How quickly a swing dies away. Lower rings longer; 0.22 "
+                       "is the old value.");
+            }
 
             ImGui::SeparatorText("Push (god mode)");
             toggle("Whole-body push", &c.body_push, L"vr", L"body_push",
                    "A hand leaning on her tilts head, chest, waist, arms, "
                    "hips and legs a few degrees; board view with god hands.");
-            slider("Push strength", &c.body_push_strength, 0.0f, 3.0f,
-                   "%.2f", L"vr", L"body_push_strength", nullptr);
-            slider("Push speed", &c.body_push_hz, 0.5f, 6.0f, "%.1f Hz",
-                   L"vr", L"body_push_hz", "Spring frequency of the tilt.");
-            slider("Push damping", &c.body_push_damping, 0.2f, 1.5f, "%.2f",
-                   L"vr", L"body_push_damping",
-                   "Near 1 = no swing past rest; lower swings a little.");
-            slider("Head tilt", &c.body_push_head_degrees, 0.0f, 20.0f,
-                   "%.1f deg", L"vr", L"body_push_head_degrees", nullptr);
-            slider("Chest tilt", &c.body_push_chest_degrees, 0.0f, 15.0f,
-                   "%.1f deg", L"vr", L"body_push_chest_degrees", nullptr);
-            slider("Waist tilt", &c.body_push_waist_degrees, 0.0f, 15.0f,
-                   "%.1f deg", L"vr", L"body_push_waist_degrees", nullptr);
-            slider("Arm swing", &c.body_push_arm_degrees, 0.0f, 25.0f,
-                   "%.1f deg", L"vr", L"body_push_arm_degrees", nullptr);
-            slider("Hips tilt", &c.body_push_hips_degrees, 0.0f, 15.0f,
-                   "%.1f deg", L"vr", L"body_push_hips_degrees", nullptr);
-            slider("Leg give", &c.body_push_leg_degrees, 0.0f, 8.0f,
-                   "%.1f deg", L"vr", L"body_push_leg_degrees", nullptr);
+            if (g_adv)
+            {
+                slider("Push strength", &c.body_push_strength, 0.0f, 3.0f,
+                       "%.2f", L"vr", L"body_push_strength", nullptr);
+                slider("Push speed", &c.body_push_hz, 0.5f, 6.0f, "%.1f Hz",
+                       L"vr", L"body_push_hz", "Spring frequency of the tilt.");
+                slider("Push damping", &c.body_push_damping, 0.2f, 1.5f, "%.2f",
+                       L"vr", L"body_push_damping",
+                       "Near 1 = no swing past rest; lower swings a little.");
+                slider("Head tilt", &c.body_push_head_degrees, 0.0f, 20.0f,
+                       "%.1f deg", L"vr", L"body_push_head_degrees", nullptr);
+                slider("Chest tilt", &c.body_push_chest_degrees, 0.0f, 15.0f,
+                       "%.1f deg", L"vr", L"body_push_chest_degrees", nullptr);
+                slider("Waist tilt", &c.body_push_waist_degrees, 0.0f, 15.0f,
+                       "%.1f deg", L"vr", L"body_push_waist_degrees", nullptr);
+                slider("Arm swing", &c.body_push_arm_degrees, 0.0f, 25.0f,
+                       "%.1f deg", L"vr", L"body_push_arm_degrees", nullptr);
+                slider("Hips tilt", &c.body_push_hips_degrees, 0.0f, 15.0f,
+                       "%.1f deg", L"vr", L"body_push_hips_degrees", nullptr);
+                slider("Leg give", &c.body_push_leg_degrees, 0.0f, 8.0f,
+                       "%.1f deg", L"vr", L"body_push_leg_degrees", nullptr);
+            }
 
             ImGui::SeparatorText("Rear");
             rear_presets(c);
             toggle("Rear soft body", &c.body_rear, L"vr", L"body_rear",
                    "Her buttocks are masses on springs that lag and settle "
                    "as she moves.");
+            if (!g_adv)
+                return;
             slider("Rear speed", &c.body_rear_hz, 0.5f, 8.0f, "%.1f Hz",
                    L"vr", L"body_rear_hz",
                    "How fast a cheek bounces. Lower is softer and slower.");
@@ -878,118 +907,156 @@ namespace trlvr
         void god_section(Config& c)
         {
             ImGui::TextWrapped("Board view with god hands only.");
-            ImGui::SeparatorText("Board leash");
-            slider("Leash radius", &c.board_leash, 0.0f, 2.0f, "%.2f m",
-                   L"vr", L"board_leash",
-                   "Lara runs free this far (table metres) before the board "
-                   "follows her. 0 = the old 12 cm leash.");
-            slider("Leash height", &c.board_leash_height, 0.0f, 1.0f,
-                   "%.2f m", L"vr", L"board_leash_height",
-                   "Same for up and down. 0 = height follows at once.");
-            slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
-                   L"vr", L"board_zoom_speed",
-                   "Controller scheme: right stick up/down zooms to Lara (up "
-                   "= closer). 0 = off.");
-            slider("World scale speed", &c.board_scale_speed, 0.0f, 5.0f,
-                   "%.2f", L"vr", L"board_scale_speed",
-                   "Controller scheme, board view: hold the right stick in "
-                   "and push up/down to scale Lara. 0 = off.");
-            slider("Shoulder height speed", &c.stick_height_speed, 0.0f,
-                   3.0f, "%.2f m/s", L"vr", L"stick_height_speed",
-                   "Controller scheme, shoulder view: hold the right stick in "
-                   "and push up/down to raise and lower the seat. 0 = off.");
+            ImGui::SeparatorText("Board");
+            if (g_adv)
+            {
+                slider("Leash radius", &c.board_leash, 0.0f, 2.0f, "%.2f m",
+                       L"vr", L"board_leash",
+                       "Lara runs free this far (table metres) before the board "
+                       "follows her. 0 = the old 12 cm leash.");
+                slider("Leash height", &c.board_leash_height, 0.0f, 1.0f,
+                       "%.2f m", L"vr", L"board_leash_height",
+                       "Same for up and down. 0 = height follows at once.");
+                toggle("Camera collision", &c.board_camera_collision, L"vr",
+                       L"board_camera_collision",
+                       "On: the board camera stops short of walls, floor and "
+                       "rock. Off: it passes through them (classic and "
+                       "shoulder keep their own collision).");
+            }
+            toggle("Board turns with Lara", &c.board_follow_lara, L"vr",
+                   L"board_follow_lara",
+                   "Off (as Underworld): the board keeps its heading -- the "
+                   "right stick and a recentre turn it -- and the move stick "
+                   "follows your head. On: the board turns with the game's "
+                   "camera, which swings round behind Lara.");
+            if (g_adv)
+            {
+                slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
+                       L"vr", L"board_zoom_speed",
+                       "Controller scheme: right stick up/down zooms to Lara (up "
+                       "= closer). 0 = off.");
+                slider("World scale speed", &c.board_scale_speed, 0.0f, 5.0f,
+                       "%.2f", L"vr", L"board_scale_speed",
+                       "Controller scheme, board view: hold the right stick in "
+                       "and push up/down to scale Lara. 0 = off.");
+                slider("Shoulder height speed", &c.stick_height_speed, 0.0f,
+                       3.0f, "%.2f m/s", L"vr", L"stick_height_speed",
+                       "Controller scheme, shoulder view: hold the right stick in "
+                       "and push up/down to raise and lower the seat. 0 = off.");
+            }
+            ImGui::SeparatorText("Arm stretch");
+            slider("Arm stretch", &c.god_stretch_range, 0.0f, 5.0f, "%.2f m",
+                   L"vr", L"god_stretch_range",
+                   "Board view: reach further than your arm. Past the start "
+                   "below, the hand moves out faster, this many metres "
+                   "further with the arm fully out. 0 = off.");
+            if (g_adv)
+                slider("Arm stretch starts at", &c.god_stretch_start, 15.0f,
+                       80.0f, "%.0f cm", L"vr", L"god_stretch_start",
+                       "How far from your chest the hand stays on the "
+                       "controller before it starts to stretch.");
             ImGui::SeparatorText("Pick-up");
-            toggle("Grab with hand pose", &c.god_grab_pose, L"vr",
+            toggle("Grab with hand pose",&c.god_grab_pose, L"vr",
                    L"god_grab_pose",
                    "Pinch (trigger + thumb down) or fist (trigger + grip) "
                    "grabs; grip alone only points and presses. Needs finger "
                    "tracking. Off = the grip button grabs.");
-            slider("Head zone", &c.god_head_zone, 0.05f, 1.0f, "%.2f m",
-                   L"vr", L"god_head_zone",
-                   "Grip zone round her head, metres at her size.");
-            slider("Claim zone", &c.god_claim_zone, 0.0f, 3.0f, "%.2f m",
-                   L"vr", L"god_claim_zone",
-                   "A hand this close to her keeps its grip and trigger "
-                   "from the game.");
-            toggle("Drag by hand (experimental)", &c.god_drag_hand, L"vr",
-                   L"god_drag_hand",
-                   "Grab her hand or arm and drag her up like a ragdoll, "
-                   "hanging by IK. Off: the head grab and the dangle "
-                   "animation.");
-            if (c.god_drag_hand)
+            if (g_adv)
             {
-                slider("Arm zone", &c.god_arm_zone, 0.0f, 0.5f, "%.2f m",
-                       L"vr", L"god_arm_zone",
-                       "A grip this close to an arm holds that arm. 0 = no "
-                       "arm grab.");
-                toggle("Two hands", &c.god_two_hands, L"vr", L"god_two_hands",
-                       "Holding her by one arm, grab her other arm with your "
-                       "other hand: she hangs below both hands. Let go of one "
-                       "and she hangs by the other.");
-                toggle("Limp arms", &c.god_arms_limp, L"vr",
-                       L"god_arms_limp",
-                       "Her arms hang limp while she is held by the head.");
+                slider("Head zone", &c.god_head_zone, 0.05f, 1.0f, "%.2f m",
+                       L"vr", L"god_head_zone",
+                       "Grip zone round her head, metres at her size. Off "
+                       "Drag by hand, a grab there snaps her arms up into the "
+                       "hang pose.");
+                slider("Claim zone", &c.god_claim_zone, 0.0f, 3.0f, "%.2f m",
+                       L"vr", L"god_claim_zone",
+                       "A hand this close to her keeps its grip and trigger "
+                       "from the game.");
+                toggle("Drag by hand (experimental)", &c.god_drag_hand, L"vr",
+                       L"god_drag_hand",
+                       "Grab her hand or arm and drag her up like a ragdoll, "
+                       "hanging by IK. Off: the head grab and the dangle "
+                       "animation.");
+                if (c.god_drag_hand)
+                {
+                    slider("Arm zone", &c.god_arm_zone, 0.0f, 0.5f, "%.2f m",
+                           L"vr", L"god_arm_zone",
+                           "A grip this close to an arm holds that arm. 0 = no "
+                           "arm grab.");
+                    toggle("Two hands", &c.god_two_hands, L"vr", L"god_two_hands",
+                           "Holding her by one arm, grab her other arm with your "
+                           "other hand: she hangs below both hands. Let go of one "
+                           "and she hangs by the other.");
+                    toggle("Limp arms", &c.god_arms_limp, L"vr",
+                           L"god_arms_limp",
+                           "Her arms hang limp while she is held by the head.");
+                }
             }
             ImGui::SeparatorText("Throw and drop");
             toggle("Throwing", &c.god_throw, L"vr", L"god_throw",
                    "Let go mid-swing and she flies off your hand and lands "
                    "where she hits the level.");
-            slider("Throw strength", &c.god_throw_strength, 0.2f, 3.0f,
-                   "%.2f", L"vr", L"god_throw_strength",
-                   "Your hand's speed times this.");
-            slider("Throw gravity", &c.god_throw_gravity, 1.0f, 30.0f,
-                   "%.2f m/s2", L"vr", L"god_throw_gravity",
-                   "9.81 = a doll thrown on your table; lower floats more.");
-            toggle("Throw: averaged speed", &c.god_throw_velocity, L"vr",
-                   L"god_throw_velocity",
-                   "On: a throw takes your hand's fastest 5-frame average (a "
-                   "jitter or the backswing is ignored). Off: the old peak.");
-            slider("Throw bounce", &c.god_throw_bounce, 0.0f, 1.0f, "%.2f",
-                   L"vr", L"god_throw_bounce",
-                   "Off a wall or ceiling she keeps this much of her speed "
-                   "into it. 0 = stops dead.");
-            slider("Throw friction", &c.god_throw_friction, 0.0f, 1.0f,
-                   "%.2f", L"vr", L"god_throw_friction",
-                   "... and loses this much of her speed along it.");
-            slider("Throw radius", &c.god_throw_radius, 0.3f, 2.0f, "%.2fx",
-                   L"vr", L"god_throw_radius",
-                   "The ball round a thrown Lara's middle that hits the "
-                   "level (1 = a third of her height).");
-            slider("Ragdoll", &c.god_ragdoll, 0.0f, 2.0f, "%.2fx", L"vr",
-                   L"god_ragdoll",
-                   "How loosely her limbs swing, held or thrown. 0 = they "
-                   "turn with her body.");
-            slider("Knee bend", &c.god_knee_bend, 0.0f, 45.0f, "%.0f deg",
-                   L"vr", L"god_knee_bend",
-                   "How far her knees bend while held or thrown.");
-            slider("Throw spin", &c.god_throw_spin, 0.0f, 4.0f, "%.2f",
-                   L"vr", L"god_throw_spin",
-                   "The tumble a throw starts, rad/s per m/s across. 0 = "
-                   "she keeps only the swing she had.");
-            ImGui::SliderInt("Landing animation", &c.god_land_anim, -1, 4000,
-                             "%d", ImGuiSliderFlags_AlwaysClamp);
-            if (ImGui::IsItemDeactivatedAfterEdit())
+            if (g_adv)
             {
-                wchar_t text[16]{};
-                swprintf_s(text, L"%d", c.god_land_anim);
-                config_save_setting(L"vr", L"god_land_anim", text);
+                slider("Throw strength", &c.god_throw_strength, 0.2f, 3.0f,
+                       "%.2f", L"vr", L"god_throw_strength",
+                       "Your hand's speed times this.");
+                slider("Throw gravity", &c.god_throw_gravity, 1.0f, 30.0f,
+                       "%.2f m/s2", L"vr", L"god_throw_gravity",
+                       "9.81 = a doll thrown on your table; lower floats more.");
+                toggle("Throw: averaged speed", &c.god_throw_velocity, L"vr",
+                       L"god_throw_velocity",
+                       "On: a throw takes your hand's fastest 5-frame average (a "
+                       "jitter or the backswing is ignored). Off: the old peak.");
+                slider("Throw bounce", &c.god_throw_bounce, 0.0f, 1.0f, "%.2f",
+                       L"vr", L"god_throw_bounce",
+                       "Off a wall or ceiling she keeps this much of her speed "
+                       "into it. 0 = stops dead.");
+                slider("Throw friction", &c.god_throw_friction, 0.0f, 1.0f,
+                       "%.2f", L"vr", L"god_throw_friction",
+                       "... and loses this much of her speed along it.");
+                slider("Throw radius", &c.god_throw_radius, 0.3f, 2.0f, "%.2fx",
+                       L"vr", L"god_throw_radius",
+                       "The ball round a thrown Lara's middle that hits the "
+                       "level (1 = a third of her height).");
+                slider("Ragdoll", &c.god_ragdoll, 0.0f, 2.0f, "%.2fx", L"vr",
+                       L"god_ragdoll",
+                       "How loosely her limbs swing, held or thrown. 0 = they "
+                       "turn with her body.");
+                slider("Knee bend", &c.god_knee_bend, 0.0f, 45.0f, "%.0f deg",
+                       L"vr", L"god_knee_bend",
+                       "How far her knees bend while held or thrown.");
+                slider("Throw spin", &c.god_throw_spin, 0.0f, 4.0f, "%.2f",
+                       L"vr", L"god_throw_spin",
+                       "The tumble a throw starts, rad/s per m/s across. 0 = "
+                       "she keeps only the swing she had.");
+                ImGui::SliderInt("Landing animation", &c.god_land_anim, -1, 4000,
+                                 "%d", ImGuiSliderFlags_AlwaysClamp);
+                if (ImGui::IsItemDeactivatedAfterEdit())
+                {
+                    wchar_t text[16]{};
+                    swprintf_s(text, L"%d", c.god_land_anim);
+                    config_save_setting(L"vr", L"god_land_anim", text);
+                }
+                help("Animation (game's own, by number) a thrown Lara plays on "
+                     "landing. -1 = none.");
+                slider("Drop height", &c.god_drop_height, 0.0f, 5.0f, "%.2f m",
+                       L"vr", L"god_drop_height",
+                       "Let go over a floor and she falls from no higher than "
+                       "this. 0 = set straight down.");
+                slider("Drop minimum", &c.god_drop_min, 0.0f, 1.0f, "%.2f m",
+                       L"vr", L"god_drop_min",
+                       "Let go and she is left at least this high above the "
+                       "floor, so even a light let-go is the game's own fall.");
             }
-            help("Animation (game's own, by number) a thrown Lara plays on "
-                 "landing. -1 = none.");
-            slider("Drop height", &c.god_drop_height, 0.0f, 5.0f, "%.2f m",
-                   L"vr", L"god_drop_height",
-                   "Let go over a floor and she falls from no higher than "
-                   "this. 0 = set straight down.");
-            slider("Drop minimum", &c.god_drop_min, 0.0f, 1.0f, "%.2f m",
-                   L"vr", L"god_drop_min",
-                   "Let go and she is left at least this high above the "
-                   "floor, so even a light let-go is the game's own fall.");
             ImGui::SeparatorText("Torso grab (fist)");
             toggle("Torso grab", &c.god_torso, L"vr", L"god_torso",
                    "Make a fist with the palm toward her waist, back or "
                    "belly and hold her like a doll: she follows your hand, "
                    "her limbs hang. Let go with a swing to toss her. Needs "
                    "'Grab with hand pose'.");
+            if (!g_adv)
+                return;
             slider("Torso max height", &c.god_torso_max_height, 0.05f, 3.0f,
                    "%.2f m", L"vr", L"god_torso_max_height",
                    "Only while she looks no taller than this to you.");
@@ -1028,7 +1095,8 @@ namespace trlvr
             toggle("Show grab zones", &c.god_zone_debug, L"vr",
                    L"god_zone_debug",
                    "Wireframes in the headset: torso green, head magenta, "
-                   "arms orange, your hand's points white.");
+                   "arms orange, your hand's points white. Board view only "
+                   "(the god hand does not run in classic or shoulder).");
             slider("Grab zone size", &c.god_zone_scale, 0.25f, 4.0f, "%.2fx",
                    L"vr", L"god_zone_scale",
                    "Multiplies the head, arm and torso grab zones.");
@@ -1051,12 +1119,12 @@ namespace trlvr
             size_changed |= ImGui::SliderFloat("Screen width", &width, 0.5f,
                 8.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
             size_done |= ImGui::IsItemDeactivatedAfterEdit();
-            if (ImGui::Checkbox("16:9 height from the width", &wide))
+            if (g_adv && ImGui::Checkbox("16:9 height from the width", &wide))
             {
                 height = wide ? 0.0f : width * 9.0f / 16.0f;
                 size_changed = size_done = true;
             }
-            if (!wide)
+            if (g_adv && !wide)
             {
                 size_changed |= ImGui::SliderFloat("Screen height", &height,
                     0.1f, 8.0f, "%.2f m", ImGuiSliderFlags_AlwaysClamp);
@@ -1069,7 +1137,7 @@ namespace trlvr
                    "%.2f m", L"vr", L"cutscene_screen_distance", nullptr);
 
             bool automatic = c.cutscene_scale <= 0.0f;
-            if (ImGui::Checkbox("Scene scale: automatic", &automatic))
+            if (g_adv && ImGui::Checkbox("Scene scale: automatic", &automatic))
             {
                 c.cutscene_scale = automatic ? 0.0f : 1.0f;
                 if (automatic)
@@ -1079,7 +1147,7 @@ namespace trlvr
             }
             help("Automatic scales every shot so Lara sits at the screen, "
                  "like a 3D film.");
-            if (!automatic)
+            if (g_adv && !automatic)
                 slider("Scene scale", &c.cutscene_scale, 0.1f, 5.0f, "%.2f",
                        L"vr", L"cutscene_scale", "1 is life size.");
 
@@ -1108,6 +1176,8 @@ namespace trlvr
                    L"board_diorama",
                    "The tabletop world inside a box open at the front and "
                    "top, the rest of the room dark.");
+            if (!g_adv)
+                return;
             slider("Box width", &c.board_diorama_width, 0.1f, 3.0f, "%.2f m",
                    L"vr", L"board_diorama_width", nullptr);
             slider("Box depth", &c.board_diorama_depth, 0.1f, 3.0f, "%.2f m",
@@ -1165,6 +1235,16 @@ namespace trlvr
                 (c.gesture_controls && !gestures_at_start))
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                                    "Restart the game for this to apply fully.");
+            ImGui::SeparatorText("Fingers");
+            toggle("Finger tracking", &c.finger_tracking, L"controls",
+                   L"finger_tracking",
+                   "Lara's fingers follow yours from the controller's touch "
+                   "sensors, trigger and grip.");
+            if (!g_adv)
+                return;
+            slider("Relaxed finger curl", &c.finger_rest_curl, 0.0f, 0.6f,
+                   "%.2f", L"controls", L"finger_rest_curl",
+                   "How curled her fingers are with your hand open.");
             ImGui::SeparatorText("Fine-tuning the scheme");
             int menu = c.gear_menu_radial ? 1 : 0;
             if (ImGui::Combo("Gear menu", &menu, "Cross by the hip\0Radial\0"))
@@ -1185,14 +1265,6 @@ namespace trlvr
                      "thumbstick, the sliders on the off hand's upturned "
                      "palm, or both.");
             }
-            ImGui::SeparatorText("Fingers");
-            toggle("Finger tracking", &c.finger_tracking, L"controls",
-                   L"finger_tracking",
-                   "Lara's fingers follow yours from the controller's touch "
-                   "sensors, trigger and grip.");
-            slider("Relaxed finger curl", &c.finger_rest_curl, 0.0f, 0.6f,
-                   "%.2f", L"controls", L"finger_rest_curl",
-                   "How curled her fingers are with your hand open.");
         }
 
         void weapons_section(Config& c)
@@ -1207,14 +1279,15 @@ namespace trlvr
                    "Grip with the free hand near a long gun's front to hold "
                    "it two-handed; the gun and aim pivot toward that hand.");
             int aim = c.aim_mode;
-            if (ImGui::Combo("Aim with", &aim,
+            if (g_adv && ImGui::Combo("Aim with", &aim,
                              "Main hand\0Both hands\0Hands and head\0"))
             {
                 c.aim_mode = aim;
                 config_save_setting(L"controls", L"aim_mode",
                     aim == 2 ? L"hands_head" : aim == 1 ? L"hands" : L"hand");
             }
-            help("Both hands: with two pistols drawn, aim between them. Hands "
+            if (g_adv)
+                help("Both hands: with two pistols drawn, aim between them. Hands "
                  "and head: averaged with where the headset looks.");
             toggle("Aim along the controller", &c.controller_aim, L"controls",
                    L"controller_aim",
@@ -1283,14 +1356,17 @@ namespace trlvr
             }
             help("Needs Hands on controllers. Grab for show: the stick still "
                  "rides.");
-            slider("Steering travel", &c.bike_steer_range, 0.03f, 0.4f,
-                   "%.2f m", L"controls", L"bike_steer_range",
-                   "Hand travel for full steering lock.");
-            slider("Throttle twist", &c.bike_twist_range, 10.0f, 90.0f,
-                   "%.0f deg", L"controls", L"bike_twist_range",
-                   "Twist for full throttle.");
-            toggle("Show grab points", &c.bike_handlebar_markers, L"controls",
-                   L"bike_handlebar_markers", "Rings on the handlebars.");
+            if (g_adv)
+            {
+                slider("Steering travel", &c.bike_steer_range, 0.03f, 0.4f,
+                       "%.2f m", L"controls", L"bike_steer_range",
+                       "Hand travel for full steering lock.");
+                slider("Throttle twist", &c.bike_twist_range, 10.0f, 90.0f,
+                       "%.0f deg", L"controls", L"bike_twist_range",
+                       "Twist for full throttle.");
+                toggle("Show grab points", &c.bike_handlebar_markers, L"controls",
+                       L"bike_handlebar_markers", "Rings on the handlebars.");
+            }
             ImGui::EndDisabled();
         }
 
@@ -1320,6 +1396,8 @@ namespace trlvr
             if (c.vr_runtime != started_with)
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                                    "Restart the game to apply this.");
+            if (!g_adv)
+                return;
             toggle("Match SteamVR grip pose", &c.xr_grip_match_openvr, L"vr",
                    L"xr_grip_match_openvr",
                    "Off: hands use OpenXR's own grip pose (Quest over Virtual "
@@ -1340,6 +1418,8 @@ namespace trlvr
             slider("Panel width", &c.overlay_vr_width_degrees, 10.0f, 120.0f,
                    "%.0f deg", L"vr", L"overlay_vr_width_degrees",
                    "How wide this window looks in the headset, in degrees.");
+            if (!g_adv)
+                return;
             slider("Panel to the left", &c.overlay_vr_yaw_degrees, -90.0f,
                    90.0f, "%.0f deg", L"vr", L"overlay_vr_yaw_degrees",
                    "How far to the left of straight ahead this window floats, "
@@ -1422,13 +1502,16 @@ namespace trlvr
                     *time = 1.0f;
             }
 
-            ImGui::SeparatorText("Display");
-            tr7_check("Wireframe", Tr7Wireframe,
-                      "Draws the world as wireframe.");
-            tr7_check("Hide the game's interface", Tr7HideUi,
-                      "Hides the game's own menus and HUD.");
-            tr7_check("Debug keypad", Tr7DebugKeypad,
-                      "The game's developer keypad.");
+            if (g_adv)
+            {
+                ImGui::SeparatorText("Display");
+                tr7_check("Wireframe", Tr7Wireframe,
+                          "Draws the world as wireframe.");
+                tr7_check("Hide the game's interface", Tr7HideUi,
+                          "Hides the game's own menus and HUD.");
+                tr7_check("Debug keypad", Tr7DebugKeypad,
+                          "The game's developer keypad.");
+            }
 
             ImGui::SeparatorText("Its saved settings (next game start)");
             {
@@ -1443,6 +1526,8 @@ namespace trlvr
                             "Turns off the game's motion blur.");
             tr7_saved_check("Hide its main-menu watermark", "NoWatermark", false,
                             "TR7-Menu-Hook's name on the main menu.");
+            if (!g_adv)
+                return;
             tr7_saved_slider("Free camera slow speed", "CameraSlowSpeed", 20.0f,
                              0.0f, 1000.0f, "%.0f");
             tr7_saved_slider("Free camera speed", "CameraNormalSpeed", 80.0f,
@@ -1469,6 +1554,7 @@ namespace trlvr
         void build_ui(bool vr)
         {
             Config& c = config_edit();
+            g_adv = c.overlay_show_advanced;
             ImGuiWindowFlags flags = 0;
             if (vr)
             {
@@ -1539,8 +1625,11 @@ namespace trlvr
             if (begin_tab("View"))
             {
                 view_section(c);
-                ImGui::SeparatorText("World and head scale");
-                scale_section(c);
+                if (g_adv)
+                {
+                    ImGui::SeparatorText("World and head scale");
+                    scale_section(c);
+                }
                 if (ImGui::CollapsingHeader("Third-person cameras"))
                     camera_section(c);
                 if (ImGui::CollapsingHeader("Cutscene theatre"))
@@ -1584,6 +1673,11 @@ namespace trlvr
             }
             if (begin_tab("System"))
             {
+                toggle("Show advanced settings", &c.overlay_show_advanced,
+                       L"vr", L"overlay_show_advanced",
+                       "Shows every setting in every tab: tuning, physics, "
+                       "experiments and test tools. Off: only the everyday "
+                       "ones; the hidden settings keep their values.");
                 ImGui::SeparatorText("Picture");
                 slider("Brightness", &c.picture_brightness, -0.5f, 0.5f,
                        "%+.2f", L"vr", L"picture_brightness",
@@ -1596,11 +1690,12 @@ namespace trlvr
                        &c.picture_follow_game, L"vr", L"picture_follow_game",
                        "The game's own sliders only work fullscreen; this "
                        "applies what they set to the headset image instead.");
-                toggle("Movies and their menus at 4:3",
-                       &c.movie_widen_4x3, L"vr", L"movie_widen_4x3",
-                       "On: while a movie plays (cutscene movies, menus over "
-                       "a movie backdrop) the screen is drawn at 4:3. Off: "
-                       "it fills the headset view, as before 1.1.0.");
+                if (g_adv)
+                    toggle("Movies, menus and loading screens at 4:3",
+                           &c.movie_widen_4x3, L"vr", L"movie_widen_4x3",
+                           "On: movies, menus and loading screens are drawn at "
+                           "4:3, as the game made them. Off: they fill the "
+                           "headset view and come out about 0.7x too narrow.");
                 ImGui::SeparatorText("VR runtime (OpenXR / Quest)");
                 runtime_section(c);
                 if (tr7_menu_hook_present() &&
