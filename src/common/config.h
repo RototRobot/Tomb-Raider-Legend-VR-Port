@@ -237,6 +237,13 @@ namespace trlvr
         // Let go over a floor: she is left at least this high above it
         // (metres at her size), so even a light let-go is the game's own fall.
         float god_drop_min = 0.15f;             // 0..1
+        // Arm stretch (go-go reach, ported from Underworld) for the board
+        // view's god hands: within god_stretch_start real cm of a point 20 cm
+        // below the head the hand sits on the controller; past it the hand
+        // reaches out faster, god_stretch_range real metres further once the
+        // arm is 30 cm past the start, up to 4x that. 0 = off.
+        float god_stretch_range = 1.0f;         // 0..5 real metres
+        float god_stretch_start = 40.0f;        // 15..80 real cm
         // Throws and ragdoll (ported back from Underworld). god_throw_velocity:
         // the release speed is the hand's fastest 5-frame average of the last
         // 0.15 s (0 = the old peak). A thrown Lara is a ball round her centre

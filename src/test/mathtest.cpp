@@ -113,6 +113,33 @@ namespace
 #include "menu_panel_tests.inc"
 #include "finger_input_tests.inc"
 
+static void test_go_go_reach()
+{
+    const float body[3] = { 0.0f, 1.0f, 0.0f };
+    float out[3];
+    // Inside the start: untouched.
+    const float close[3] = { 0.0f, 1.0f, -0.3f };
+    go_go_reach(close, body, 0.4f, 1.0f, out);
+    CHECK(near(out[0], 0.0f) && near(out[1], 1.0f) && near(out[2], -0.3f));
+    // 30 cm past the start: `range` further out along body -> hand.
+    const float full[3] = { 0.0f, 1.0f, -0.7f };
+    go_go_reach(full, body, 0.4f, 1.0f, out);
+    CHECK(near(out[0], 0.0f) && near(out[1], 1.0f) && near(out[2], -1.7f));
+    // 15 cm past: a quarter of it (the square).
+    const float half[3] = { 0.0f, 1.0f, -0.55f };
+    go_go_reach(half, body, 0.4f, 2.0f, out);
+    CHECK(near(out[2], -0.55f - 0.5f));
+    // Capped at 4 x range.
+    const float far[3] = { 0.0f, 1.0f, -2.0f };
+    go_go_reach(far, body, 0.4f, 1.0f, out);
+    CHECK(near(out[2], -6.0f));
+    // Off (range 0) and the hand exactly on the body: untouched.
+    go_go_reach(full, body, 0.4f, 0.0f, out);
+    CHECK(near(out[2], -0.7f));
+    go_go_reach(body, body, 0.0f, 1.0f, out);
+    CHECK(near(out[1], 1.0f) && near(out[2], 0.0f));
+}
+
 int main()
 {
     printf("projection maths tests\n\n");
@@ -130,6 +157,7 @@ int main()
     test_board_leash();
     test_menu_panel();
     test_finger_input();
+    test_go_go_reach();
     printf("  %d god-mode checks run quietly\n\n", g_quiet_checks);
 
     // --- reading the game's projection back out of its registers ----------

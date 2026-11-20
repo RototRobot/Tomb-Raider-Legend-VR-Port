@@ -3630,8 +3630,31 @@ namespace trlvr
             return false;
 
         const float scale = tune_world_scale();
-        const Mat4 controller_view = view_from_pose(
-            &controller.mDeviceToAbsoluteTracking.m[0][0], scale);
+        // Board view's god hands: the arm stretch (god_stretch_range, as
+        // Underworld) moves the controller out along a line from a point
+        // 20 cm below the head, in real tracking metres (y up), so the
+        // board's scale does not change how far an arm stretches. Everything
+        // built on this pose (drawn hand, pinch, grab zones, palm gear)
+        // follows the stretched hand.
+        Mat34 pose = controller.mDeviceToAbsoluteTracking;
+        const float range = config().god_stretch_range;
+        if (range > 0.0f && !g_cal_active && camera_third_person_mode() == 2 &&
+            camera_world_scale_factor() >= 1.0f &&
+            !camera_first_person_active() && config().hands_on_controllers)
+        {
+            const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
+            const float body[3] = { hm.m[0][3], hm.m[1][3] - 0.2f,
+                                    hm.m[2][3] };
+            const float hand[3] = { pose.m[0][3], pose.m[1][3],
+                                    pose.m[2][3] };
+            float reached[3];
+            go_go_reach(hand, body, 0.01f * config().god_stretch_start,
+                        range, reached);
+            for (int k = 0; k < 3; ++k)
+                if (std::isfinite(reached[k]))
+                    pose.m[k][3] = reached[k];
+        }
+        const Mat4 controller_view = view_from_pose(&pose.m[0][0], scale);
         const Mat4 hmd_view = view_from_pose(
             &hmd.mDeviceToAbsoluteTracking.m[0][0], scale);
 

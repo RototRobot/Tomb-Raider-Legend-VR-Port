@@ -945,4 +945,23 @@ namespace trlvr
             o[i] = inv[i] * det;
         return true;
     }
+
+    void go_go_reach(const float hand[3], const float body[3], float start,
+                     float range, float out[3])
+    {
+        const float d[3] = { hand[0] - body[0], hand[1] - body[1],
+                             hand[2] - body[2] };
+        const float distance = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        float extra = 0.0f;
+        if (range > 0.0f && distance > start && distance > 1e-6f)
+        {
+            const float excess = distance - start;
+            extra = range * excess * excess / (0.3f * 0.3f);
+            if (extra > 4.0f * range)
+                extra = 4.0f * range;
+        }
+        const float k = extra > 0.0f ? extra / distance : 0.0f;
+        for (int i = 0; i < 3; ++i)
+            out[i] = hand[i] + d[i] * k;
+    }
 }

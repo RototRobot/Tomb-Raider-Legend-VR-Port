@@ -220,4 +220,13 @@ namespace trlvr
 
     // Write a matrix back out as the four constant registers.
     void registers_from_matrix(const Mat4& m, float* out_regs16);
+
+    // Go-go reach (ported from the Underworld mod, there from the Pangea VR
+    // mods): a hand within `start` metres of `body` stays where it is; past
+    // that it is pushed further out along body -> hand by
+    // range * (excess / 0.3)^2, capped at 4 * range, so an arm 30 cm past the
+    // start (about fully out) reaches `range` metres further. Any consistent
+    // axes, metres. range <= 0 leaves the hand.
+    void go_go_reach(const float hand[3], const float body[3], float start,
+                     float range, float out[3]);
 }

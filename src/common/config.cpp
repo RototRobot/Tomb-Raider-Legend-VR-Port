@@ -105,6 +105,8 @@ namespace trlvr
             { L"vr", L"god_land_anim", L"-1" },
             { L"vr", L"god_drop_height", L"1" },
             { L"vr", L"god_drop_min", L"0.15" },
+            { L"vr", L"god_stretch_range", L"1" },
+            { L"vr", L"god_stretch_start", L"40" },
             { L"vr", L"god_throw_velocity", L"1" },
             { L"vr", L"god_throw_bounce", L"0.3" },
             { L"vr", L"god_throw_friction", L"0.5" },
@@ -448,6 +450,15 @@ namespace trlvr
             L"; floor (metres at her size) however little you lifted her, so even a\r\n"
             L"; light let-go is the game's own fall. 0 = exactly where held. 0 .. 1.\r\n"
             L"god_drop_min = 0.15\r\n"
+            L"; live: board view, arm stretch for the god hands. Within\r\n"
+            L"; god_stretch_start (real cm) of a point 20 cm below your head the hand\r\n"
+            L"; sits on the controller; past it the hand reaches out faster than your\r\n"
+            L"; arm, this many real metres further once the arm is 30 cm past the\r\n"
+            L"; start (about fully out), up to 4x that. 0 = off. 0 .. 5.\r\n"
+            L"god_stretch_range = 1\r\n"
+            L"; live: where the arm stretch starts, real cm from a point below your\r\n"
+            L"; head. 15 .. 80.\r\n"
+            L"god_stretch_start = 40\r\n"
             L"; live: god mode, a throw's release speed: 1 = your hand's fastest 5-frame\r\n"
             L"; average of the last 0.15 s (a jitter spike or the backswing ignored);\r\n"
             L"; 0 = the old peak.\r\n"
@@ -1312,6 +1323,10 @@ namespace trlvr
             c.god_drop_height =
                 rf(L"god_drop_height", L"1", 0.0f, 5.0f, 1.0f);
             c.god_drop_min = rf(L"god_drop_min", L"0.15", 0.0f, 1.0f, 0.15f);
+            c.god_stretch_range =
+                rf(L"god_stretch_range", L"1", 0.0f, 5.0f, 1.0f);
+            c.god_stretch_start =
+                rf(L"god_stretch_start", L"40", 15.0f, 80.0f, 40.0f);
             c.god_throw_velocity = rb(L"god_throw_velocity", true);
             c.god_throw_bounce =
                 rf(L"god_throw_bounce", L"0.3", 0.0f, 1.0f, 0.3f);
