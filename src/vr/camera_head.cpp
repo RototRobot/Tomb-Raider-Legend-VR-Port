@@ -34,6 +34,7 @@
 // ray is placed in Camera::targetFocusPoint before the game's own targeting
 // update, so its weapon-range and collision code remains authoritative.
 #include "camera_head.h"
+#include "gaze_target.h"
 #include "godmode/board_leash.h"
 #include "physics/body_push.h"
 #include "physics/body_volumes.h"
@@ -419,6 +420,10 @@ namespace trlvr
         const void* const kMainCamera = reinterpret_cast<const void*>(0x010FC660);
         short g_last_mode = -32768;
         bool g_accurate_aim_active = false;
+        // Third person, lock-on key held with nothing locked (user
+        // 2026-11-12): Lara's free aim follows the headset like precision
+        // aim (mode 13), instead of the stick-turned camera's forward.
+        bool g_lock_aim_active = false;
         int g_forward_candidate = -1;
         bool g_forward_candidate_verified = false;
         float g_head_aim_target[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -1035,11 +1040,27 @@ namespace trlvr
         void publish_head_aim(void* cam, const Mat4& reference,
                               const Mat4& visual)
         {
+            // Third-person gaze for lock-on (gaze_target): the head-posed
+            // view's centre ray, the same +Z row first-person aim uses.
+            if (cam == kMainCamera && config().gaze_target &&
+                !camera_first_person_active())
+            {
+                Mat4 to_world{};
+                if (invert(visual, &to_world))
+                {
+                    const float eye[3] = { to_world.m[3][0], to_world.m[3][1],
+                                           to_world.m[3][2] };
+                    const float dir[3] = { to_world.m[2][0], to_world.m[2][1],
+                                           to_world.m[2][2] };
+                    gaze_target_set_ray(eye, dir);
+                }
+            }
             if (!config().hmd_aim || cam != kMainCamera)
                 return;
             const short mode = *reinterpret_cast<const short*>(
                 (const unsigned char*)cam + kOffMode);
-            if (mode != 13 && !camera_first_person_active())
+            if (mode != 13 && !camera_first_person_active() &&
+                !g_lock_aim_active)
                 return;
 
             // The view is a row-vector world-to-camera matrix. Its +Z column
@@ -1063,6 +1084,10 @@ namespace trlvr
                 target_distance = 2000.0f;
 
             const bool first_person_aim = camera_first_person_active();
+            // Lock-on free aim: the head-posed view's exact centre ray, from
+            // the drawn eye (the classic seat is not the retail camera's).
+            const bool lock_aim = !first_person_aim && mode != 13 &&
+                                  g_lock_aim_active;
             float match = -2.0f;
             if (!first_person_aim && mode == 13 && !g_forward_candidate_verified)
             {
@@ -1104,7 +1129,7 @@ namespace trlvr
             Mat4 camera_to_world{};
             if (!invert(visual, &camera_to_world))
                 return;
-            if (first_person_aim)
+            if (first_person_aim || lock_aim)
             {
                 // The inverse's +Z row is the exact world-space centre ray,
                 // even if a camera rebuild left small scale/shear in the view.
@@ -1278,8 +1303,8 @@ namespace trlvr
                 origin[0], origin[1], origin[2], old_target[3]
             };
             for (int i = 0; i < 3; ++i)
-                target[i] = (g_aim_from_controller ? aim_origin[i]
-                                                   : origin[i]) +
+                target[i] = (g_aim_from_controller || lock_aim
+                                 ? aim_origin[i] : origin[i]) +
                             direction[i] * target_distance;
 
             memcpy(g_head_aim_target, target, sizeof(g_head_aim_target));
@@ -1510,7 +1535,8 @@ namespace trlvr
             float prior_ray_dot = 0.0f;
             float prior_near_offset = 0.0f;
             if (config().hmd_aim &&
-                (g_accurate_aim_active || camera_first_person_active()) &&
+                (g_accurate_aim_active || g_lock_aim_active ||
+                 camera_first_person_active()) &&
                 g_head_aim_target_valid &&
                 GetTickCount() - g_head_aim_target_time <= 100)
             {
@@ -1638,6 +1664,46 @@ namespace trlvr
                                 aim_vertical_slope_at(result,
                                                       kOffWcTransform), depth);
                         }
+                    }
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    g_head_aim_target_valid = false;
+                }
+            }
+            else if (applied && g_lock_aim_active && !g_accurate_aim_active)
+            {
+                // Lock-on with nothing locked: the stance aims along the
+                // retail camera's forward whatever targetFocusPoint says,
+                // so the final weapon target is put on the headset ray, at
+                // what that ray meets (as the first-person controller aim).
+                __try
+                {
+                    unsigned char* player = *reinterpret_cast<unsigned char**>(
+                        0x0111713C);
+                    float* result = reinterpret_cast<float*>(player + 0x760);
+                    float point[3]{};
+                    void* hit_instance = nullptr;
+                    g_aim_point_hit = aim_probe(g_head_aim_eye,
+                        g_head_aim_direction, aim_weapon_range(), point,
+                        &hit_instance);
+                    g_aim_point_enemy = g_aim_point_hit &&
+                        aim_instance_is_enemy(hit_instance);
+                    for (int i = 0; i < 3; ++i)
+                        result[i] = g_aim_point[i] = point[i];
+                    g_aim_point_time = GetTickCount();
+                    static DWORD last_report = 0;
+                    const DWORD now = GetTickCount();
+                    if (!last_report || now - last_report >= 5000)
+                    {
+                        last_report = now;
+                        float offset[3]{};
+                        for (int i = 0; i < 3; ++i)
+                            offset[i] = point[i] - g_head_aim_eye[i];
+                        log("aim: lock-on free aim on the headset ray, %s at "
+                            "%.1f units", g_aim_point_hit ? "hit"
+                                                          : "clear to range",
+                            sqrtf(dot3(offset, offset)));
                     }
                 }
                 __except(EXCEPTION_EXECUTE_HANDLER)
@@ -19699,7 +19765,21 @@ namespace trlvr
             if (main_camera)
             {
                 g_accurate_aim_active = mode == 13;
-                if (!g_accurate_aim_active && !camera_first_person_active())
+                bool lock_aim = false;
+                if (!g_accurate_aim_active && config().hmd_aim &&
+                    config().gaze_target && !camera_first_person_active() &&
+                    vr_input_lock_on_key_held())
+                {
+                    float unused[3];
+                    lock_aim = !combat_target_position(unused);
+                }
+                if (lock_aim != g_lock_aim_active)
+                    log("aim: lock-on free aim %s", lock_aim
+                        ? "follows the headset (lock-on held, no target)"
+                        : "off");
+                g_lock_aim_active = lock_aim;
+                if (!g_accurate_aim_active && !g_lock_aim_active &&
+                    !camera_first_person_active())
                     g_head_aim_target_valid = false;
             }
 

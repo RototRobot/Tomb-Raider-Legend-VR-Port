@@ -58,6 +58,8 @@ namespace trlvr
             { L"vr", L"hmd_drives_camera", L"1" },
             { L"vr", L"hmd_drives_position", L"1" },
             { L"vr", L"hmd_aim", L"1" },
+            { L"vr", L"gaze_target", L"1" },
+            { L"vr", L"gaze_target_degrees", L"25" },
             { L"vr", L"world_scale", L"291" },
             { L"vr", L"head_rotation_scale", L"1.0" },
             { L"vr", L"head_position_scale", L"1.0" },
@@ -319,6 +321,10 @@ namespace trlvr
             L"hmd_drives_camera = 1\r\n"
             L"hmd_drives_position = 1\r\n"
             L"hmd_aim = 1\r\n"
+            L"; Third person: lock-on picks the target nearest the centre of\r\n"
+            L"; your view, within this many degrees (else the game's pick).\r\n"
+            L"gaze_target = 1\r\n"
+            L"gaze_target_degrees = 25\r\n"
             L"; Lara measures about 510 game units / 1.75 metres.\r\n"
             L"world_scale = 291\r\n"
             L"head_rotation_scale = 1.0\r\n"
@@ -1110,6 +1116,13 @@ namespace trlvr
         g_config.hmd_drives_camera = read_bool(L"vr", L"hmd_drives_camera", true, path);
         g_config.hmd_drives_position = read_bool(L"vr", L"hmd_drives_position", true, path);
         g_config.hmd_aim = read_bool(L"vr", L"hmd_aim", true, path);
+        g_config.gaze_target = read_bool(L"vr", L"gaze_target", true, path);
+        {
+            const float degrees =
+                read_float(L"vr", L"gaze_target_degrees", L"25", path);
+            g_config.gaze_target_degrees = !std::isfinite(degrees) ? 25.0f
+                : degrees < 2.0f ? 2.0f : degrees > 90.0f ? 90.0f : degrees;
+        }
 
         float value = read_float(L"vr", L"world_scale", L"291", path);
         g_config.world_scale = value > 0.0f ? value : 291.0f;

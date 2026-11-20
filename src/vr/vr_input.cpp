@@ -5302,6 +5302,11 @@ namespace trlvr
             (g_holster_drawn[0] || g_holster_drawn[1]);
     }
 
+    bool vr_input_lock_on_key_held()
+    {
+        return g_held['G'] && !binocular_view_now();
+    }
+
     int vr_input_holster_visual_state(bool left)
     {
         const int hand = left ? 0 : 1;

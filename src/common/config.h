@@ -110,6 +110,10 @@ namespace trlvr
         float body_soft_stretch = 0.35f;
         float body_soft_ripple = 0.3f;
         bool hmd_aim = true;
+        // Third-person lock-on picks the target nearest the headset's gaze,
+        // within gaze_target_degrees (else the game's own pick).
+        bool gaze_target = true;
+        float gaze_target_degrees = 25.0f;
         float world_scale = 291.0f;
         float head_rotation_scale = 1.0f;
         float head_position_scale = 1.0f;
