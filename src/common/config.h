@@ -66,6 +66,13 @@ namespace trlvr
         // distortion layer, FXDRAW_WaterFX 0x00446D90, is not understood
         // well enough yet).
         bool water_effects = false;
+        // With water_effects (2026-11-12): the distortion's waves are worked
+        // out per eye from where each eye looks at the water surface
+        // (water_waves.cpp) instead of the game's, which are fixed to the
+        // screen and so turned with the head. water_wave_size is the longer
+        // wave's length in metres.
+        bool water_waves = true;
+        float water_wave_size = 0.6f;
         float wall_touch_max_speed = 2.6f;
         // Hardcore first person (2026-10-10, a user's request): the view
         // turns with Lara's body through flips, rolls and spins instead of

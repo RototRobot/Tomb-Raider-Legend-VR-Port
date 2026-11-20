@@ -65,6 +65,12 @@ namespace trlvr
     int reflection_stereo_reflection_mode();
     // Once per kind of draw: what samples the reflection or the copy.
     void reflection_stereo_note_draw(IDirect3DDevice9* device, bool stereo);
+    // The Water Effects screen layer: the game's c0 is the bare projection
+    // and the screen copy is bound. Drawn per eye with the game's c0.
+    // kind_out: 0 over the screen copy, 1 over the reflection.
+    bool reflection_stereo_screen_layer(IDirect3DDevice9* device,
+                                        const float* c0,
+                                        int* kind_out = nullptr);
     // A reflection draw kept the game's one camera.
     void reflection_stereo_note_unsubstituted();
 

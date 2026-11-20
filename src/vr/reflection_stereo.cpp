@@ -477,6 +477,58 @@ namespace trlvr
                 "camera (no per-eye substitution) -- %u so far", count);
     }
 
+    // The Water Effects layer (FXDRAW_WaterFX 0x00446D90, drawn from
+    // 0x00415C14): a 52x45 grid in the game camera's own space at the near
+    // plane (z 16), c0 the bare projection, sampling the screen copy or the
+    // reflection. Drawn
+    // per eye with an eye matrix it became a small card 16 units in front of
+    // the game camera (user, headset 2026-11-12: "two tiny windows close to
+    // my eye"). It is a screen layer: in each eye's viewport with the game's
+    // own projection it covers that eye as it covers the flat screen, and
+    // each pixel reads its own eye's half of the copy (Underworld S9).
+    bool reflection_stereo_screen_layer(IDirect3DDevice9* device,
+                                        const float* c0, int* kind_out)
+    {
+        // The game draws the grid twice a frame (two WaterFX calls, args 0
+        // and 1): once over the screen copy (refraction) and once over the
+        // reflection image (headset log 2026-11-12, caller 0x00415C14, 4488
+        // triangles both). Each eye reads its own copy half or reflection.
+        if (!device || device != g_device || !c0)
+            return false;
+        int kind = -1;   // 0 screen copy, 1 reflection
+        for (DWORD s = 0; s < 16 && kind < 0; ++s)
+        {
+            if (g_copy && g_bound[s] == (IDirect3DBaseTexture9*)g_copy)
+                kind = 0;
+            else if (g_enabled && g_refl_texture &&
+                     g_bound[s] == (IDirect3DBaseTexture9*)g_refl_texture)
+                kind = 1;
+        }
+        if (kind < 0)
+            return false;
+        // Registers c0..c3 as the game set them: x' = a x, y' = b y,
+        // z' = c z + d, w = z. Nothing else may be set.
+        const auto near0 = [](float v) { return v > -1e-3f && v < 1e-3f; };
+        const int zero[] = { 1, 2, 3, 4, 6, 7, 8, 9, 12, 13, 15 };
+        for (int i : zero)
+            if (!near0(c0[i]))
+                return false;
+        if (near0(c0[0]) || near0(c0[5]) || near0(c0[10]) ||
+            !near0(c0[14] - 1.0f))
+            return false;
+        static bool reported[2] = { false, false };
+        if (!reported[kind])
+        {
+            reported[kind] = true;
+            log("water effects: the %s layer is drawn per eye with the "
+                "game's own projection (P00 %.4f, P11 %.4f, near term %.3f)",
+                kind ? "reflection" : "screen copy", c0[0], c0[5], c0[11]);
+        }
+        if (kind_out)
+            *kind_out = kind;
+        return true;
+    }
+
     void reflection_stereo_note_draw(IDirect3DDevice9* device, bool stereo)
     {
         if (!device || device != g_device)

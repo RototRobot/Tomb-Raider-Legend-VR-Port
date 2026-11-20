@@ -15,6 +15,7 @@
 #include "../vr/vr_submit.h"
 #include "imgui_overlay.h"
 #include "../vr/reflection_stereo.h"
+#include "../vr/water_waves.h"
 #include "msaa_cap.h"
 #include "gpu_profile.h"
 #include "overlay.h"
@@ -389,10 +390,22 @@ namespace trlvr
             reflection_stereo_note_draw(_device, passes > 1);
             if (passes > 1)
             {
+                // The game's own c0 (vr_game_c0), not the upload, which the
+                // proxy already replaced with the headset's projection.
+                int layer_kind = -1;
+                const bool screen_layer = reflection_stereo_screen_layer(
+                    _device, vr_game_c0(), &layer_kind);
+                // Its waves worked out per eye on the water surface.
+                WaterLayer waves;
+                const bool own_waves = screen_layer &&
+                    water_waves_begin_layer(layer_kind, &waves);
                 HRESULT hr = D3D_OK;
                 for (int p = 0; p < passes; ++p)
                 {
                     stereo_begin_pass(_device, p);
+                    if (screen_layer)
+                        _device->SetVertexShaderConstantF(
+                            0, vr_game_c0(), 4);
                     if (hands_in_front)
                     {
                         // The game's viewport comes back with
@@ -409,7 +422,11 @@ namespace trlvr
                     // The right eye's water samples its own reflection.
                     reflection_stereo_eye_textures(_device, p);
                     sample_hand_projection(p == 0 ? EyeLeft : EyeRight);
-                    hr = issue();
+                    if (!own_waves ||
+                        !water_waves_draw(_device, waves,
+                                          p == 0 ? EyeLeft : EyeRight,
+                                          vr_game_c0()))
+                        hr = issue();
                 }
                 reflection_stereo_restore_textures(_device);
                 restore_scoped_state();

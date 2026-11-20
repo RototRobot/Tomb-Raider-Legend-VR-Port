@@ -182,6 +182,8 @@ namespace trlvr
             { L"vr", L"wall_touch", L"1" },
             { L"vr", L"water_reflection", L"0" },
             { L"vr", L"water_effects", L"0" },
+            { L"vr", L"water_waves", L"1" },
+            { L"vr", L"water_wave_size", L"0.6" },
             { L"vr", L"wall_touch_max_speed", L"2.6" },
             { L"vr", L"first_person_hardcore", L"0" },
             { L"vr", L"first_person_hardcore_threshold", L"20" },
@@ -659,6 +661,11 @@ namespace trlvr
             L"; Experimental, not working yet: 1 = water effects (the\r\n"
             L"; distortion at and under the surface) for each eye.\r\n"
             L"water_effects = 0\r\n"
+            L"; With water_effects: 1 = the waves stay on the water surface\r\n"
+            L"; in each eye; 0 = the game's own, fixed to the view.\r\n"
+            L"water_waves = 1\r\n"
+            L"; Length of the longer surface waves, metres.\r\n"
+            L"water_wave_size = 0.6\r\n"
             L"wall_touch_max_speed = 2.6\r\n"
             L"; 1 = hardcore first person: the view turns with Lara through\r\n"
             L"; flips, rolls and spins instead of staying level.\r\n"
@@ -1449,6 +1456,10 @@ namespace trlvr
             read_bool(L"vr", L"water_reflection", false, path);
         g_config.water_effects =
             read_bool(L"vr", L"water_effects", false, path);
+        g_config.water_waves = read_bool(L"vr", L"water_waves", true, path);
+        value = read_float(L"vr", L"water_wave_size", L"0.6", path);
+        g_config.water_wave_size = std::isfinite(value)
+            ? (value < 0.05f ? 0.05f : value > 5.0f ? 5.0f : value) : 0.6f;
         value = read_float(L"vr", L"wall_touch_max_speed", L"2.6", path);
         g_config.wall_touch_max_speed = std::isfinite(value)
             ? (value < 0.5f ? 0.5f : value > 10.0f ? 10.0f : value) : 2.6f;

@@ -2,6 +2,7 @@
 
 #include "hook.h"
 #include "reflection_stereo.h"
+#include "water_waves.h"
 
 #include "../common/config.h"
 
@@ -180,6 +181,7 @@ namespace trlvr
             reflection_route);
 
         disable_mono_planar_reflection(reflection_stereo_init());
+        water_waves_init();
         if (config().water_effects)
             log("water stereo: WaterFX scene sample 0x4FE kept -- the screen "
                 "copy is split by eye (needs Water Effects on in the Setup "
