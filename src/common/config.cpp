@@ -488,7 +488,7 @@ namespace trlvr
             L"; live: the torso grab zone's radius round her spine, metres at her\r\n"
             L"; size. 0.05 .. 1.\r\n"
             L"god_torso_radius = 0.25\r\n"
-            L"; live: ... plus this much of your own hand, metres. 0 .. 0.3.\r\n"
+            L"; live: ... plus this margin, metres at her size. 0 .. 0.3.\r\n"
             L"god_torso_margin = 0.08\r\n"
             L"; live: the torso grab zone slid down her spine toward her hips, metres\r\n"
             L"; at her size (the hold is unchanged). 0 .. 0.5.\r\n"

@@ -1002,7 +1002,8 @@ namespace trlvr
                    "Round her spine, metres at her size.");
             slider("Torso hand margin", &c.god_torso_margin, 0.0f, 0.3f,
                    "%.2f m", L"vr", L"god_torso_margin",
-                   "Plus this much of your own hand.");
+                   "Plus this margin, metres at her size (the zones keep "
+                   "their size against her at any world scale).");
             slider("Torso zone lower", &c.god_torso_lower, 0.0f, 0.5f,
                    "%.2f m", L"vr", L"god_torso_lower",
                    "Slide the zone down her spine toward her hips.");

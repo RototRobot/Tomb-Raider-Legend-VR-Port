@@ -6,7 +6,7 @@ static void test_god_torso()
     using namespace trlvr;
     // She is 175 units tall (metre 100) and looks 0.3 m tall to the player:
     // table = 175 / 0.3. Her torso axis runs from (0,0,95) to (0,0,145);
-    // the zone radius is 0.16 * 100 + 0.04 * table = 39.33.
+    // the zone radius is 0.16 * 100 + 0.04 * 100 = 20 (margins at her size).
     TorsoParams params;
     params.metre = 100.0f;
     params.table = 175.0f / 0.3f;
@@ -14,7 +14,7 @@ static void test_god_torso()
     const float dt = 1.0f / 60.0f;
     const float kPi = 3.14159265f;
 
-    const float hand_pos[3] = { 0.0f, -30.0f, 120.0f };     // in front of her belly
+    const float hand_pos[3] = { 0.0f, -15.0f, 120.0f };     // in front of her belly
     auto frame = [&](const Mat4& pose, bool fist, const float normal[3]) {
         TorsoInput in;
         in.dt = dt;
@@ -71,7 +71,7 @@ static void test_god_torso()
     {
         float a[3], b[3], r;
         CHECK(torso_zone(params, frame(at_belly, false, toward), a, b, &r));
-        CHECK(near(r, 16.0f + 0.04f * table) && a[2] == 95.0f && b[2] == 145.0f);
+        CHECK(near(r, 16.0f + 0.04f * params.metre) && a[2] == 95.0f && b[2] == 145.0f);
         TorsoInput none = frame(at_belly, false, toward);
         none.body_valid = false;
         CHECK(!torso_zone(params, none, a, b, &r));
@@ -129,14 +129,14 @@ static void test_god_torso()
     // A fist closing just after the hand left the zone (grace) still grabs.
     {
         TorsoState s;
-        CHECK(!try_grab(s, frame(translation(0, -45, 120), false, toward)).grabbed);
+        CHECK(!try_grab(s, frame(translation(0, -25, 120), false, toward)).grabbed);
         CHECK(!try_grab(s, frame(translation(0, -10, 190), false, toward)).grabbed);
         TorsoState g; TorsoEvents ev;
         torso_step(g, params, frame(at_belly, false, toward), &ev);
         CHECK(ev.aim[1] && ev.hover_enter[1]);
-        torso_step(g, params, frame(translation(0, -45, 120), false, toward), &ev);
+        torso_step(g, params, frame(translation(0, -25, 120), false, toward), &ev);
         CHECK(!ev.aim[1]);
-        torso_step(g, params, frame(translation(0, -45, 120), true, toward), &ev);
+        torso_step(g, params, frame(translation(0, -25, 120), true, toward), &ev);
         CHECK(ev.grabbed);
     }
 
@@ -156,7 +156,7 @@ static void test_god_torso()
         // The settle: the fist pulls the hand 3 units in; she does not move.
         for (int i = 0; i < 6; ++i)
         {
-            in = frame(translation(0, -30 + 0.5f * (i + 1), 120), true, toward);
+            in = frame(translation(0, -15 + 0.5f * (i + 1), 120), true, toward);
             torso_step(s, params, in, &ev);
         }
         m = torso_body_matrix(s, in);
@@ -164,22 +164,22 @@ static void test_god_torso()
         for (int i = 0; i < 20; ++i)
             torso_step(s, params, in, &ev);
         CHECK(s.settle <= 0.0f && s.hand == 1);
-        const float hy = -27.0f;    // where the hand ended up
+        const float hy = -12.0f;    // where the hand ended up
         in = frame(translation(50, hy, 120), true, toward);
         torso_step(s, params, in, &ev);
         m = torso_body_matrix(s, in);
         CHECK(near(m.m[3][0], 50.0f) && near(m.m[3][1], 0.0f, 1e-3f) && near(m.m[3][2], 0.0f, 1e-3f));
         CHECK(near(s.feet[0], 50.0f));
         // 90 deg about z at the hand (back at x 0): her belly point
-        // (0,0,120), (0,27,0) from the hand, goes to (-27,0,0) from it.
+        // (0,0,120), (0,12,0) from the hand, goes to (-12,0,0) from it.
         const float rz[3] = { 0, 0, kPi / 2 };
         in = frame(rotation_from_vector(rz) * translation(0, hy, 120), true, toward);
         torso_step(s, params, in, &ev);
         m = torso_body_matrix(s, in);
         float p[3];
         point_through(m, 0, 0, 120, p);
-        CHECK(near(p[0], -27.0f, 1e-3f) && near(p[1], hy, 1e-3f) && near(p[2], 120.0f, 1e-3f));
-        // 180 deg about x: (0,27,0) -> (0,-27,0); her feet (0,27,-120) -> (0,-27,120).
+        CHECK(near(p[0], hy, 1e-3f) && near(p[1], hy, 1e-3f) && near(p[2], 120.0f, 1e-3f));
+        // 180 deg about x: (0,12,0) -> (0,-12,0); her feet (0,12,-120) -> (0,-12,120).
         const float rx[3] = { kPi, 0, 0 };
         in = frame(rotation_from_vector(rx) * translation(0, hy, 120), true, toward);
         torso_step(s, params, in, &ev);
@@ -200,7 +200,7 @@ static void test_god_torso()
         torso_step(t, sp, tin, &ev);
         for (int i = 0; i < 20; ++i)
             torso_step(t, sp, tin, &ev);
-        tin = frame(translation(40, -30, 120), true, toward);
+        tin = frame(translation(40, -15, 120), true, toward);
         torso_step(t, sp, tin, &ev);
         CHECK(t.body_matrix.m[3][0] > 1.0f && t.body_matrix.m[3][0] < 39.0f);
         for (int i = 0; i < 60; ++i)

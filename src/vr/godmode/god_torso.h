@@ -11,7 +11,7 @@
 // Grab: a FIST whose palm faces her torso (the palm normal within
 // facing_dot of the direction from the palm centre to the nearest point of
 // her torso's axis), the palm centre inside the torso capsule (pelvis to
-// chest, torso_radius at her size plus hand_margin of the player's hand),
+// chest, torso_radius plus hand_margin, both at her size),
 // while she looks at most max_height tall to the player. A hand on one of
 // her soft parts (part_held) or a hand / Lara taken by another grab
 // (other_grab: the pluck) does not grab. The fist closing is the press;
@@ -69,7 +69,7 @@ namespace trlvr
         // Grab.
         float max_height = 0.6f;        // player metres: no grab while she looks taller
         float torso_radius = 0.16f;     // metres at her size
-        float hand_margin = 0.04f;      // player metres added to the radius
+        float hand_margin = 0.04f;      // metres at her size added to the radius
         // The zone slid down her spine (pelvis -> chest axis) toward her
         // hips by this many metres at her size; the hold is unchanged.
         float zone_lower = 0.0f;

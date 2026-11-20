@@ -261,7 +261,7 @@ namespace trlvr
         // god_torso_max_height tall to you (metres), holds her as a doll
         // that follows the hand rigidly, limbs swinging. The zone is the
         // pelvis-to-chest capsule of god_torso_radius (metres at her size)
-        // plus god_torso_margin of your hand (player metres), slid down toward
+        // plus god_torso_margin (metres at her size), slid down toward
         // her hips by god_torso_lower (metres at her size); the palm must face
         // her within god_torso_facing (a cosine), and the fist may close
         // god_torso_grace seconds after it was aimed. god_torso_fist_first: a

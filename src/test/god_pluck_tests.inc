@@ -6,7 +6,7 @@ static void test_god_pluck()
     using namespace trlvr;
     PluckParams params;
     params.metre = 100.0f;
-    params.table = 400.0f;      // radius 30 + 16 = 46, z from -12 to 196
+    params.table = 400.0f;      // radius 30 + 4 = 34, z from -3 to 184 (margins at her size)
 
     auto frame = [](float x, float y, float z, bool grip, int hand) {
         PluckInput in;
@@ -27,7 +27,7 @@ static void test_god_pluck()
     {
         PluckState s; PluckEvents ev;
         const float out[4][3] = { { 50, 0, 50 }, { 0, 0, 200 }, { 0, 0, -20 },
-                                  { 0, 47, 10 } };
+                                  { 0, 35, 10 } };
         for (const auto& o : out)
         {
             pluck_step(s, params, frame(o[0], o[1], o[2], false, 1), &ev);
@@ -37,17 +37,17 @@ static void test_god_pluck()
             pluck_step(s, params, frame(o[0], o[1], o[2], false, 1), &ev);
         }
         // The edges of the zone are inside.
-        pluck_step(s, params, frame(46, 0, -12, false, 1), &ev);
-        pluck_step(s, params, frame(46, 0, 196, true, 1), &ev);
+        pluck_step(s, params, frame(34, 0, -3, false, 1), &ev);
+        pluck_step(s, params, frame(34, 0, 184, true, 1), &ev);
         CHECK(ev.picked_up);
     }
 
     // Head only: a grip at her middle does nothing; at her head (radius
-    // 0.10 m x 100 + 0.01 x 400 = 14) it picks her up; no head, no pick-up.
+    // 0.10 m x 100 + 0.01 x 100 = 11) it picks her up; no head, no pick-up.
     {
         PluckParams hp = params;
         hp.head_only = true;
-        CHECK(near(pluck_head_radius(hp), 14.0f));
+        CHECK(near(pluck_head_radius(hp), 11.0f));
         auto at = [&](float x, float z, bool grip, bool head_valid) {
             PluckInput in = frame(x, 0, z, grip, 1);
             in.head_valid = head_valid;
@@ -59,28 +59,28 @@ static void test_god_pluck()
         pluck_step(s, hp, at(0, 100, true, true), &ev);
         CHECK(!ev.picked_up && s.hand == -1);
         pluck_step(s, hp, at(0, 100, false, true), &ev);
-        pluck_step(s, hp, at(10, 165, false, false), &ev);
-        pluck_step(s, hp, at(10, 165, true, false), &ev);
+        pluck_step(s, hp, at(8, 165, false, false), &ev);
+        pluck_step(s, hp, at(8, 165, true, false), &ev);
         CHECK(!ev.picked_up && s.hand == -1);
-        pluck_step(s, hp, at(10, 165, false, true), &ev);
+        pluck_step(s, hp, at(8, 165, false, true), &ev);
         CHECK(s.inside[1]);
-        pluck_step(s, hp, at(10, 165, true, true), &ev);
+        pluck_step(s, hp, at(8, 165, true, true), &ev);
         CHECK(ev.picked_up && s.hand == 1);
     }
 
     // Near her: a capsule from feet (0,0,0) to head top (0,0,180), reach
-    // 0.6 m x 100 + 0.03 x 400 = 72.
+    // 0.6 m x 100 + 0.03 x 100 = 63.
     {
         const float feet[3] = { 0, 0, 0 }, top[3] = { 0, 0, 180 };
-        const float in1[3] = { 70, 0, 90 }, out1[3] = { 74, 0, 90 };
-        const float above[3] = { 0, 0, 250 }, far_above[3] = { 0, 0, 260 };
+        const float in1[3] = { 62, 0, 90 }, out1[3] = { 64, 0, 90 };
+        const float above[3] = { 0, 0, 242 }, far_above[3] = { 0, 0, 250 };
         CHECK(pluck_near(params, feet, top, in1, 0.6f));
         CHECK(!pluck_near(params, feet, top, out1, 0.6f));
         CHECK(pluck_near(params, feet, top, above, 0.6f));
         CHECK(!pluck_near(params, feet, top, far_above, 0.6f));
         PluckParams wide = params;
         wide.head_radius = 0.3f;
-        CHECK(near(pluck_head_radius(wide), 34.0f));
+        CHECK(near(pluck_head_radius(wide), 31.0f));
     }
 
     // A grip held before entering does not pick up; a hover event fires.
@@ -336,9 +336,9 @@ static void test_god_pluck()
         CHECK(near(pluck_segment_distance(a, b, p3), 5.0f));
     }
 
-    // Arm zones: head ball at (0,0,170) radius 14; arm 0 from the shoulder
+    // Arm zones: head ball at (0,0,170) radius 11; arm 0 from the shoulder
     // (20,0,140), wrist (60,0,100), the hand on to the fingertips (70,0,90), reach 60,
-    // raised wrist (20,0,200); the zone is the hand only, radius 0.05 x 100 + 0.01 x 400 = 9.
+    // raised wrist (20,0,200); the zone is the hand only, radius 0.05 x 100 + 0.01 x 100 = 6.
     {
         PluckParams ap = params;
         ap.head_only = true;
@@ -437,11 +437,11 @@ static void test_god_pluck()
             pluck_step(s2, np, at(65, 0, 95, true), &ev);
             CHECK(!ev.picked_up);
         }
-        // Near the head (12.8 of 14 from it, 23 from the arm): the head.
+        // Near the head (9.2 of 11 from it, far from the arm): the head.
         {
             PluckState s; PluckEvents ev;
-            pluck_step(s, ap, at(8, 0, 160, false), &ev);
-            pluck_step(s, ap, at(8, 0, 160, true), &ev);
+            pluck_step(s, ap, at(6, 0, 163, false), &ev);
+            pluck_step(s, ap, at(6, 0, 163, true), &ev);
             CHECK(ev.picked_up && ev.part == kPluckHead && s.lifted);
         }
     }

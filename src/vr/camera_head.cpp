@@ -22587,7 +22587,7 @@ namespace trlvr
                     if (in.arm_valid[c])
                         zone_capsule(in.arm_wrist[c], in.arm_end[c],
                                      pp.arm_radius * pp.metre +
-                                         0.01f * pp.table, kZoneHand);
+                                         0.01f * pp.metre, kZoneHand);
         }
 
     }

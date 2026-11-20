@@ -269,7 +269,7 @@ namespace trlvr
         {
             if (c < 0 || c > 1 || p.arm_radius <= 0.0f)
                 return false;
-            const float r = p.arm_radius * p.metre + 0.01f * p.table;
+            const float r = p.arm_radius * p.metre + 0.01f * p.metre;
             if (standing)
                 return in.arm_valid[c] && pluck_segment_distance(in.arm_wrist[c], in.arm_end[c], pt) <= r;
             if (!in.drawn_arm_valid[c])
@@ -408,7 +408,7 @@ namespace trlvr
             }
             if (p.arm_radius > 0.0f)
             {
-                const float r = p.arm_radius * p.metre + 0.01f * p.table;
+                const float r = p.arm_radius * p.metre + 0.01f * p.metre;
                 for (int c = 0; c < 2; ++c)
                 {
                     if (!in.arm_valid[c])
@@ -440,9 +440,11 @@ namespace trlvr
         clear_pendulum(s);
     }
 
+    // Every zone is sized at her scale, margins too (user 2026-11-12: the
+    // hand margins were player metres, so a small Lara had huge zones).
     float pluck_head_radius(const PluckParams& p)
     {
-        return p.head_radius * p.metre + 0.01f * p.table;
+        return p.head_radius * p.metre + 0.01f * p.metre;
     }
 
     float pluck_segment_distance(const float a[3], const float b[3], const float p[3])
@@ -468,7 +470,7 @@ namespace trlvr
     bool pluck_near(const PluckParams& p, const float feet[3], const float head_top[3],
                     const float point[3], float reach)
     {
-        const float r = reach * p.metre + 0.03f * p.table;
+        const float r = reach * p.metre + 0.03f * p.metre;
         return pluck_segment_distance(feet, head_top, point) <= r;
     }
 
@@ -476,9 +478,9 @@ namespace trlvr
                     float* radius, float* bottom, float* top)
     {
         // The zone is her feet (no palm platform here: see god_pluck.h).
-        *radius = 0.30f * p.metre + 0.04f * p.table;
-        *bottom = root[2] - 0.03f * p.table;
-        *top = root[2] + 1.8f * p.metre + 0.04f * p.table;
+        *radius = 0.30f * p.metre + 0.04f * p.metre;
+        *bottom = root[2] - 0.03f * p.metre;
+        *top = root[2] + 1.8f * p.metre + 0.04f * p.metre;
     }
 
     bool pluck_drawn(const PluckState& s)

@@ -594,7 +594,7 @@ namespace trlvr
             a[k] = in.torso_a[k] - axis[k] * shift;
             b[k] = in.torso_b[k] - axis[k] * shift;
         }
-        *radius = p.torso_radius * p.metre + p.hand_margin * p.table;
+        *radius = p.torso_radius * p.metre + p.hand_margin * p.metre;
         return true;
     }
 
