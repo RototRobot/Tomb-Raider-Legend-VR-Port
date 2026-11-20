@@ -1053,7 +1053,13 @@ namespace trlvr
                     // 2026-11-10: menus over the movie backdrop looked
                     // squashed at 4:3).
                     Mat4 source = projection_from_game(ui_gp);
-                    if (movie_playing() && config().movie_widen_4x3)
+                    // Loading screens and menus are the same 4:3 2D layer
+                    // stretched over the same near-square back buffer, but
+                    // only the Bink handle used to trigger this, so menus
+                    // and loading screens came out ~0.69x as wide as they
+                    // should (user 2026-11-12). Everything on this
+                    // world-locked path is widened now.
+                    if (config().movie_widen_4x3)
                     {
                         const float box_aspect =
                             (centre.tan_right - centre.tan_left) /
