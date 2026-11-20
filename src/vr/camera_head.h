@@ -52,6 +52,9 @@ namespace trlvr
     void camera_toggle_view(const char* why);
     // A view switch is still gliding (or about to become first person).
     bool camera_view_tween_active();
+    // The next recentre lands at once instead of gliding (the first
+    // gameplay frame's recentre: nothing to glide from).
+    void camera_recentre_snap_next();
     // Third person: that controller hand is on Lara's body right now (its
     // trigger and grip then belong to the touch, not the game).
     bool camera_hand_touching_lara(bool left);
@@ -84,6 +87,9 @@ namespace trlvr
                            float dt);
     // The current preset's defaults (the palm sliders' notches).
     void camera_tp_defaults(float* scale, float* zoom, float* side);
+    // Reset view: the live third-person preset's zoom, side and seat height
+    // back to defaults (scale kept). True when that preset is the board.
+    bool camera_reset_view_adjust();
     // How much a drawn third-person hand's palm faces up (-2 unknown).
     float camera_palm_up(int hand);
     // A third-person hand's index fingertip as drawn (Lara's bone, or the

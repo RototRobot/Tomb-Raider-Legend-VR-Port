@@ -634,6 +634,15 @@ namespace trlvr
 
         void camera_section(Config& c)
         {
+            ImGui::SeparatorText("Moving the camera");
+            slider("Camera speed", &c.camera_speed, 0.1f, 3.0f, "x%.2f",
+                   L"vr", L"camera_speed",
+                   "Third-person views: how fast the stick moves the camera "
+                   "-- orbit, zoom, world scale and seat height all at once. "
+                   "1 = normal.");
+            slider("Camera smoothing", &c.third_person_smoothing, 0.0f, 0.5f,
+                   "%.2f s", L"vr", L"third_person_smoothing",
+                   "How softly the camera follows Lara's moves. 0 = rigid.");
             ImGui::SeparatorText("Shoulder camera");
             slider("Distance behind", &c.shoulder_distance, 0.3f, 6.0f,
                    "%.2f m", L"vr", L"shoulder_distance", nullptr);
@@ -1496,7 +1505,7 @@ namespace trlvr
                                    "button closes this (Reverb G2, WMR, Index: "
                                    "hold both sticks in).");
             if (ImGui::Button("Recentre"))
-                vr_recenter();
+                vr_reset_view();
             if (g_just_opened)
                 ImGui::SetItemDefaultFocus();
             help("Recentre the view on where you are looking now (the same "

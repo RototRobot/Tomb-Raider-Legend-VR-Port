@@ -3753,6 +3753,29 @@ namespace trlvr
             g_yaw_offset * 57.29578f);
     }
 
+    void vr_reset_view()
+    {
+        // The player's reset (user 2026-11-11): the recentre (heading,
+        // position, height), plus what they have moved by hand in the live
+        // view -- third-person zoom/side/height, the board box or the
+        // theatre window dragged off its spot. Scale stays. The camera
+        // glides to the result (camera_head's recentre glide).
+        const bool board = camera_reset_view_adjust();
+        if (board || g_diorama_active)
+        {
+            board_offset();
+            g_board_offset[0] = g_board_offset[1] = g_board_offset[2] = 0.0f;
+            tune_set_board_offset(g_board_offset);
+        }
+        if (g_theatre_active)
+        {
+            g_theatre_offset[0] = g_theatre_offset[1] =
+                g_theatre_offset[2] = 0.0f;
+            tune_set_theatre_offset(g_theatre_offset);
+        }
+        vr_recenter();
+    }
+
     unsigned vr_recenter_generation()
     {
         return g_recenter_generation;

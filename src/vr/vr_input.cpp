@@ -794,9 +794,6 @@ namespace trlvr
         ULONGLONG g_profile_next_check = 0;
         // The A press that skipped the last calibration step is not a jump.
         bool     g_cal_jump_hold = false;
-        // A recentre a moment after the view switch (user 2026-10-06), once
-        // the new camera has settled.
-        ULONGLONG g_view_recenter_at = 0;
         bool     g_cal_drew_guns = false;
 
         using PFN_PlayerCombat = void(__cdecl*)();
@@ -3404,13 +3401,15 @@ namespace trlvr
             g_last_screen = screen;
         }
 
-        // First gameplay since launch: recentre once, after 0.5 s of real
-        // play (no menu, load or cinematic, Lara present), so the view
+        // First gameplay since launch: recentre once on the first frame of
+        // real play (no menu, load or cinematic, Lara present), so the view
         // starts facing forward wherever the player stood (user,
-        // 2026-10-04).
+        // 2026-10-04). Snapped, not glided, and at the first frame rather
+        // than 0.5 s in (user 2026-11-13: resuming a game, the view slid a
+        // little just after the first render -- the recentre glide easing
+        // this one).
         {
             static bool recentred = false;
-            static ULONGLONG playing_since = 0;
             if (!recentred)
             {
                 bool lara = false;
@@ -3425,14 +3424,10 @@ namespace trlvr
                 }
                 const bool playing = !menu && lara &&
                     !ui_loading_screen_active() && !camera_cinematic_playing();
-                const ULONGLONG t = GetTickCount64();
-                if (!playing)
-                    playing_since = 0;
-                else if (!playing_since)
-                    playing_since = t;
-                else if (t - playing_since > 500)
+                if (playing && vr_pose_valid())
                 {
                     recentred = true;
+                    camera_recentre_snap_next();
                     vr_recenter();
                     log("controls: first gameplay since launch -- view "
                         "recentred once");
@@ -3723,7 +3718,7 @@ namespace trlvr
                 Button& recentre_button = g_game[GameRecentre];
                 const bool recentre_down = digital(recentre_button.handle);
                 if (recentre_down && !recentre_button.was)
-                    vr_recenter();
+                    vr_reset_view();
                 recentre_button.was = recentre_down;
                 release_all(true);
                 const bool pause_down = digital(g_game[GamePause].handle);
@@ -3829,16 +3824,13 @@ namespace trlvr
                 release_all();
                 camera_toggle_view(view_key ? "\\ key"
                                             : "right stick long press");
-                g_view_recenter_at = GetTickCount64() + 250;
-            }
-            // Once the glide has landed: a recentre in mid-flight would
-            // jerk the heading.
-            if (g_view_recenter_at && GetTickCount64() >= g_view_recenter_at &&
-                !camera_view_tween_active())
-            {
-                g_view_recenter_at = 0;
-                if (!menu)
-                    vr_recenter();
+                // Recentred with the switch, not after it (user 2026-11-13:
+                // the view slid sideways once the switch had landed -- the
+                // recentre 250 ms after the flight moved the view by the
+                // head's drift from the old centre, eased by the recentre
+                // glide). Now the recentre glide runs alongside the view's
+                // flight, so it is part of the switch's own move.
+                vr_recenter();
             }
         }
 
@@ -3921,7 +3913,7 @@ namespace trlvr
             Button& recentre_button = g_game[GameRecentre];
             const bool recentre_down = digital(recentre_button.handle);
             if (recentre_down && !recentre_button.was)
-                vr_recenter();
+                vr_reset_view();
             recentre_button.was = recentre_down;
             release_all();
             const bool pause_down = digital(g_game[GamePause].handle);
@@ -4129,7 +4121,7 @@ namespace trlvr
         Button& recentre = g_game[GameRecentre];
         const bool recentre_on = digital(recentre.handle);
         if (recentre_on && !recentre.was)
-            vr_recenter();
+            vr_reset_view();
         recentre.was = recentre_on;
 
         if (!menu)
@@ -5074,7 +5066,11 @@ namespace trlvr
                 if (pad != 0.0f)
                     x = fmaxf(-1.0f, fminf(1.0f, pad));
             }
-            const float speed = tune_look_speed();
+            // Third person: the look stick orbits the camera, so the
+            // camera speed multiplier applies to it too.
+            const float speed = tune_look_speed() *
+                (tp_gameplay && !camera_view_first_person()
+                     ? config().camera_speed : 1.0f);
             // Turn diagnostic (user 2026-10-12: no turning in first person
             // without immersive controls): what the stick reads and where
             // the first-person turn goes, every 2 s while it is pushed.

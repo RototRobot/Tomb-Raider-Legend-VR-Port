@@ -83,6 +83,9 @@ namespace trlvr
     // mouse and keyboard the headset is rarely pointing where the desk is,
     // and reaching for the keyboard turns the chair.
     void vr_recenter();
+    // The player's reset view: vr_recenter plus the live view's hand
+    // adjustments (zoom, side, height, dragged board/theatre), scale kept.
+    void vr_reset_view();
     unsigned vr_recenter_generation();
 
     // The head's displacement from the recentred origin, in engine units,

@@ -176,6 +176,8 @@ namespace trlvr
         // Seconds a view switch takes to glide from one view to the next
         // (position and world scale); 0 cuts.
         float view_transition_seconds = 0.3f;
+        // Seconds the view glides after a recentre / reset view; 0 snaps.
+        float recenter_transition_seconds = 0.35f;
         // Picture (2026-10-14): brightness (-0.5 .. 0.5, added) and contrast
         // (0.5 .. 2, about mid grey) on the frame sent to the headset, and
         // whether the game's own brightness / contrast sliders (its gamma
@@ -285,6 +287,9 @@ namespace trlvr
         float stick_height_speed = 0.4f;
         float board_zoom_speed = 1.0f;
         float board_scale_speed = 0.7f;
+        // Multiplies every stick-driven third-person camera move: orbit
+        // (look stick turn), zoom, world scale and seat height.
+        float camera_speed = 1.0f;
         // Experimental: grab her hand or arm and drag her up like a
         // ragdoll (arm zones, procedural IK hang). Off: the head grab with
         // Legend's own dangle animation.

@@ -40,6 +40,7 @@ namespace trlvr
             { L"vr", L"xr_copy_wait", L"1" },
             { L"vr", L"xr_grip_match_openvr", L"0" },
             { L"vr", L"view_transition_seconds", L"0.3" },
+            { L"vr", L"recenter_transition_seconds", L"0.35" },
             { L"vr", L"picture_brightness", L"0" },
             { L"vr", L"picture_contrast", L"1" },
             { L"vr", L"picture_follow_game", L"1" },
@@ -127,6 +128,7 @@ namespace trlvr
             { L"vr", L"stick_height_speed", L"0.4" },
             { L"vr", L"board_zoom_speed", L"1" },
             { L"vr", L"board_scale_speed", L"0.7" },
+            { L"vr", L"camera_speed", L"1" },
             { L"vr", L"god_drag_hand", L"0" },
             { L"vr", L"body_push", L"1" },
             { L"vr", L"body_push_strength", L"1" },
@@ -517,6 +519,9 @@ namespace trlvr
             L"; live: board view, hold the right stick in and push up/down to scale\r\n"
             L"; Lara (up = bigger), e-folds a second at full tilt. 0 = off. 0 .. 5.\r\n"
             L"board_scale_speed = 0.7\r\n"
+            L"; live: third-person views, multiplies every stick camera move:\r\n"
+            L"; orbit, zoom, world scale and seat height. 0.1 .. 3.\r\n"
+            L"camera_speed = 1\r\n"
             L"; live: EXPERIMENTAL, god mode: grab her hand or arm and drag her up\r\n"
             L"; like a ragdoll, hanging by IK. 0 = the head grab and Legend's dangle\r\n"
             L"; animation.\r\n"
@@ -1320,6 +1325,7 @@ namespace trlvr
                 rf(L"board_zoom_speed", L"1", 0.0f, 5.0f, 1.0f);
             c.board_scale_speed =
                 rf(L"board_scale_speed", L"0.7", 0.0f, 5.0f, 0.7f);
+            c.camera_speed = rf(L"camera_speed", L"1", 0.1f, 3.0f, 1.0f);
             c.god_drag_hand = rb(L"god_drag_hand", false);
             c.body_push = rb(L"body_push", true);
             c.body_push_strength =
@@ -1381,6 +1387,10 @@ namespace trlvr
         value = read_float(L"vr", L"view_transition_seconds", L"0.3", path);
         g_config.view_transition_seconds = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 2.0f ? 2.0f : value) : 0.3f;
+        value = read_float(L"vr", L"recenter_transition_seconds", L"0.35",
+                           path);
+        g_config.recenter_transition_seconds = std::isfinite(value)
+            ? (value < 0.0f ? 0.0f : value > 2.0f ? 2.0f : value) : 0.35f;
         value = read_float(L"vr", L"body_spring_angle", L"4", path);
         g_config.body_spring_angle = std::isfinite(value)
             ? (value < 0.0f ? 0.0f : value > 15.0f ? 15.0f : value) : 4.0f;

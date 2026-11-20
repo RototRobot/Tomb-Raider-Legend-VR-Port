@@ -17744,6 +17744,189 @@ namespace trlvr
             }
         }
 
+        // Recentre glide (user 2026-11-11, as Underworld): a recentre or
+        // reset view moves the main camera in one step; instead the view
+        // drawn eases from where it was to the new one. K, a camera-space
+        // transform with drawn = new * K, starts at the jump and goes to
+        // identity (rotation slerped, translation scaled) on a smoothstep
+        // over [vr] recenter_transition_seconds. The first frames after the
+        // recentre only hold the old view: the recentred head pose reaches
+        // the view a frame later than the recentre itself.
+        struct RecentreGlide
+        {
+            unsigned seen = 0;
+            bool seen_valid = false;
+            Mat4 last = Mat4::identity();   // main view as last drawn
+            bool last_valid = false;
+            Mat4 held = Mat4::identity();   // the view at the recentre
+            int hold_frames = 0;
+            bool active = false;
+            float q[4] = { 1.0f, 0.0f, 0.0f, 0.0f };   // K's rotation
+            float t[3] = { 0.0f, 0.0f, 0.0f };          // K's translation
+            LARGE_INTEGER start{};
+        };
+        RecentreGlide g_glide;
+        bool g_glide_snap_next = false;
+
+        void mat3_to_quat(const Mat4& m, float q[4])
+        {
+            const float tr = m.m[0][0] + m.m[1][1] + m.m[2][2];
+            if (tr > 0.0f)
+            {
+                const float s = sqrtf(tr + 1.0f) * 2.0f;
+                q[0] = 0.25f * s;
+                q[1] = (m.m[2][1] - m.m[1][2]) / s;
+                q[2] = (m.m[0][2] - m.m[2][0]) / s;
+                q[3] = (m.m[1][0] - m.m[0][1]) / s;
+            }
+            else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2])
+            {
+                const float s = sqrtf(1.0f + m.m[0][0] - m.m[1][1] -
+                                      m.m[2][2]) * 2.0f;
+                q[0] = (m.m[2][1] - m.m[1][2]) / s;
+                q[1] = 0.25f * s;
+                q[2] = (m.m[0][1] + m.m[1][0]) / s;
+                q[3] = (m.m[0][2] + m.m[2][0]) / s;
+            }
+            else if (m.m[1][1] > m.m[2][2])
+            {
+                const float s = sqrtf(1.0f + m.m[1][1] - m.m[0][0] -
+                                      m.m[2][2]) * 2.0f;
+                q[0] = (m.m[0][2] - m.m[2][0]) / s;
+                q[1] = (m.m[0][1] + m.m[1][0]) / s;
+                q[2] = 0.25f * s;
+                q[3] = (m.m[1][2] + m.m[2][1]) / s;
+            }
+            else
+            {
+                const float s = sqrtf(1.0f + m.m[2][2] - m.m[0][0] -
+                                      m.m[1][1]) * 2.0f;
+                q[0] = (m.m[1][0] - m.m[0][1]) / s;
+                q[1] = (m.m[0][2] + m.m[2][0]) / s;
+                q[2] = (m.m[1][2] + m.m[2][1]) / s;
+                q[3] = 0.25f * s;
+            }
+            const float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] +
+                                  q[3] * q[3]);
+            for (int i = 0; i < 4; ++i)
+                q[i] = n > 1e-6f ? q[i] / n : (i == 0 ? 1.0f : 0.0f);
+        }
+
+        Mat4 quat_to_mat(const float q[4])
+        {
+            const float w = q[0], x = q[1], y = q[2], z = q[3];
+            Mat4 m = Mat4::identity();
+            m.m[0][0] = 1 - 2 * (y * y + z * z);
+            m.m[0][1] = 2 * (x * y - w * z);
+            m.m[0][2] = 2 * (x * z + w * y);
+            m.m[1][0] = 2 * (x * y + w * z);
+            m.m[1][1] = 1 - 2 * (x * x + z * z);
+            m.m[1][2] = 2 * (y * z - w * x);
+            m.m[2][0] = 2 * (x * z - w * y);
+            m.m[2][1] = 2 * (y * z + w * x);
+            m.m[2][2] = 1 - 2 * (x * x + y * y);
+            return m;
+        }
+
+        // K at amount a (1 = the whole jump, 0 = none): q slerped toward
+        // identity, translation scaled.
+        Mat4 glide_transform(float a)
+        {
+            float q[4] = { g_glide.q[0], g_glide.q[1], g_glide.q[2],
+                           g_glide.q[3] };
+            if (q[0] < 0.0f)
+                for (float& v : q)
+                    v = -v;
+            const float angle = acosf(fminf(1.0f, q[0]));
+            const float s = sinf(angle);
+            float r[4];
+            if (s < 1e-5f)
+            {
+                for (int i = 0; i < 4; ++i)
+                    r[i] = (i == 0 ? 1.0f - a : 0.0f) + q[i] * a;
+            }
+            else
+            {
+                const float wi = sinf((1.0f - a) * angle) / s;
+                const float wq = sinf(a * angle) / s;
+                for (int i = 0; i < 4; ++i)
+                    r[i] = (i == 0 ? wi : 0.0f) + q[i] * wq;
+            }
+            Mat4 k = quat_to_mat(r);
+            for (int i = 0; i < 3; ++i)
+                k.m[3][i] = g_glide.t[i] * a;
+            return k;
+        }
+
+        // Called once per main-camera build with the new main view (before
+        // it is stored). Returns the K to apply to every matrix this build.
+        bool view_tween_starting();     // below, with the view tween
+
+        bool recentre_glide(const Mat4& fresh, Mat4* k)
+        {
+            const unsigned generation = vr_recenter_generation();
+            const float seconds = config().recenter_transition_seconds;
+            if (!g_glide.seen_valid)
+            {
+                g_glide.seen = generation;
+                g_glide.seen_valid = true;
+            }
+            if (generation != g_glide.seen)
+            {
+                g_glide.seen = generation;
+                const bool snap = g_glide_snap_next;
+                g_glide_snap_next = false;
+                // Not in the middle of a view switch's flight, except the
+                // switch's own recentre at its very start: then the glide
+                // runs alongside the flight (2026-11-13).
+                if (!snap && seconds > 0.01f && g_glide.last_valid &&
+                    (!camera_view_tween_active() || view_tween_starting()))
+                {
+                    g_glide.held = g_glide.last;
+                    g_glide.hold_frames = 2;
+                    g_glide.active = true;
+                }
+                else
+                    g_glide.active = false;
+            }
+            if (!g_glide.active)
+                return false;
+
+            if (g_glide.hold_frames > 0)
+            {
+                // drawn = held: K = fresh^-1 * held, kept whole.
+                Mat4 inv{};
+                if (!invert(fresh, &inv))
+                {
+                    g_glide.active = false;
+                    return false;
+                }
+                const Mat4 k0 = inv * g_glide.held;
+                mat3_to_quat(k0, g_glide.q);
+                for (int i = 0; i < 3; ++i)
+                    g_glide.t[i] = k0.m[3][i];
+                if (--g_glide.hold_frames == 0)
+                    QueryPerformanceCounter(&g_glide.start);
+                *k = glide_transform(1.0f);
+                return true;
+            }
+            LARGE_INTEGER now, freq;
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&freq);
+            const float elapsed = (float)(now.QuadPart -
+                                          g_glide.start.QuadPart) /
+                                  (float)freq.QuadPart;
+            const float p = seconds > 0.01f ? elapsed / seconds : 1.0f;
+            if (!(p < 1.0f))
+            {
+                g_glide.active = false;
+                return false;
+            }
+            const float s = p * p * (3.0f - 2.0f * p);
+            *k = glide_transform(1.0f - s);
+            return true;
+        }
+
         void apply_head_pose(void* cam, const float* camera_position)
         {
             // Hardcore first person: her body's turn, about the eye.
@@ -17765,6 +17948,8 @@ namespace trlvr
             // read different ones. Leaving any behind would put the picture and
             // the culling in different places.
             const unsigned targets[3] = { kOffWcTransform, kOffWcNoShake, kOffWcTransform2 };
+            Mat4 glide_k = Mat4::identity();
+            bool glide = false;
             for (int t = 0; t < 3; ++t)
             {
                 Mat4 m = load_matrix(cam, targets[t]);
@@ -17795,6 +17980,18 @@ namespace trlvr
                 if (hardcore)
                     m = body_turn * m;
                 m = m * head_view;
+                if (cam == kMainCamera)
+                {
+                    if (t == 0)
+                        glide = recentre_glide(m, &glide_k);
+                    if (glide)
+                        m = m * glide_k;
+                    if (t == 0)
+                    {
+                        g_glide.last = m;
+                        g_glide.last_valid = true;
+                    }
+                }
                 store_matrix(cam, targets[t], m);
             }
 
@@ -17827,6 +18024,8 @@ namespace trlvr
             // the view swings the anchor round Lara) and the recentre seen.
             float heading = 0.0f;
             unsigned recentre = 0;
+            // The view heading the smoothed position was last turned to.
+            float follow_heading = 0.0f;
             int mode = -1;
             LARGE_INTEGER last{};
         };
@@ -17863,6 +18062,13 @@ namespace trlvr
                 ? (float)((double)(now.QuadPart -
                                    g_view_tween.start.QuadPart) /
                           (double)frequency.QuadPart) : 1.0e6f;
+        }
+
+        // A view switch's flight that has only just begun (the recentre
+        // that comes with the switch lands in its first frames).
+        bool view_tween_starting()
+        {
+            return g_view_tween.active && view_tween_elapsed() < 0.1f;
         }
 
         // Where the first-person eye would be: her head joint and the eye
@@ -18199,6 +18405,7 @@ namespace trlvr
             LARGE_INTEGER now{}, frequency{};
             QueryPerformanceCounter(&now);
             QueryPerformanceFrequency(&frequency);
+            const float view_heading = atan2f(forward[1], forward[0]);
 
             // A view switch in flight: from where the camera was to this
             // preset's seat (or her eye), eased in and out. The goal is
@@ -18225,6 +18432,7 @@ namespace trlvr
                 g_tp_camera.valid = true;
                 g_tp_camera.mode = mode;
                 g_tp_camera.last = now;
+                g_tp_camera.follow_heading = view_heading;
                 if (!have_goal || u >= 1.0f)
                 {
                     tw.active = false;
@@ -18243,6 +18451,29 @@ namespace trlvr
                 ? (double)(now.QuadPart - g_tp_camera.last.QuadPart) /
                   (double)frequency.QuadPart : 1.0;
             g_tp_camera.last = now;
+            // Orbiting (user 2026-11-11: the board orbit drifted, as if
+            // round an octagon): the view turns at once with the game
+            // camera, but the smoothing below pulled the seat towards its
+            // new spot in a straight line -- cutting the corner of every
+            // step of the turn and lagging the view, so Lara slid off
+            // centre and floated back. The smoothed seat is turned round
+            // her by the same heading change first, so a turn is a true
+            // circle and only her own moves (and zoom, height) are smoothed.
+            if (g_tp_camera.valid && g_tp_camera.mode == mode)
+            {
+                float turn = view_heading - g_tp_camera.follow_heading;
+                if (turn > 3.14159265f) turn -= 6.28318531f;
+                if (turn < -3.14159265f) turn += 6.28318531f;
+                if (std::isfinite(turn) && turn != 0.0f)
+                {
+                    const float c = cosf(turn), s = sinf(turn);
+                    const float px = g_tp_camera.position[0] - focus[0];
+                    const float py = g_tp_camera.position[1] - focus[1];
+                    g_tp_camera.position[0] = focus[0] + px * c - py * s;
+                    g_tp_camera.position[1] = focus[1] + px * s + py * c;
+                }
+            }
+            g_tp_camera.follow_heading = view_heading;
             float jump = 0.0f;
             if (g_tp_camera.valid)
                 for (int k = 0; k < 3; ++k)
@@ -19163,6 +19394,31 @@ namespace trlvr
                     "scene x%.2f kept", g_theatre_scale);
         }
 
+        // Reset view in classic third person also swings the retail follow
+        // camera's orbit back behind Lara, so camera-relative movement keeps
+        // matching the view. GenericCameraProcess (0x004827E0) keeps the
+        // orbit as Euler angles in radians, x = tilt (negative = camera
+        // above the focus), z = yaw:
+        //   +0x500/+0x508  current tilt / yaw; 0x00480940 copies them into
+        //                  Rotation (+0x270) and places the camera at
+        //                  focus + R * (0, -distance, 0) (0x0048D8B0)
+        //   +0x600/+0x608  target tilt / yaw; +0x600 is the camera's base
+        //                  tilt (CAMERA_SetTilt 0x0047C9D0; engine init
+        //                  0x40C644F8 = -5 deg, 0x0047C422)
+        //   +0x610/+0x628  the goals +0x500 / +0x508 spring toward
+        //                  (0x00480EB0 / 0x00480FA0), spring state in
+        //                  +0x590/+0x5A0 and +0x598/+0x5A8
+        //   +0x324 automatic tilt, +0x1158 tilt offset (decays to zero);
+        //   the tilt goal is +0x600 + +0x324 + +0x1158 (0x00481EA6..)
+        //   word +0x1190  a rotation in progress: blocks auto-centre until
+        //                 yaw reaches its target (0x00482FB6, 0x0048107A)
+        // Retail's own "behind the focus instance" (0x00486977, again at
+        // 0x0048767F for the aim camera) is yaw = instance+0x38 + pi,
+        // normalised by 0x0048CD30 to [0, 2pi). Snapped (a glide would be
+        // a view turn the player did not make), on the main camera's next
+        // build, in follow mode only.
+        bool g_classic_orbit_reset_pending = false;
+
         void __cdecl detour_body(void* cam);
         void __cdecl detour(void* cam)
         {
@@ -20015,6 +20271,46 @@ namespace trlvr
             tp_view_save(mode);
     }
 
+    bool camera_reset_view_adjust()
+    {
+        // The live third-person preset only (as Underworld's reset view):
+        // zoom, sideways offset and seat height back to their defaults; the
+        // scale stays. First person has nothing here beyond the recentre.
+        if (camera_view_first_person())
+            return false;
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        if (mode < 0 || mode > 2)
+            return false;
+        float zoom = 1.0f, side = 0.0f;
+        camera_tp_defaults(nullptr, &zoom, &side);
+        g_tp_zoom[mode] = zoom;
+        g_tp_side[mode] = side;
+        tp_view_save(mode);
+        const Config defaults{};
+        Config& c = config_edit();
+        const bool board = mode == 2;
+        float& height = board ? c.board_height : c.shoulder_height;
+        const float wanted = board ? defaults.board_height
+                                   : defaults.shoulder_height;
+        if (height != wanted)
+        {
+            height = wanted;
+            wchar_t text[32];
+            swprintf(text, 32, L"%.3f", wanted);
+            config_save_setting(L"vr", board ? L"board_height"
+                                             : L"shoulder_height", text);
+        }
+        log("view: reset -- %S preset zoom x%.2f, side %+.2f, %s %.2f; "
+            "scale kept", kTpPresetNames[mode], zoom, side,
+            board ? "board height" : "shoulder height", wanted);
+        // Classic keeps the retail camera's heading: swing its orbit back
+        // behind Lara too (applied on the main camera's next build).
+        if (mode == 0)
+            g_classic_orbit_reset_pending = true;
+        return board;
+    }
+
 
     bool camera_hand_index_tip_head(bool left, float out[3])
     {
@@ -20056,8 +20352,10 @@ namespace trlvr
                     scale_in = 0.0f;
                 float zoom = g_tp_zoom[mode], scale = g_tp_scale[mode];
                 if (board_stick_step(&zoom, &scale, zoom_in, scale_in,
-                                     config().board_zoom_speed,
-                                     config().board_scale_speed, dt, 0.3f,
+                                     config().board_zoom_speed *
+                                         config().camera_speed,
+                                     config().board_scale_speed *
+                                         config().camera_speed, dt, 0.3f,
                                      3.5f, 1.0f, 25.0f))
                 {
                     g_tp_zoom[mode] = zoom;
@@ -20069,7 +20367,7 @@ namespace trlvr
             {
                 Config& c = config_edit();
                 const float step = height_in * config().stick_height_speed *
-                                   dt;
+                                   config().camera_speed * dt;
                 if (mode == 2)
                     c.board_height = fmaxf(0.0f,
                         fminf(3.0f, c.board_height + step));
@@ -22599,6 +22897,11 @@ namespace trlvr
             log("view: arrived at her head -- first person");
         }
         return g_view_first_person != 0;
+    }
+
+    void camera_recentre_snap_next()
+    {
+        g_glide_snap_next = true;
     }
 
     bool camera_view_tween_active()
