@@ -5123,6 +5123,7 @@ namespace trlvr
         PerfCpuScope perf_scope(PerfSubmit);
         imgui_state_reset();
         hud_capture_frame();
+        ui_space_frame();
         camera_core_position_restore();
         if (!g_ready || !back_buffer)
             return;

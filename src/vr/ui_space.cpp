@@ -29,11 +29,32 @@ namespace trlvr
             { 0x53, 0x8B, 0x5C, 0x24, 0x08 };
         constexpr unsigned char kScreenWipeSignature[5] =
             { 0xA0, 0x53, 0x54, 0x0E, 0x01 };
+        // The screen wipe draws nothing itself (disassembly 2026-11-11):
+        // its three quad calls (0x00406F20 -> 0x00406640) append to the
+        // current batched 2D drawable (pointer at 0x01002520, extended by
+        // 0x00414C10 while texture and state match), which BasicDrawable::Draw
+        // renders later -- often merged with the menu's own quads, so the
+        // fade went into the floating menu. With 0x010024E8 set the quads go
+        // to a separate deferred list (0x010028E0) instead.
+        constexpr uintptr_t kDrawQuads2D = 0x00406F20;
+        constexpr uintptr_t kCurrentBatchDrawable = 0x01002520;
+        constexpr uintptr_t kDeferred2DList = 0x010024E8;
+        constexpr unsigned char kDrawQuads2DSignature[7] =
+            { 0x8B, 0x44, 0x24, 0x0C, 0x8B, 0x48, 0x08 };
 
         using PFN_Draw = void(__thiscall*)(void*, unsigned, void*);
         PFN_Draw g_original = nullptr;
         using PFN_ScreenWipes = void(__cdecl*)();
         PFN_ScreenWipes g_original_screen_wipes = nullptr;
+        using PFN_DrawQuads2D = void(__cdecl*)(uintptr_t, uintptr_t,
+                                               uintptr_t, uintptr_t);
+        PFN_DrawQuads2D g_original_draw_quads = nullptr;
+        // Drawables that hold this frame's screen-wipe quads. Drawables come
+        // from a per-frame pool, so the list is replaced by every wipe pass
+        // and dropped at the second Present without one.
+        void* g_wipe_drawables[8]{};
+        unsigned g_wipe_drawable_count = 0;
+        unsigned g_wipe_presents = 0;
         bool g_drawing_hud = false;
         bool g_drawing_world_marker = false;
         // 0x202F caution triangle, 0x204E/0x205A lock-on reticle ring and
@@ -201,14 +222,99 @@ namespace trlvr
                 }
             }
             const bool outer = g_drawing_screen_wipe;
+            if (!outer)
+            {
+                g_wipe_drawable_count = 0;
+                g_wipe_presents = 0;
+            }
             g_drawing_screen_wipe = true;
             g_original_screen_wipes();
             g_drawing_screen_wipe = outer;
         }
 
+        bool is_wipe_drawable(void* self)
+        {
+            for (unsigned i = 0; i < g_wipe_drawable_count; ++i)
+                if (g_wipe_drawables[i] == self)
+                    return true;
+            return false;
+        }
+
+        // During a screen wipe, each quad call gets a drawable of its own:
+        // the current batch is closed before (so the quads are not appended
+        // to a menu batch) and after (so later menu quads are not appended
+        // to the wipe's), and the drawable it made is remembered.
+        void __cdecl draw_quads_detour(uintptr_t a, uintptr_t b, uintptr_t c,
+                                       uintptr_t d)
+        {
+            if (!g_drawing_screen_wipe)
+            {
+                g_original_draw_quads(a, b, c, d);
+                return;
+            }
+            void* volatile* batch =
+                reinterpret_cast<void* volatile*>(kCurrentBatchDrawable);
+            const bool deferred_list =
+                *reinterpret_cast<volatile const int*>(kDeferred2DList) != 0;
+            *batch = nullptr;
+            g_original_draw_quads(a, b, c, d);
+            void* made = *batch;
+            *batch = nullptr;
+
+            static bool reported_batch = false;
+            static bool reported_list = false;
+            static bool reported_none = false;
+            if (made)
+            {
+                if (!is_wipe_drawable(made) && g_wipe_drawable_count < 8)
+                    g_wipe_drawables[g_wipe_drawable_count++] = made;
+                if (!reported_batch)
+                {
+                    reported_batch = true;
+                    log("ui: screen-wipe quads batched into their own drawable "
+                        "%p (vtable %X)", made, (unsigned)object_vtable(made));
+                }
+            }
+            else if (deferred_list && !reported_list)
+            {
+                reported_list = true;
+                log("ui: screen-wipe quads went to the deferred 2D list -- "
+                    "not tagged, the fade may show in the menu");
+            }
+            else if (!deferred_list && !reported_none)
+            {
+                reported_none = true;
+                log("ui: screen-wipe quad call made no batch drawable");
+            }
+        }
+
         void __fastcall draw_detour(void* self, void*, unsigned pass, void* previous)
         {
             PerfCpuScope perf_scope(PerfUiDraw);
+            if (g_wipe_drawable_count && is_wipe_drawable(self))
+            {
+                static bool reported = false;
+                if (!reported)
+                {
+                    reported = true;
+                    log("ui: screen-wipe drawable %p drawn as a fullscreen "
+                        "overlay", self);
+                }
+                const bool outer_wipe = g_drawing_screen_wipe;
+                const bool outer_hud = g_drawing_hud;
+                const bool outer_world_locked = g_world_locked_hud;
+                const bool outer_marker = g_drawing_world_marker;
+                g_drawing_screen_wipe = true;
+                g_drawing_hud = false;
+                g_world_locked_hud = false;
+                g_drawing_world_marker = false;
+                g_original(self, pass, previous);
+                g_drawing_screen_wipe = outer_wipe;
+                g_drawing_hud = outer_hud;
+                g_world_locked_hud = outer_world_locked;
+                g_drawing_world_marker = outer_marker;
+                return;
+            }
             const uintptr_t vtable = object_vtable(self);
             const bool hud = g_classification_ready &&
                              vtable == kHudDrawableVtable;
@@ -366,6 +472,22 @@ namespace trlvr
             g_original_screen_wipes =
                 reinterpret_cast<PFN_ScreenWipes>(trampoline);
             log("ui: retail screen wipes tagged as fullscreen VR overlays");
+            trampoline = nullptr;
+            if (hook_install((void*)kDrawQuads2D, (void*)&draw_quads_detour,
+                             &trampoline, kDrawQuads2DSignature,
+                             sizeof(kDrawQuads2DSignature),
+                             "DrawQuads2D (screen-wipe batches)"))
+                g_original_draw_quads =
+                    reinterpret_cast<PFN_DrawQuads2D>(trampoline);
         }
+    }
+
+    void ui_space_frame()
+    {
+        // The wipe list survives one Present (in case the drawables are
+        // rendered after the next frame's wipe pass) and is dropped at the
+        // second without a wipe pass, before the pool reuses the addresses.
+        if (g_wipe_drawable_count && ++g_wipe_presents >= 2)
+            g_wipe_drawable_count = 0;
     }
 }

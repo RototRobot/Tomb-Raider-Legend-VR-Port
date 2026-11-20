@@ -2,6 +2,8 @@
 namespace trlvr
 {
     void ui_space_init();
+    // Once per presented frame, on the render thread.
+    void ui_space_frame();
     bool ui_drawing_interface();
     // A HUD sprite the game places over a world point (lock-on reticle,
     // hazard caution icon, grab-prompt hand): texture pages identified by
