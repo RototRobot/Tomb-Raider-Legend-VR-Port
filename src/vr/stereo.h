@@ -29,6 +29,18 @@ namespace trlvr
     // Point the next draw at one eye's half of the target.
     void stereo_begin_pass(IDirect3DDevice9* device, int pass);
 
-    // Put the viewport and the constants back.
-    void stereo_end_draw(IDirect3DDevice9* device);
+    // The passes leave the viewport and c0..c3 as the last eye set them; the
+    // game's own values are put back only when something needs them. Call
+    // this before anything that reads or depends on the device's viewport or
+    // c0..c3 (a draw that is not stereo, a Get*, Clear, a target change,
+    // Present, mod drawing on the real device).
+    void stereo_restore_game_state(IDirect3DDevice9* device);
+
+    // The game itself set the viewport / vertex constants [start, start +
+    // count): its value now stands, so there is nothing of ours to restore.
+    void stereo_note_game_viewport();
+    void stereo_note_game_constants(UINT start, UINT count);
+
+    // Something other than begin_pass changed the viewport after it.
+    void stereo_note_viewport_modified();
 }

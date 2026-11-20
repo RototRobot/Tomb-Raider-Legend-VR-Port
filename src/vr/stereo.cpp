@@ -47,9 +47,20 @@ namespace trlvr
         unsigned g_eye_w = 0;
         unsigned g_eye_h = 0;
 
+        // The device begin_pass last drew on. Only used while a pass has left
+        // state on it, and the device wrapper flushes that before it closes.
+        IDirect3DDevice9* g_last_device = nullptr;
+
+        // The device holds a viewport that begin_pass set, not the game's.
+        // g_viewport is then the game's, saved so it can be put back.
         bool g_saved_viewport = false;
         D3DVIEWPORT9 g_viewport{};
+        // The viewport begin_pass last set, while nothing else has touched
+        // it, so an identical request can be skipped.
+        bool g_last_vp_valid = false;
+        D3DVIEWPORT9 g_last_vp{};
 
+        // The device holds c0..c3 that begin_pass set, not the game's.
         bool g_patched_c0 = false;
         bool g_announced = false;
     }
@@ -104,6 +115,7 @@ namespace trlvr
         if (!device)
             return;
 
+        g_last_device = device;
         if (!g_saved_viewport)
         {
             device->GetViewport(&g_viewport);
@@ -121,7 +133,12 @@ namespace trlvr
         vp.Y = 0;
         vp.Width = eye_w;
         vp.Height = eye_h;
-        device->SetViewport(&vp);
+        if (!g_last_vp_valid || memcmp(&g_last_vp, &vp, sizeof(vp)) != 0)
+        {
+            device->SetViewport(&vp);
+            g_last_vp = vp;
+            g_last_vp_valid = true;
+        }
 
         const Eye eye = (pass == 0) ? EyeLeft : EyeRight;
         float regs[16];
@@ -134,10 +151,20 @@ namespace trlvr
             device->SetVertexShaderConstantF(0, regs, 4);
             g_patched_c0 = true;
         }
+        else if (g_patched_c0)
+        {
+            // This draw wants the game's own matrix, and the previous pass
+            // left ours on the device.
+            device->SetVertexShaderConstantF(0, vr_draw_c0_restore(), 4);
+            g_patched_c0 = false;
+        }
     }
 
-    void stereo_end_draw(IDirect3DDevice9* device)
+    void stereo_restore_game_state(IDirect3DDevice9* device)
     {
+        // The swap chain's Present has no device of its own to pass.
+        if (!device)
+            device = g_last_device;
         if (!device)
             return;
 
@@ -154,5 +181,27 @@ namespace trlvr
             device->SetViewport(&g_viewport);
             g_saved_viewport = false;
         }
+        g_last_vp_valid = false;
+    }
+
+    void stereo_note_game_viewport()
+    {
+        // The game's viewport is on the device now; the next pass saves it
+        // afresh.
+        g_saved_viewport = false;
+        g_last_vp_valid = false;
+    }
+
+    void stereo_note_game_constants(UINT start, UINT count)
+    {
+        // An upload that covers any of c0..c3 replaces ours. (The game's
+        // value is tracked separately, by vr_note_c0.)
+        if (start < 4 && start + count > 0)
+            g_patched_c0 = false;
+    }
+
+    void stereo_note_viewport_modified()
+    {
+        g_last_vp_valid = false;
     }
 }

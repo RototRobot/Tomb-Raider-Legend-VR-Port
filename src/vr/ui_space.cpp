@@ -164,7 +164,7 @@ namespace trlvr
             }
         }
 
-        int menu_screen_index()
+        int read_menu_screen_index()
         {
             __try
             {
@@ -176,12 +176,7 @@ namespace trlvr
             }
         }
 
-        bool menu_screen_active()
-        {
-            return menu_screen_index() >= 0;
-        }
-
-        short screen_id_at(int slot)
+        short read_screen_id_at(int slot)
         {
             if (slot < 0 || slot > 63)
                 return -1;
@@ -196,6 +191,34 @@ namespace trlvr
             {
                 return -1;
             }
+        }
+
+        // The menu stack as read at the start of a UiStateScope. Valid only
+        // inside one; the render thread is the only reader that opens it.
+        struct MenuSnapshot
+        {
+            int depth;
+            int index;
+            short root;
+        };
+        MenuSnapshot g_menu_snapshot{};
+
+        int menu_screen_index()
+        {
+            return g_menu_snapshot.depth > 0 ? g_menu_snapshot.index
+                                             : read_menu_screen_index();
+        }
+
+        bool menu_screen_active()
+        {
+            return menu_screen_index() >= 0;
+        }
+
+        short screen_id_at(int slot)
+        {
+            if (slot == 0 && g_menu_snapshot.depth > 0)
+                return g_menu_snapshot.root;
+            return read_screen_id_at(slot);
         }
 
         bool pause_screen_active()
@@ -385,6 +408,20 @@ namespace trlvr
             g_drawing_hud = outer_hud;
             g_world_locked_hud = outer_world_locked;
         }
+    }
+
+    UiStateScope::UiStateScope()
+    {
+        if (g_menu_snapshot.depth++ == 0)
+        {
+            g_menu_snapshot.index = read_menu_screen_index();
+            g_menu_snapshot.root = read_screen_id_at(0);
+        }
+    }
+
+    UiStateScope::~UiStateScope()
+    {
+        --g_menu_snapshot.depth;
     }
 
     bool ui_drawing_world_marker()

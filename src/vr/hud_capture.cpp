@@ -387,6 +387,11 @@ namespace trlvr
         return g_draw_caller;
     }
 
+    bool hud_capture_scene_active()
+    {
+        return g_scene_active;
+    }
+
     bool hud_capture_note_draw(IDirect3DDevice9* device)
     {
         if (g_scene_active && device && g_scene_draws < 12000)

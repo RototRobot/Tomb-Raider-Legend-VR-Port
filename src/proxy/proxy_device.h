@@ -41,6 +41,7 @@ namespace trlvr
 
         ~ProxyDevice()
         {
+            stereo_restore_game_state(_device);
             reflection_stereo_release();
             vr_submit_device_closing(_device);
             overlay_device_closing(_device);
@@ -107,6 +108,10 @@ namespace trlvr
         STDMETHOD(CreateAdditionalSwapChain)(THIS_ D3DPRESENT_PARAMETERS* pPresentationParameters, IDirect3DSwapChain9** pSwapChain);
         STDMETHOD(GetSwapChain)(THIS_ UINT iSwapChain, IDirect3DSwapChain9** pSwapChain);
         STDMETHOD_(UINT, GetNumberOfSwapChains)(THIS) { return _device->GetNumberOfSwapChains(); }
+        // Same-frame stereo leaves the last eye's viewport and c0..c3 on the
+        // device between draws (stereo_restore_game_state); each wrapper
+        // below that reads, depends on or resets that state puts the game's
+        // back first.
         STDMETHOD(GetBackBuffer)(THIS_ UINT iSwapChain, UINT iBackBuffer, D3DBACKBUFFER_TYPE Type, IDirect3DSurface9** ppBackBuffer) { return _device->GetBackBuffer(iSwapChain, iBackBuffer, Type, ppBackBuffer); }
         STDMETHOD(GetRasterStatus)(THIS_ UINT iSwapChain, D3DRASTER_STATUS* pRasterStatus) { return _device->GetRasterStatus(iSwapChain, pRasterStatus); }
         STDMETHOD(SetDialogBoxMode)(THIS_ BOOL bEnableDialogs) { return _device->SetDialogBoxMode(bEnableDialogs); }
@@ -123,21 +128,21 @@ namespace trlvr
         STDMETHOD(UpdateTexture)(THIS_ IDirect3DBaseTexture9* pSourceTexture, IDirect3DBaseTexture9* pDestinationTexture) { return _device->UpdateTexture(pSourceTexture, pDestinationTexture); }
         STDMETHOD(GetRenderTargetData)(THIS_ IDirect3DSurface9* pRenderTarget, IDirect3DSurface9* pDestSurface) { return _device->GetRenderTargetData(pRenderTarget, pDestSurface); }
         STDMETHOD(GetFrontBufferData)(THIS_ UINT iSwapChain, IDirect3DSurface9* pDestSurface) { return _device->GetFrontBufferData(iSwapChain, pDestSurface); }
-        STDMETHOD(StretchRect)(THIS_ IDirect3DSurface9* pSourceSurface, CONST RECT* pSourceRect, IDirect3DSurface9* pDestSurface, CONST RECT* pDestRect, D3DTEXTUREFILTERTYPE Filter) { gpu_profile_event_begin("StretchRect", pSourceSurface, pDestSurface); const HRESULT hr = _device->StretchRect(pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter); if (SUCCEEDED(hr)) reflection_stereo_note_copy(_device, pDestSurface, pSourceRect, pDestRect); gpu_profile_event_end(); return hr; }
-        STDMETHOD(ColorFill)(THIS_ IDirect3DSurface9* pSurface, CONST RECT* pRect, D3DCOLOR color) { return _device->ColorFill(pSurface, pRect, color); }
+        STDMETHOD(StretchRect)(THIS_ IDirect3DSurface9* pSourceSurface, CONST RECT* pSourceRect, IDirect3DSurface9* pDestSurface, CONST RECT* pDestRect, D3DTEXTUREFILTERTYPE Filter) { stereo_restore_game_state(_device); gpu_profile_event_begin("StretchRect", pSourceSurface, pDestSurface); const HRESULT hr = _device->StretchRect(pSourceSurface, pSourceRect, pDestSurface, pDestRect, Filter); if (SUCCEEDED(hr)) reflection_stereo_note_copy(_device, pDestSurface, pSourceRect, pDestRect); gpu_profile_event_end(); return hr; }
+        STDMETHOD(ColorFill)(THIS_ IDirect3DSurface9* pSurface, CONST RECT* pRect, D3DCOLOR color) { stereo_restore_game_state(_device); return _device->ColorFill(pSurface, pRect, color); }
         STDMETHOD(CreateOffscreenPlainSurface)(THIS_ UINT Width, UINT Height, D3DFORMAT Format, D3DPOOL Pool, IDirect3DSurface9** ppSurface, HANDLE* pSharedHandle) { return _device->CreateOffscreenPlainSurface(Width, Height, Format, Pool, ppSurface, pSharedHandle); }
         STDMETHOD(SetRenderTarget)(THIS_ DWORD RenderTargetIndex, IDirect3DSurface9* pRenderTarget);
         STDMETHOD(GetRenderTarget)(THIS_ DWORD RenderTargetIndex, IDirect3DSurface9** ppRenderTarget) { return _device->GetRenderTarget(RenderTargetIndex, ppRenderTarget); }
-        STDMETHOD(SetDepthStencilSurface)(THIS_ IDirect3DSurface9* pNewZStencil) { reflection_stereo_note_depth(pNewZStencil); return _device->SetDepthStencilSurface(pNewZStencil); }
+        STDMETHOD(SetDepthStencilSurface)(THIS_ IDirect3DSurface9* pNewZStencil) { stereo_restore_game_state(_device); reflection_stereo_note_depth(pNewZStencil); return _device->SetDepthStencilSurface(pNewZStencil); }
         STDMETHOD(GetDepthStencilSurface)(THIS_ IDirect3DSurface9** ppZStencilSurface) { return _device->GetDepthStencilSurface(ppZStencilSurface); }
-        STDMETHOD(BeginScene)(THIS) { return _device->BeginScene(); }
-        STDMETHOD(EndScene)(THIS) { return _device->EndScene(); }
-        STDMETHOD(Clear)(THIS_ DWORD Count, CONST D3DRECT* pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil) { IDirect3DSurface9* target = nullptr; if (_device->GetRenderTarget(0, &target) == D3D_OK && target) target->Release(); gpu_profile_event_begin(Flags & D3DCLEAR_TARGET ? "Clear colour+" : "Clear depth", nullptr, target); const HRESULT hr = _device->Clear(Count, pRects, Flags, Color, Z, Stencil); if (SUCCEEDED(hr)) reflection_stereo_after_clear(_device, Count, pRects, Flags, Color, Z, Stencil); gpu_profile_event_end(); return hr; }
+        STDMETHOD(BeginScene)(THIS) { stereo_restore_game_state(_device); return _device->BeginScene(); }
+        STDMETHOD(EndScene)(THIS) { stereo_restore_game_state(_device); return _device->EndScene(); }
+        STDMETHOD(Clear)(THIS_ DWORD Count, CONST D3DRECT* pRects, DWORD Flags, D3DCOLOR Color, float Z, DWORD Stencil) { stereo_restore_game_state(_device); IDirect3DSurface9* target = nullptr; if (_device->GetRenderTarget(0, &target) == D3D_OK && target) target->Release(); gpu_profile_event_begin(Flags & D3DCLEAR_TARGET ? "Clear colour+" : "Clear depth", nullptr, target); const HRESULT hr = _device->Clear(Count, pRects, Flags, Color, Z, Stencil); if (SUCCEEDED(hr)) reflection_stereo_after_clear(_device, Count, pRects, Flags, Color, Z, Stencil); gpu_profile_event_end(); return hr; }
         STDMETHOD(SetTransform)(THIS_ D3DTRANSFORMSTATETYPE State, CONST D3DMATRIX* pMatrix);
         STDMETHOD(GetTransform)(THIS_ D3DTRANSFORMSTATETYPE State, D3DMATRIX* pMatrix) { return _device->GetTransform(State, pMatrix); }
         STDMETHOD(MultiplyTransform)(THIS_ D3DTRANSFORMSTATETYPE State, CONST D3DMATRIX* pMatrix) { return _device->MultiplyTransform(State, pMatrix); }
         STDMETHOD(SetViewport)(THIS_ CONST D3DVIEWPORT9* pViewport);
-        STDMETHOD(GetViewport)(THIS_ D3DVIEWPORT9* pViewport) { return _device->GetViewport(pViewport); }
+        STDMETHOD(GetViewport)(THIS_ D3DVIEWPORT9* pViewport) { stereo_restore_game_state(_device); return _device->GetViewport(pViewport); }
         STDMETHOD(SetMaterial)(THIS_ CONST D3DMATERIAL9* pMaterial) { return _device->SetMaterial(pMaterial); }
         STDMETHOD(GetMaterial)(THIS_ D3DMATERIAL9* pMaterial) { return _device->GetMaterial(pMaterial); }
         STDMETHOD(SetLight)(THIS_ DWORD Index, CONST D3DLIGHT9* light) { return _device->SetLight(Index, light); }
@@ -163,9 +168,9 @@ namespace trlvr
             return _device->SetRenderState(State, Value);
         }
         STDMETHOD(GetRenderState)(THIS_ D3DRENDERSTATETYPE State, DWORD* pValue) { return _device->GetRenderState(State, pValue); }
-        STDMETHOD(CreateStateBlock)(THIS_ D3DSTATEBLOCKTYPE Type, IDirect3DStateBlock9** ppSB) { return _device->CreateStateBlock(Type, ppSB); }
-        STDMETHOD(BeginStateBlock)(THIS) { return _device->BeginStateBlock(); }
-        STDMETHOD(EndStateBlock)(THIS_ IDirect3DStateBlock9** ppSB) { return _device->EndStateBlock(ppSB); }
+        STDMETHOD(CreateStateBlock)(THIS_ D3DSTATEBLOCKTYPE Type, IDirect3DStateBlock9** ppSB) { stereo_restore_game_state(_device); return _device->CreateStateBlock(Type, ppSB); }
+        STDMETHOD(BeginStateBlock)(THIS) { stereo_restore_game_state(_device); return _device->BeginStateBlock(); }
+        STDMETHOD(EndStateBlock)(THIS_ IDirect3DStateBlock9** ppSB) { stereo_restore_game_state(_device); return _device->EndStateBlock(ppSB); }
         STDMETHOD(SetClipStatus)(THIS_ CONST D3DCLIPSTATUS9* pClipStatus) { return _device->SetClipStatus(pClipStatus); }
         STDMETHOD(GetClipStatus)(THIS_ D3DCLIPSTATUS9* pClipStatus) { return _device->GetClipStatus(pClipStatus); }
         STDMETHOD(GetTexture)(THIS_ DWORD Stage, IDirect3DBaseTexture9** ppTexture) { return _device->GetTexture(Stage, ppTexture); }
@@ -195,7 +200,14 @@ namespace trlvr
         {
             perf_cpu_draw();
             PerfCpuScope perf_scope(PerfDrawCalls);
+            // The menu stack is read once for the whole draw, both eyes.
+            const UiStateScope ui_state;
             camera_first_person_note_gpu_draw();
+            // The theatre and diorama surrounds are drawn from here on the
+            // real device, against the game's viewport and constants; the
+            // scene capture reads them back.
+            if (vr_dark_room_active() || hud_capture_scene_active())
+                stereo_restore_game_state(_device);
             vr_submit_note_draw();
             {
                 unsigned primitives = 0;
@@ -335,6 +347,7 @@ namespace trlvr
             // right eye into its twin, each with that eye's (mirrored) camera.
             if (reflection_stereo_draw_here(_device) && vr_have_game_c0())
             {
+                stereo_restore_game_state(_device);
                 const int mode = reflection_stereo_reflection_mode();
                 if (mode == 2)
                 {
@@ -382,13 +395,15 @@ namespace trlvr
                     stereo_begin_pass(_device, p);
                     if (hands_in_front)
                     {
-                        // stereo_end_draw puts the game's viewport back.
+                        // The game's viewport comes back with
+                        // stereo_restore_game_state.
                         D3DVIEWPORT9 front{};
                         if (SUCCEEDED(_device->GetViewport(&front)))
                         {
                             front.MinZ = 0.0f;
                             front.MaxZ = 0.02f;
                             _device->SetViewport(&front);
+                            stereo_note_viewport_modified();
                         }
                     }
                     // The right eye's water samples its own reflection.
@@ -397,11 +412,12 @@ namespace trlvr
                     hr = issue();
                 }
                 reflection_stereo_restore_textures(_device);
-                stereo_end_draw(_device);
                 restore_scoped_state();
                 return hr;
             }
 
+            // A single draw, with the game's own viewport and constants.
+            stereo_restore_game_state(_device);
             float fix[16];
             const bool patched = vr_draw_c0_override(fix);
             if (patched)
@@ -418,17 +434,20 @@ namespace trlvr
         {
             // Another mod's ImGui menu: into its own overlay (imgui_overlay.h).
             if (imgui_overlay_matches(imgui_state()))
+            {
+                stereo_restore_game_state(_device);
                 return imgui_overlay_draw(_device, imgui_state(), [&] {
                     return _device->DrawIndexedPrimitive(PrimitiveType,
                         BaseVertexIndex, MinVertexIndex, NumVertices,
                         startIndex, primCount); });
+            }
             hud_capture_set_call(_ReturnAddress(), primCount);
             return dispatch_draw([&] { return _device->DrawIndexedPrimitive(
                 PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices,
                 startIndex, primCount); });
         }
-        STDMETHOD(DrawPrimitiveUP)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); return dispatch_draw([&] { return _device->DrawPrimitiveUP(PrimitiveType, PrimitiveCount, pVertexStreamZeroData, VertexStreamZeroStride); }); }
-        STDMETHOD(DrawIndexedPrimitiveUP)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount, CONST void* pIndexData, D3DFORMAT IndexDataFormat, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); return dispatch_draw([&] { return _device->DrawIndexedPrimitiveUP(PrimitiveType, MinVertexIndex, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride); }); }
+        STDMETHOD(DrawPrimitiveUP)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); const HRESULT hr = dispatch_draw([&] { return _device->DrawPrimitiveUP(PrimitiveType, PrimitiveCount, pVertexStreamZeroData, VertexStreamZeroStride); }); return hr; }
+        STDMETHOD(DrawIndexedPrimitiveUP)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount, CONST void* pIndexData, D3DFORMAT IndexDataFormat, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); const HRESULT hr = dispatch_draw([&] { return _device->DrawIndexedPrimitiveUP(PrimitiveType, MinVertexIndex, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride); }); return hr; }
         STDMETHOD(ProcessVertices)(THIS_ UINT SrcStartIndex, UINT DestIndex, UINT VertexCount, IDirect3DVertexBuffer9* pDestBuffer, IDirect3DVertexDeclaration9* pVertexDecl, DWORD Flags) { return _device->ProcessVertices(SrcStartIndex, DestIndex, VertexCount, pDestBuffer, pVertexDecl, Flags); }
         STDMETHOD(CreateVertexDeclaration)(THIS_ CONST D3DVERTEXELEMENT9* pVertexElements, IDirect3DVertexDeclaration9** ppDecl) { return _device->CreateVertexDeclaration(pVertexElements, ppDecl); }
         STDMETHOD(SetVertexDeclaration)(THIS_ IDirect3DVertexDeclaration9* pDecl) { imgui_state().fvf = 0; return _device->SetVertexDeclaration(pDecl); }
@@ -438,7 +457,7 @@ namespace trlvr
         STDMETHOD(CreateVertexShader)(THIS_ CONST DWORD* pFunction, IDirect3DVertexShader9** ppShader) { return _device->CreateVertexShader(pFunction, ppShader); }
         STDMETHOD(SetVertexShader)(THIS_ IDirect3DVertexShader9* pShader) { imgui_state().vertex_shader = pShader != nullptr; return _device->SetVertexShader(pShader); }
         STDMETHOD(GetVertexShader)(THIS_ IDirect3DVertexShader9** ppShader) { return _device->GetVertexShader(ppShader); }
-        STDMETHOD(GetVertexShaderConstantF)(THIS_ UINT StartRegister, float* pConstantData, UINT Vector4fCount) { return _device->GetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount); }
+        STDMETHOD(GetVertexShaderConstantF)(THIS_ UINT StartRegister, float* pConstantData, UINT Vector4fCount) { stereo_restore_game_state(_device); return _device->GetVertexShaderConstantF(StartRegister, pConstantData, Vector4fCount); }
         STDMETHOD(SetVertexShaderConstantI)(THIS_ UINT StartRegister, CONST int* pConstantData, UINT Vector4iCount) { return _device->SetVertexShaderConstantI(StartRegister, pConstantData, Vector4iCount); }
         STDMETHOD(GetVertexShaderConstantI)(THIS_ UINT StartRegister, int* pConstantData, UINT Vector4iCount) { return _device->GetVertexShaderConstantI(StartRegister, pConstantData, Vector4iCount); }
         STDMETHOD(SetVertexShaderConstantB)(THIS_ UINT StartRegister, CONST BOOL* pConstantData, UINT BoolCount) { return _device->SetVertexShaderConstantB(StartRegister, pConstantData, BoolCount); }
@@ -458,8 +477,8 @@ namespace trlvr
         STDMETHOD(GetPixelShaderConstantI)(THIS_ UINT StartRegister, int* pConstantData, UINT Vector4iCount) { return _device->GetPixelShaderConstantI(StartRegister, pConstantData, Vector4iCount); }
         STDMETHOD(SetPixelShaderConstantB)(THIS_ UINT StartRegister, CONST BOOL* pConstantData, UINT BoolCount) { return _device->SetPixelShaderConstantB(StartRegister, pConstantData, BoolCount); }
         STDMETHOD(GetPixelShaderConstantB)(THIS_ UINT StartRegister, BOOL* pConstantData, UINT BoolCount) { return _device->GetPixelShaderConstantB(StartRegister, pConstantData, BoolCount); }
-        STDMETHOD(DrawRectPatch)(THIS_ UINT Handle, CONST float* pNumSegs, CONST D3DRECTPATCH_INFO* pRectPatchInfo) { return _device->DrawRectPatch(Handle, pNumSegs, pRectPatchInfo); }
-        STDMETHOD(DrawTriPatch)(THIS_ UINT Handle, CONST float* pNumSegs, CONST D3DTRIPATCH_INFO* pTriPatchInfo) { return _device->DrawTriPatch(Handle, pNumSegs, pTriPatchInfo); }
+        STDMETHOD(DrawRectPatch)(THIS_ UINT Handle, CONST float* pNumSegs, CONST D3DRECTPATCH_INFO* pRectPatchInfo) { stereo_restore_game_state(_device); return _device->DrawRectPatch(Handle, pNumSegs, pRectPatchInfo); }
+        STDMETHOD(DrawTriPatch)(THIS_ UINT Handle, CONST float* pNumSegs, CONST D3DTRIPATCH_INFO* pTriPatchInfo) { stereo_restore_game_state(_device); return _device->DrawTriPatch(Handle, pNumSegs, pTriPatchInfo); }
         STDMETHOD(DeletePatch)(THIS_ UINT Handle) { return _device->DeletePatch(Handle); }
         STDMETHOD(CreateQuery)(THIS_ D3DQUERYTYPE Type, IDirect3DQuery9** ppQuery) { return _device->CreateQuery(Type, ppQuery); }
     };

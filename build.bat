@@ -98,7 +98,7 @@ rem Deliberately NOT linking d3d9.lib: this DLL *is* d3d9.dll, and an import
 rem library would make it import from itself. Every entry point is resolved
 rem from the backend with GetProcAddress instead. dxguid.lib supplies the
 rem interface IIDs only, and pulls in no DLL.
-link %LFLAGS% "%OUT%\*.obj" "%OPENXRLIB%" /DELAYLOAD:openxr_loader.dll delayimp.lib dxguid.lib user32.lib kernel32.lib advapi32.lib
+link %LFLAGS% "%OUT%\*.obj" "%OPENXRLIB%" /DELAYLOAD:openxr_loader.dll delayimp.lib dxguid.lib user32.lib kernel32.lib advapi32.lib winmm.lib
 if errorlevel 1 (
     echo BUILD FAILED ^(link^)
     exit /b 1

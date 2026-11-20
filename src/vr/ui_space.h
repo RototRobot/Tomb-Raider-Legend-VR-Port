@@ -24,4 +24,17 @@ namespace trlvr
     // The PDA (root screen 6; its pages 9, 10, 12 stack on top).
     bool ui_pda_active();
     short ui_root_screen_id();
+
+    // Holds the menu-stack reads steady across one intercepted draw call: a
+    // draw is issued twice (once per eye) and each pass asks about the menu
+    // many times. Only the game's own code changes the stack, and none of it
+    // runs while a draw is being dispatched, so one read serves the whole
+    // draw. Outside a scope every call reads the game's memory directly.
+    struct UiStateScope
+    {
+        UiStateScope();
+        ~UiStateScope();
+        UiStateScope(const UiStateScope&) = delete;
+        UiStateScope& operator=(const UiStateScope&) = delete;
+    };
 }

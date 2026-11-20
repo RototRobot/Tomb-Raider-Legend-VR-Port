@@ -4,6 +4,7 @@
 #include "window.h"
 #include "overlay.h"
 #include "../vr/vr_session.h"
+#include "../vr/stereo.h"
 #include "../vr/vr_submit.h"
 #include "../vr/tune.h"
 #include "../vr/vr_input.h"
@@ -45,6 +46,9 @@ namespace trlvr
     {
         // This, not IDirect3DDevice9::Present, is the game's frame boundary.
         perf_cpu_present_begin();
+        // The frame submit below draws on the device with the game's own
+        // viewport and constants, not a stereo pass's.
+        stereo_restore_game_state(nullptr);
         camera_first_person_gpu_frame_end();
         if (config().force_windowed)
             window_tick();

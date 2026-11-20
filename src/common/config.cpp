@@ -275,6 +275,7 @@ namespace trlvr
             { L"developer", L"gear_tuning", L"0" },
             { L"developer", L"aim_tuning_debug", L"0" },
             { L"developer", L"grip_prompt_scale", L"0.25" },
+            { L"developer", L"perf_sampler", L"0" },
         };
 
         const wchar_t* kTemplate =
@@ -892,7 +893,11 @@ namespace trlvr
             L"aim_tuning_debug = 0\r\n"
             L"; Size of the secure-grip prompt shown on the left hand, as a\r\n"
             L"; fraction of its retail size. F5 reloads.\r\n"
-            L"grip_prompt_scale = 0.25\r\n";
+            L"grip_prompt_scale = 0.25\r\n"
+            L"; 1 samples where the render thread spends its time (module and\r\n"
+            L"; address, every millisecond) and logs it every 5 s as \"perf where\"\r\n"
+            L"; lines in trlvr.log. Read once at start; costs a little CPU.\r\n"
+            L"perf_sampler = 0\r\n";
 
         bool read_bool(const wchar_t* section, const wchar_t* key,
                        bool fallback, const wchar_t* path)

@@ -237,6 +237,10 @@ namespace trlvr
         // vr_set_eye_views replace it with the real one on the first frame.
         bool g_eyes_from_runtime = false;
 
+        // Bumped by every write to g_eyes, so eye_tail_cached can tell the
+        // eye frusta and offsets are unchanged without comparing them.
+        unsigned g_eyes_generation = 1;
+
         void read_device_info()
         {
             xr_recommended_size(&g_rt_width, &g_rt_height);
@@ -256,6 +260,7 @@ namespace trlvr
                 info.offset_x = i == 0 ? -0.032f : 0.032f;
                 info.rot[0][0] = info.rot[1][1] = info.rot[2][2] = 1.0f;
             }
+            ++g_eyes_generation;
             g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
             g_eyes_from_runtime = false;
 
@@ -323,6 +328,7 @@ namespace trlvr
                 !(next.tan_bottom > next.tan_top))
                 return;
             g_eyes[i] = next;
+            ++g_eyes_generation;
         }
         g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
         // The IPD wheel moves these a fraction of a millimetre at a time.
@@ -792,6 +798,205 @@ namespace trlvr
         {
             return false;
         }
+    }
+
+    float binocular_zoom(const GameProjection& game);
+
+    // World-view-projection draws arrive twice with identical registers, once
+    // per eye, so the depth recovery and the projection it selects are kept
+    // for the last upload. Keyed on every input: the 16 registers and the
+    // cached pure projection the recovery measures against.
+    struct WvpDepth
+    {
+        float key[16 + 7];
+        bool valid;
+        bool recovered;             // per-draw depth terms were usable
+        GameProjection projection;  // recovered, else the cached pure one
+        Mat4 inverse;
+    };
+
+    static const WvpDepth& wvp_depth_cached(const float* in, const Mat4& m)
+    {
+        static WvpDepth e{};
+        float key[16 + 7];
+        memcpy(key, in, 16 * sizeof(float));
+        key[16] = g_game_proj.sx;
+        key[17] = g_game_proj.sy;
+        key[18] = g_game_proj.ox;
+        key[19] = g_game_proj.oy;
+        key[20] = g_game_proj.q;
+        key[21] = g_game_proj.near_z;
+        key[22] = g_game_proj.far_z;
+        if (e.valid && memcmp(e.key, key, sizeof(key)) == 0)
+            return e;
+        e.recovered = false;
+        e.projection = g_game_proj;
+        e.inverse = g_game_proj_inv;
+        GameProjection recovered{};
+        if (projection_depth_from_wvp(m, g_game_proj, &recovered))
+        {
+            Mat4 recovered_inv{};
+            if (projection_inverse_cached(recovered, &recovered_inv))
+            {
+                e.recovered = true;
+                e.projection = recovered;
+                e.inverse = recovered_inv;
+            }
+        }
+        memcpy(e.key, key, sizeof(key));
+        e.valid = true;
+        return e;
+    }
+
+    // Everything the world-draw tail inverse(P) * paused_head * eye matrix
+    // reads, gathered by value. Nothing here is trusted to a generation
+    // counter alone: the settings menu, the camera modes and the binocular
+    // state all change between draws without one, so they are keyed directly.
+    struct EyeTailKey
+    {
+        int eye;
+        float projection[7];
+        float paused[16];
+        float head_view[16];
+        EyeInfo eyes[2];
+        float zoom, world_scale, ipd_scale, stereo_scale;
+        int flags;
+    };
+
+    // The inputs that can change between two draws of one frame, with no
+    // counter to say so: the binocular zoom, the tuning scales, the camera
+    // modes and the draw's own projection. Small enough to compare on every
+    // call.
+    struct EyeTailDraw
+    {
+        float projection[7];
+        float zoom, world_scale, ipd_scale, stereo_scale;
+        int flags;
+    };
+
+    // The inputs that only change when a counter moves: g_head_view,
+    // g_pose_valid and the paused-head matrix with the head-state and
+    // recentre generations (ingest_poses and the camera build bump them), and
+    // g_eyes with its own generation. While the stamp is unchanged the bulk
+    // of the full key is known to be unchanged too and is not compared.
+    struct EyeTailStamp
+    {
+        unsigned head_state, recenter, eyes;
+    };
+
+    struct EyeTail
+    {
+        bool valid;
+        bool stamp_valid;
+        EyeTailStamp stamp;
+        EyeTailDraw draw;
+        EyeTailKey key;
+        Mat4 tail;
+    };
+
+    static Mat4 eye_tail_cached(Eye eye, const GameProjection& dp,
+                                const Mat4& dp_inv, const Mat4& paused_head)
+    {
+        // Called once per draw whichever way the cache goes, as
+        // vr_eye_projection did, because it also learns the normal x scale.
+        const float zoom = binocular_zoom(dp);
+        const int slot = (int)eye;
+
+        EyeTailDraw draw;
+        memset(&draw, 0, sizeof(draw));
+        draw.projection[0] = dp.sx;
+        draw.projection[1] = dp.sy;
+        draw.projection[2] = dp.ox;
+        draw.projection[3] = dp.oy;
+        draw.projection[4] = dp.q;
+        draw.projection[5] = dp.near_z;
+        draw.projection[6] = dp.far_z;
+        draw.zoom = zoom;
+        draw.world_scale = tune_world_scale();
+        draw.ipd_scale = tune_ipd_scale();
+        draw.stereo_scale = camera_stereo_scale();
+        draw.flags = (config().head_tracking ? 1 : 0) |
+                     (config().hmd_drives_camera ? 4 : 0) |
+                     (camera_first_person_active() ? 8 : 0) |
+                     (camera_accurate_aim_active() ? 16 : 0) |
+                     (movie_playing() ? 32 : 0) |
+                     (ui_loading_screen_active() ? 64 : 0) |
+                     (ui_mission_prep_active() ? 128 : 0);
+        const EyeTailStamp stamp = { g_head_state_generation,
+                                     g_recenter_generation,
+                                     g_eyes_generation };
+
+        static EyeTail cache[3]{};
+        if (slot >= 0 && slot < 3)
+        {
+            const EyeTail& c = cache[slot];
+            // g_pose_valid only changes in ingest_poses, which bumps the
+            // head-state generation, so the stamp covers it as well.
+            if (c.valid && c.stamp_valid &&
+                memcmp(&c.stamp, &stamp, sizeof(stamp)) == 0 &&
+                memcmp(&c.draw, &draw, sizeof(draw)) == 0)
+                return c.tail;
+        }
+
+        EyeTailKey key;
+        memset(&key, 0, sizeof(key));
+        key.eye = slot;
+        key.projection[0] = dp.sx;
+        key.projection[1] = dp.sy;
+        key.projection[2] = dp.ox;
+        key.projection[3] = dp.oy;
+        key.projection[4] = dp.q;
+        key.projection[5] = dp.near_z;
+        key.projection[6] = dp.far_z;
+        memcpy(key.paused, &paused_head, sizeof(key.paused));
+        memcpy(key.head_view, &g_head_view, sizeof(key.head_view));
+        memcpy(key.eyes, g_eyes, sizeof(key.eyes));
+        key.zoom = draw.zoom;
+        key.world_scale = draw.world_scale;
+        key.ipd_scale = draw.ipd_scale;
+        key.stereo_scale = draw.stereo_scale;
+        key.flags = draw.flags | (g_pose_valid ? 2 : 0);
+
+        if (slot < 0 || slot >= 3)
+            return dp_inv * paused_head * vr_eye_matrix(eye, dp);
+        EyeTail& c = cache[slot];
+        if (!c.valid || memcmp(&c.key, &key, sizeof(key)) != 0)
+        {
+            c.tail = dp_inv * paused_head * vr_eye_matrix(eye, dp);
+            c.key = key;
+            c.valid = true;
+        }
+        // Whichever way the full key went, the stamp and per-draw inputs now
+        // describe c.tail.
+        c.stamp = stamp;
+        c.draw = draw;
+        c.stamp_valid = true;
+        return c.tail;
+    }
+
+    // Row 3 (the draw's origin) of m * inverse(P) * inverse(camera): only
+    // that row is used, so the full products are not formed. The 4x4 is kept
+    // for as long as the projection and camera inverse are unchanged.
+    static void sky_origin_cached(const Mat4& m, const GameProjection& dp,
+                                  const Mat4& dp_inv, const Mat4& v_inv,
+                                  float origin[3])
+    {
+        static float key_p[7];
+        static Mat4 key_v{}, pv{};
+        static bool valid = false;
+        const float p[7] = { dp.sx, dp.sy, dp.ox, dp.oy, dp.q, dp.near_z,
+                             dp.far_z };
+        if (!valid || memcmp(key_p, p, sizeof(p)) != 0 ||
+            memcmp(&key_v, &v_inv, sizeof(v_inv)) != 0)
+        {
+            pv = dp_inv * v_inv;
+            memcpy(key_p, p, sizeof(p));
+            key_v = v_inv;
+            valid = true;
+        }
+        for (int k = 0; k < 3; ++k)
+            origin[k] = m.m[3][0] * pv.m[0][k] + m.m[3][1] * pv.m[1][k] +
+                        m.m[3][2] * pv.m[2][k] + m.m[3][3] * pv.m[3][k];
     }
 
     // Mission Prep's own pure projection (the game's flat shot), for the
@@ -1451,30 +1656,20 @@ namespace trlvr
         // matching pure-projection upload. Recover q/near/far from this WVP
         // itself before removing P; using the stale cached depth terms leaves
         // a projective shear that differs across the two eye projections.
-        GameProjection draw_projection = g_game_proj;
-        Mat4 draw_projection_inv = g_game_proj_inv;
-        GameProjection recovered{};
-        if (projection_depth_from_wvp(m, g_game_proj, &recovered))
+        const WvpDepth& depth_terms = wvp_depth_cached(in, m);
+        const GameProjection draw_projection = depth_terms.projection;
+        const Mat4 draw_projection_inv = depth_terms.inverse;
+        if (depth_terms.recovered && camera_accurate_aim_active() &&
+            fabsf(draw_projection.near_z - g_game_proj.near_z) > 0.25f)
         {
-            Mat4 recovered_inv{};
-            if (projection_inverse_cached(recovered, &recovered_inv))
+            static DWORD last_depth_report = 0;
+            const DWORD now = GetTickCount();
+            if (!last_depth_report || now - last_depth_report >= 5000)
             {
-                draw_projection = recovered;
-                draw_projection_inv = recovered_inv;
-
-                if (camera_accurate_aim_active() &&
-                    fabsf(recovered.near_z - g_game_proj.near_z) > 0.25f)
-                {
-                    static DWORD last_depth_report = 0;
-                    const DWORD now = GetTickCount();
-                    if (!last_depth_report || now - last_depth_report >= 5000)
-                    {
-                        last_depth_report = now;
-                        log("stereo: accurate-aim WVP near %.2f (cached pure "
-                            "projection %.2f); using per-draw depth terms",
-                            recovered.near_z, g_game_proj.near_z);
-                    }
-                }
+                last_depth_report = now;
+                log("stereo: accurate-aim WVP near %.2f (cached pure "
+                    "projection %.2f); using per-draw depth terms",
+                    draw_projection.near_z, g_game_proj.near_z);
             }
         }
 
@@ -1516,8 +1711,9 @@ namespace trlvr
             Mat4 v_inv{};
             if (main_camera_wc_inverse(&v_inv))
             {
-                const Mat4 w = m * draw_projection_inv * v_inv;
-                const float origin[3] = { w.m[3][0], w.m[3][1], w.m[3][2] };
+                float origin[3];
+                sky_origin_cached(m, draw_projection, draw_projection_inv,
+                                  v_inv, origin);
                 float delta[3]{};
                 if (std::isfinite(origin[0]) && sky_pinned_draw(origin, delta))
                 {
@@ -1531,8 +1727,9 @@ namespace trlvr
                 }
             }
         }
-        const Mat4 replaced = m * draw_projection_inv * paused_head *
-                              vr_eye_matrix(eye, draw_projection);
+        const Mat4 replaced = m * eye_tail_cached(eye, draw_projection,
+                                                  draw_projection_inv,
+                                                  paused_head);
         registers_from_matrix(replaced, out);
 
         // Log one world-space draw per eye, exactly as uploaded. If the two
