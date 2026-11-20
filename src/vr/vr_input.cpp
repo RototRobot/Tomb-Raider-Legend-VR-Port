@@ -2092,6 +2092,8 @@ namespace trlvr
             bool down = false;
             bool long_fired = false;
             bool click_pending = false;
+            // single_on_press: this press was the second of a double.
+            bool press_was_double = false;
             ULONGLONG pressed_at = 0;
             ULONGLONG released_at = 0;
         };
@@ -2138,9 +2140,33 @@ namespace trlvr
         }
 
         // single / twice / held: logical ids, -1 for none.
+        // single_on_press (held unused): the single fires the moment the
+        // button goes down, and a second press within the double-click
+        // window fires twice as well -- for an action that must not lag
+        // (the reset view on X, user 2026-11-12: it waited out the window).
         void complex_update(ComplexButton& c, bool down, ULONGLONG now,
-                            int single, int twice, int held)
+                            int single, int twice, int held,
+                            bool single_on_press = false)
         {
+            if (single_on_press)
+            {
+                if (down && !c.down)
+                {
+                    c.press_was_double = c.click_pending && twice >= 0 &&
+                        now - c.released_at <= kDoubleClickMs;
+                    c.click_pending = false;
+                    pulse(c.press_was_double ? twice : single, now);
+                }
+                if (!down && c.down && !c.press_was_double)
+                {
+                    c.click_pending = true;
+                    c.released_at = now;
+                }
+                if (c.click_pending && now - c.released_at > kDoubleClickMs)
+                    c.click_pending = false;
+                c.down = down;
+                return;
+            }
             if (down && !c.down)
             {
                 c.pressed_at = now;
@@ -2413,7 +2439,7 @@ namespace trlvr
                       camera_first_person_active());
                 complex_update(g_complex_x, x_underworld &&
                                xr_input_button(0, XrButtonPrimary),
-                               now, GameRecentre, GamePda, -1);
+                               now, GameRecentre, GamePda, -1, true);
                 held[GameAim] = !underworld_scheme() &&
                     xr_input_button(0, XrButtonPrimary);
                 face = xr_input_button(0, XrButtonSecondary);
@@ -5042,7 +5068,17 @@ namespace trlvr
                 float height_in = 0.0f, zoom_in = 0.0f, scale_in = 0.0f;
                 if (seat_stick && r3 && g_seat_drag)
                 {
-                    if (view == 2)
+                    if (view == 2 && underworld_scheme())
+                    {
+                        // Alternate scheme, as the Underworld port: clicked
+                        // and pushed, up/down = seat height (up = higher),
+                        // left/right = world scale (right = Lara smaller,
+                        // the world bigger). x does not turn the board
+                        // (zeroed below while the stick is in).
+                        height_in = board_stick_axis(y, 0.2f);
+                        scale_in = board_stick_axis(x, 0.2f);
+                    }
+                    else if (view == 2)
                         scale_in = board_stick_axis(y, 0.2f);
                     else if (view == 1)
                         height_in = board_stick_axis(y, 0.2f);

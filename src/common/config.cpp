@@ -745,9 +745,11 @@ namespace trlvr
             L"; click switches weapon, long press switches view; the 3D gear cross\r\n"
             L"; and palm sliders. The Controls menu also sets gear_menu and\r\n"
             L"; tp_scale_control when you change this; those can then be fine-tuned.\r\n"
-            L"; underworld = the Underworld mod's layout: left trigger locks on, right\r\n"
-            L"; grip interacts, X recentres (double click: PDA), the radial gear menu,\r\n"
-            L"; right stick click is accurate aim, both stick clicks recentre.\r\n"
+            L"; alternate = left trigger locks on, right grip interacts, X recentres\r\n"
+            L"; (double click: PDA), the radial gear menu, right stick click is\r\n"
+            L"; accurate aim, both stick clicks recentre (was \"underworld\"). In the\r\n"
+            L"; board view the right stick held in and pushed sets the seat height\r\n"
+            L"; (up/down) and the world scale (left/right).\r\n"
             L"control_scheme = controller\r\n"
             L"; Gear in immersive third person: cross (the 3D gear cross by your\r\n"
             L"; hip) or radial (hold the left stick in, then push it toward the\r\n"
@@ -995,7 +997,7 @@ namespace trlvr
         g_config.control_scheme = scheme == 1 || scheme == 2 ? scheme : 0;
         config_save_setting(L"controls", L"control_scheme",
                             interaction ? L"interaction"
-                            : scheme == 2 ? L"underworld" : L"controller");
+                            : scheme == 2 ? L"alternate" : L"controller");
         g_config.gear_menu_radial = !interaction;
         config_save_setting(L"controls", L"gear_menu",
                             interaction ? L"cross" : L"radial");
@@ -1499,7 +1501,8 @@ namespace trlvr
                                      L"controller", text, 32, path);
             g_config.control_scheme =
                 _wcsicmp(text, L"interaction") == 0 ? 1
-                : _wcsicmp(text, L"underworld") == 0 ? 2 : 0;
+                : (_wcsicmp(text, L"alternate") == 0 ||
+                   _wcsicmp(text, L"underworld") == 0) ? 2 : 0;
         }
         value = read_float(L"vr", L"ui_scale", L"0.6", path);
         g_config.ui_scale = value >= 0.1f && value <= 2.0f ? value : 0.6f;

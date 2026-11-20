@@ -19419,6 +19419,68 @@ namespace trlvr
         // build, in follow mode only.
         bool g_classic_orbit_reset_pending = false;
 
+        void classic_orbit_reset_apply(void* cam)
+        {
+            g_classic_orbit_reset_pending = false;
+            if (camera_first_person_active() ||
+                camera_third_person_mode() != 0)
+                return;
+            const float kTwoPi = 6.28318531f;
+            float yaw = 0.0f, tilt = 0.0f;
+            short mode = -1;
+            bool focus_lara = false;
+            __try
+            {
+                unsigned char* c = static_cast<unsigned char*>(cam);
+                const unsigned char* lara =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerInstance);
+                mode = *reinterpret_cast<const short*>(c + kOffMode);
+                focus_lara = lara &&
+                    *reinterpret_cast<const void* const*>(
+                        c + kOffFocusInstance) == lara;
+                if (mode == 0 && focus_lara)
+                {
+                    const float heading = *reinterpret_cast<const float*>(
+                        lara + kOffInstanceHeading);
+                    const float base_tilt =
+                        *reinterpret_cast<const float*>(c + 0x600) +
+                        *reinterpret_cast<const float*>(c + 0x324);
+                    if (!std::isfinite(heading) || !std::isfinite(base_tilt))
+                        return;
+                    yaw = fmodf(heading + 3.14159265f, kTwoPi);
+                    if (yaw < 0.0f) yaw += kTwoPi;
+                    tilt = fmodf(base_tilt, kTwoPi);
+                    if (tilt < 0.0f) tilt += kTwoPi;
+                    float* f = reinterpret_cast<float*>(c);
+                    f[0x508 / 4] = yaw;
+                    f[0x608 / 4] = yaw;
+                    f[0x628 / 4] = yaw;
+                    f[0x598 / 4] = 0.0f;
+                    f[0x5A8 / 4] = 0.0f;
+                    f[0x1158 / 4] = 0.0f;
+                    f[0x610 / 4] = tilt;
+                    f[0x500 / 4] = tilt;
+                    f[0x590 / 4] = 0.0f;
+                    f[0x5A0 / 4] = 0.0f;
+                    *reinterpret_cast<short*>(c + 0x1190) = 1;
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return;
+            }
+            if (mode != 0 || !focus_lara)
+            {
+                log("view: reset -- classic orbit left alone (camera mode "
+                    "%d, %s)", (int)mode,
+                    focus_lara ? "following Lara" : "not following Lara");
+                return;
+            }
+            const float pitch_up = tilt > 3.14159265f ? kTwoPi - tilt : -tilt;
+            log("view: reset -- classic orbit behind Lara, yaw %.1f pitch "
+                "%.1f deg", yaw * 57.2957795f, pitch_up * 57.2957795f);
+        }
+
         void __cdecl detour_body(void* cam);
         void __cdecl detour(void* cam)
         {
@@ -19463,6 +19525,10 @@ namespace trlvr
             const bool main_camera = cam == kMainCamera;
             if (main_camera)
             {
+                // After this frame's GenericCameraProcess: the next one
+                // starts from the new orbit.
+                if (g_classic_orbit_reset_pending)
+                    classic_orbit_reset_apply(cam);
                 core_position_restore(cam);
                 const float* core = reinterpret_cast<const float*>(
                     static_cast<const unsigned char*>(cam) + kOffPosition);

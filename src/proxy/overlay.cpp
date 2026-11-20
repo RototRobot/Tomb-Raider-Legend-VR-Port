@@ -1132,16 +1132,18 @@ namespace trlvr
                 : preset_underworld ? 2 : 3;
             if (ImGui::Combo("Control scheme", &scheme,
                              "Controller (sticks)\0Interaction (hands)\0"
-                             "Underworld\0Custom\0") && scheme != 3)
+                             "Alternate\0Custom\0") && scheme != 3)
                 config_set_control_scheme(scheme);
             help("Controller: right stick click recentres, hold switches "
                  "view, up/down zooms, click-drag sets height or scale; radial "
                  "gear menu. Interaction: right stick click switches weapon, "
                  "long press switches view; the 3D gear cross and palm "
-                 "sliders. Underworld: the Underworld mod's layout: left "
+                 "sliders. Alternate: left "
                  "trigger locks on, right grip interacts, X recentres (double "
                  "click: PDA), the radial gear menu, right stick click "
-                 "is accurate aim, both stick clicks recentre. Custom: you "
+                 "is accurate aim, both stick clicks recentre; in the board "
+                 "view, right stick held in and pushed: up/down = seat "
+                 "height, left/right = world scale. Custom: you "
                  "changed Gear menu or Scale and zoom "
                  "below; choose a scheme to reset them.");
             static const bool hands_at_start = c.hands_on_controllers;
