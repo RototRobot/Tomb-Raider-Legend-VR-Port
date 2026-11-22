@@ -231,6 +231,10 @@ namespace trlvr
         // never does) and her movement follows the headset; 1 = the board
         // turns with the game's camera, which swings round behind Lara.
         bool board_follow_lara = false;
+        // Board view on a rope, pole or grapple: false = the board keeps its
+        // heading, true = it turns with Lara there (the game switches its
+        // camera to mode 2 on a grab).
+        bool board_rope_turn = false;
         // God-hand pick-up (board mode with board_god_hand only). Zones are
         // metres at her size: head grip zone, claim zone (a hand this close
         // keeps its grip/trigger from the game) and arm grip zone (0 = no
@@ -340,7 +344,7 @@ namespace trlvr
         // m/s, the hand relative to her) knocks her down along its motion,
         // as the Y flick does.
         bool god_swat = true;
-        float god_swat_speed = 1.5f;
+        float god_swat_speed = 2.0f;
         float body_push_head_degrees = 6.0f;
         float body_push_chest_degrees = 4.0f;
         float body_push_waist_degrees = 3.0f;

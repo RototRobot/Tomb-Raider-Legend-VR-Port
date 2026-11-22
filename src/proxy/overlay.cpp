@@ -16,6 +16,7 @@
 #include "imgui_impl_dx9.h"
 #include "imgui_impl_win32.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <windows.h>
 #include <xinput.h>     // the XINPUT_GAMEPAD_* bits only; nothing linked
@@ -617,30 +618,6 @@ namespace trlvr
 
         void view_section(Config& c)
         {
-            if (c.water_reflection)
-            {
-                // Performance test (user 2026-11-22: fps halves at water):
-                // the per-eye reflection draws the mirrored scene twice.
-                int refl = reflection_stereo_reflection_mode();
-                if (ImGui::Combo("Water reflection", &refl,
-                                 "Per eye\0One image (both eyes)\0Off\0"))
-                    reflection_stereo_set_reflection_mode(refl);
-                help("Per eye draws the mirrored scene once for each eye "
-                     "(correct, most expensive). One image draws it once. "
-                     "Off skips it. This session only; the performance log "
-                     "records each change.");
-            }
-            bool fx = false;
-            if (c.water_effects && water_stereo_effects_live(&fx))
-            {
-                if (ImGui::Checkbox("Water effects", &fx))
-                    water_stereo_set_effects_live(fx);
-                help("The game's distortion at and under the water surface. "
-                     "This session only; the performance log records each "
-                     "change.");
-            }
-            if (c.water_reflection || c.water_effects)
-                ImGui::Spacing();
             static const char* const kThird[3] = { "Classic", "Shoulder",
                                                    "Board" };
             const int third = camera_third_person_mode();
@@ -779,7 +756,7 @@ namespace trlvr
         void soft_presets(Config& c)
         {
             ImGui::PushID("soft");
-            ImGui::TextUnformatted("Soft parts preset");
+            ImGui::TextUnformatted("Preset");
             static const char* const names[5] = { "Off", "Low", "Medium",
                                                   "High", "Max" };
             int active = -1;
@@ -793,7 +770,7 @@ namespace trlvr
             if (pressed >= 0)
                 apply_soft_preset(c, kSoftPresets[pressed]);
             ImGui::PopID();
-            help("Sets the soft parts' limit, sideways looseness and "
+            help("Sets the chest's limit, sideways looseness and "
                  "damping together. The sliders below still fine-tune.");
         }
 
@@ -904,7 +881,7 @@ namespace trlvr
             if (pressed >= 0)
                 apply_physics_preset(c, pressed);
             ImGui::PopID();
-            help("How much her chest, soft parts and rear move and bounce, "
+            help("How much her chest and rear move and bounce, "
                  "in first and third person and under your hands. Off shows "
                  "her stock shape. No button lit means the advanced "
                  "settings have been tuned by hand.");
@@ -934,14 +911,14 @@ namespace trlvr
             physics_presets(c);
             if (g_adv)
             {
-                ImGui::SeparatorText("Chest, soft parts");
+                ImGui::SeparatorText("Chest");
                 soft_presets(c);
                 ImGui::Spacing();
-                slider("Chest spring limit", &c.body_spring_angle, 0.0f,
+                slider("Spring limit", &c.body_spring_angle, 0.0f,
                        15.0f, "%.1f deg", L"vr", L"body_spring_angle",
                        "First-person full body: how far her chest sways on "
                        "its spring.");
-                slider("Soft parts limit", &c.body_soft_angle, 0.0f, 30.0f,
+                slider("Bounce limit", &c.body_soft_angle, 0.0f, 30.0f,
                        "%.1f deg", L"vr", L"body_soft_angle", nullptr);
                 slider("Squash and stretch", &c.body_soft_stretch, 0.0f, 1.0f,
                        "%.2f", L"vr", L"body_soft_stretch",
@@ -951,7 +928,6 @@ namespace trlvr
                        L"body_soft_ripple",
                        "A lighter second motion on top of the swing: the outer "
                        "part catching up and overrunning.");
-                ImGui::SeparatorText("Third person");
                 slider("Sideways looseness", &c.body_soft_sway_hz, 0.8f, 4.0f,
                        "%.1f Hz", L"vr", L"body_soft_sway_hz",
                        "Side-to-side spring rate. Lower swings wider and slower "
@@ -1150,7 +1126,7 @@ namespace trlvr
             help("How lively she is when you swing, throw or toss her: "
                  "throw speed, gravity, bounce and friction off walls, limb "
                  "flop, knee bend and tumble, for both the head and the "
-                 "torso grab. Low is heavy and stiff, Max floaty and wild. "
+                 "fist grab. Low is heavy and stiff, Max floaty and wild. "
                  "Off = no throwing: let go and she is put down. No button "
                  "lit means the advanced settings were tuned by hand.");
         }
@@ -1180,6 +1156,10 @@ namespace trlvr
                    "right stick and a recentre turn it -- and the move stick "
                    "follows your head. On: the board turns with the game's "
                    "camera, which swings round behind Lara.");
+            toggle("Board turns on ropes and grapples", &c.board_rope_turn,
+                   L"vr", L"board_rope_turn",
+                   "Off: the board keeps its heading while Lara hangs on a "
+                   "rope, pole or grapple. On: it turns with her there.");
             if (g_adv)
             {
                 slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
@@ -1239,17 +1219,22 @@ namespace trlvr
                            "Her arms hang limp while she is held by the head.");
                 }
             }
-            ImGui::SeparatorText("Swat");
-            toggle("Swat to knock her down", &c.god_swat, L"vr", L"god_swat",
-                   "Hit her with a free hand fast and she stumbles and falls "
-                   "along your hand's motion, front or back, as the Y flick "
-                   "does.");
-            ImGui::BeginDisabled(!c.god_swat);
-            slider("Swat speed", &c.god_swat_speed, 0.5f, 6.0f, "%.1f m/s",
-                   L"vr", L"god_swat_speed",
-                   "How fast your real hand must be moving when it hits her. "
-                   "Lower = easier to trigger; slower hits only shove.");
-            ImGui::EndDisabled();
+            if (g_adv)
+            {
+                ImGui::SeparatorText("Swat");
+                toggle("Swat to knock her down", &c.god_swat, L"vr",
+                       L"god_swat",
+                       "Hit her with a free hand fast and she stumbles and "
+                       "falls along your hand's motion, front or back, as the "
+                       "Y flick does.");
+                ImGui::BeginDisabled(!c.god_swat);
+                slider("Swat speed", &c.god_swat_speed, 0.5f, 6.0f, "%.1f m/s",
+                       L"vr", L"god_swat_speed",
+                       "How fast your real hand must be moving when it hits "
+                       "her. Lower = easier to trigger; slower hits only "
+                       "shove.");
+                ImGui::EndDisabled();
+            }
             ImGui::SeparatorText("Throw and drop");
             toss_presets(c);
             if (g_adv)
@@ -1310,32 +1295,32 @@ namespace trlvr
                        "Let go and she is left at least this high above the "
                        "floor, so even a light let-go is the game's own fall.");
             }
-            ImGui::SeparatorText("Torso grab (fist)");
-            toggle("Torso grab", &c.god_torso, L"vr", L"god_torso",
+            if (!g_adv)
+                return;
+            ImGui::SeparatorText("Grab to throw (fist)");
+            toggle("God mode grab to throw", &c.god_torso, L"vr", L"god_torso",
                    "Make a fist with the palm toward her waist, back or "
                    "belly and hold her like a doll: she follows your hand, "
                    "her limbs hang. Let go with a swing to toss her. Needs "
                    "'Grab with hand pose'.");
-            if (!g_adv)
-                return;
-            slider("Torso max height", &c.god_torso_max_height, 0.05f, 3.0f,
+            slider("Max height", &c.god_torso_max_height, 0.05f, 3.0f,
                    "%.2f m", L"vr", L"god_torso_max_height",
                    "Only while she looks no taller than this to you.");
-            slider("Torso facing", &c.god_torso_facing, 0.0f, 1.0f, "%.2f",
+            slider("Facing", &c.god_torso_facing, 0.0f, 1.0f, "%.2f",
                    L"vr", L"god_torso_facing",
                    "How squarely the palm must face her spine "
                    "(0 = any, 1 = dead on).");
-            slider("Torso zone radius", &c.god_torso_radius, 0.05f, 1.0f,
+            slider("Zone radius", &c.god_torso_radius, 0.05f, 1.0f,
                    "%.2f m", L"vr", L"god_torso_radius",
                    "Round her spine, metres at her size.");
-            slider("Torso hand margin", &c.god_torso_margin, 0.0f, 0.3f,
+            slider("Hand margin", &c.god_torso_margin, 0.0f, 0.3f,
                    "%.2f m", L"vr", L"god_torso_margin",
                    "Plus this margin, metres at her size (the zones keep "
                    "their size against her at any world scale).");
-            slider("Torso zone lower", &c.god_torso_lower, 0.0f, 0.5f,
+            slider("Zone lower", &c.god_torso_lower, 0.0f, 0.5f,
                    "%.2f m", L"vr", L"god_torso_lower",
                    "Slide the zone down her spine toward her hips.");
-            slider("Torso grab grace", &c.god_torso_grace, 0.0f, 1.0f,
+            slider("Grab grace", &c.god_torso_grace, 0.0f, 1.0f,
                    "%.2f s", L"vr", L"god_torso_grace",
                    "The fist may close this long after the palm was aimed.");
             toggle("Fist beats chest pinch", &c.god_torso_fist_first, L"vr",
@@ -1346,21 +1331,21 @@ namespace trlvr
                    "%.2f m", L"vr", L"god_fist_block_height",
                    "A fist never holds a soft part while she looks smaller "
                    "than this. 0 = never blocks.");
-            slider("Torso toss strength", &c.god_torso_throw_scale, 0.0f,
+            slider("Toss strength", &c.god_torso_throw_scale, 0.0f,
                    3.0f, "%.2fx", L"vr", L"god_torso_throw_scale",
                    "Toss speed = your hand's speed times this. 0 = always "
                    "put down.");
-            slider("Torso toss spin", &c.god_torso_spin, 0.0f, 2.0f, "%.2f",
+            slider("Toss spin", &c.god_torso_spin, 0.0f, 2.0f, "%.2f",
                    L"vr", L"god_torso_spin",
                    "The tumble, as a fraction of your hand's turn.");
             toggle("Show grab zones", &c.god_zone_debug, L"vr",
                    L"god_zone_debug",
-                   "Wireframes in the headset: torso green, head magenta, "
+                   "Wireframes in the headset: body green, head magenta, "
                    "arms orange, your hand's points white. Board view only "
                    "(the god hand does not run in classic or shoulder).");
             slider("Grab zone size", &c.god_zone_scale, 0.25f, 4.0f, "%.2fx",
                    L"vr", L"god_zone_scale",
-                   "Multiplies the head, arm and torso grab zones.");
+                   "Multiplies the head, arm and body grab zones.");
         }
 
         void theatre_section(Config& c)
@@ -1437,8 +1422,6 @@ namespace trlvr
                    L"board_diorama",
                    "The tabletop world inside a box open at the front and "
                    "top, the rest of the room dark.");
-            if (!g_adv)
-                return;
             slider("Box width", &c.board_diorama_width, 0.1f, 3.0f, "%.2f m",
                    L"vr", L"board_diorama_width", nullptr);
             slider("Box depth", &c.board_diorama_depth, 0.1f, 3.0f, "%.2f m",
@@ -1601,6 +1584,401 @@ namespace trlvr
             help("Darkens the edge of your view while Lara moves.");
         }
 
+        // --- Button layout: what each Quest 3 (Touch Plus) input does -------
+        // Built from the same settings vr_input.cpp reads (control scheme,
+        // gear menu, scale and zoom, hands / gestures, left-handed, turning),
+        // for a view picked here, so it follows the Controls tab live. Keep
+        // in step with update_logical_actions and the key-output skips in
+        // vr_input.cpp.
+        enum BindInput
+        {
+            BindLeftStick, BindLeftClick, BindMenu, BindX, BindY,
+            BindLeftTrigger, BindLeftGrip,
+            BindRightStick, BindRightClick, BindA, BindB,
+            BindRightTrigger, BindRightGrip,
+            BindBothSticks, BindPalm, BindGodHands,
+            BindCount
+        };
+
+        struct Binding
+        {
+            const char* input = nullptr;
+            char brief[48] = {};    // the drawing's label ("" = unused)
+            char full[200] = {};    // the table's text ("" = row hidden)
+        };
+
+        void set_binding(Binding& b, const char* input, const char* brief,
+                         const char* full)
+        {
+            b.input = input;
+            snprintf(b.brief, sizeof(b.brief), "%s", brief ? brief : "");
+            snprintf(b.full, sizeof(b.full), "%s", full ? full : "");
+        }
+
+        // view: 0 first person, 1 classic, 2 shoulder, 3 board.
+        void build_bindings(const Config& c, int view, Binding out[BindCount])
+        {
+            const bool imm = c.hands_on_controllers || c.gesture_controls;
+            const bool fp = view == 0;
+            const bool ifp = c.gesture_controls && fp;  // gestures in first person
+            const bool itp = imm && !fp;                // immersive third person
+            const bool alt = c.control_scheme == 2;
+            const bool interaction = c.control_scheme == 1;
+            const bool radial = !imm || fp || c.gear_menu_radial;
+            char t[200];
+
+            set_binding(out[BindLeftStick], "Left stick", "Move",
+                        c.stick_walk ? "Move. A light push walks." : "Move.");
+            snprintf(t, sizeof(t), "Double click: recentre.%s", radial
+                ? " Hold: gear menu, push up = medipack, right = binoculars, "
+                  "down = weapon switch, left = light."
+                : " Hold: nothing (the gear cross by your hip, grabbed with "
+                  "a grip).");
+            set_binding(out[BindLeftClick], "Left stick click",
+                        radial ? "2x: recentre. Hold: gear" : "2x: recentre", t);
+            if (c.overlay_vr_open_hold > 0.0f)
+                snprintf(t, sizeof(t), "Pause. Hold %.1f s: this settings "
+                         "menu.", c.overlay_vr_open_hold);
+            else
+                snprintf(t, sizeof(t), "Pause.");
+            set_binding(out[BindMenu], "Menu (left)", "Pause", t);
+
+            if (alt && !ifp)
+                set_binding(out[BindX], "X", "Recentre. 2x: PDA",
+                            "Recentre. Double click: PDA.");
+            else if (ifp)
+                set_binding(out[BindX], "X", "-",
+                            "Nothing (draw guns at the holsters).");
+            else
+                set_binding(out[BindX], "X", "Aim", "Aim (draws the guns).");
+
+            {
+                const bool grenade = !ifp;
+                const bool light = !itp;
+                const bool flick = view == 3 && imm;
+                snprintf(t, sizeof(t), "%s%s%s",
+                         grenade ? "Grenade." : "Nothing on a click (belt "
+                                                "and pouches).",
+                         light ? " Hold: light." : "",
+                         flick ? " Held in the board view: finger flick "
+                                 "(knocks her over)." : "");
+                set_binding(out[BindY], "Y",
+                            flick ? "Grenade. Hold: flick"
+                            : grenade && light ? "Grenade. Hold: light"
+                            : grenade ? "Grenade" : light ? "Hold: light"
+                            : "-", t);
+            }
+
+            // The triggers: Action on the off hand's, fire on the main
+            // hand's; left-handed swaps which physical trigger is which.
+            const char* action_brief = alt ? "Lock-on" : "Action";
+            const char* action_full = alt ? "Lock-on."
+                : ifp ? "Action. Precision aim with a gun drawn."
+                      : "Action.";
+            const char* fire_brief = "Fire";
+            const char* fire_full = ifp
+                ? (c.single_pistols
+                    ? "Fire, with a gun drawn (single pistols: each "
+                      "pistol its own trigger)."
+                    : "Fire, with a gun drawn.")
+                : "Fire.";
+            set_binding(out[BindLeftTrigger], "Left trigger",
+                        c.left_handed ? fire_brief : action_brief,
+                        c.left_handed ? fire_full : action_full);
+            set_binding(out[BindRightTrigger], "Right trigger",
+                        c.left_handed ? action_brief : fire_brief,
+                        c.left_handed ? action_full : fire_full);
+
+            const char* cross = itp && !radial ? " Grabs the gear cross." : "";
+            if (ifp)
+                snprintf(t, sizeof(t), "Draw and holster, belt items, grab "
+                         "ledges and poles. At your chest: light.");
+            else
+                snprintf(t, sizeof(t), "Grapple.%s", cross);
+            set_binding(out[BindLeftGrip], "Left grip",
+                        ifp ? "Draw / grab" : "Grapple", t);
+            if (alt)
+                snprintf(t, sizeof(t), "Action.%s", cross);
+            else if (ifp)
+                snprintf(t, sizeof(t), "Draw and holster, grab ledges and "
+                         "poles.");
+            else
+                snprintf(t, sizeof(t), "Lock-on.%s", cross);
+            set_binding(out[BindRightGrip], "Right grip",
+                        alt ? "Action" : ifp ? "Draw / grab" : "Lock-on", t);
+
+            // Right stick: turning in first person, the camera otherwise
+            // (the seat stick unless the Interaction scheme).
+            const bool stick_zoom = !interaction && c.tp_scale_control != 2;
+            if (fp)
+            {
+                if (c.snap_turn)
+                    snprintf(t, sizeof(t), "Snap turn, %.0f deg.",
+                             c.snap_turn_degrees);
+                else
+                    snprintf(t, sizeof(t), "Smooth turn, %.0f deg/s.",
+                             c.smooth_turn_speed);
+                set_binding(out[BindRightStick], "Right stick",
+                            c.snap_turn ? "Snap turn" : "Turn", t);
+            }
+            else if (view == 1 || !stick_zoom)
+                set_binding(out[BindRightStick], "Right stick", "Orbit",
+                            "Orbit the camera.");
+            else
+                set_binding(out[BindRightStick], "Right stick",
+                            "Turn. Up/down: zoom",
+                            view == 3 ? "Left/right: turn the board. Up/down: "
+                                        "zoom to Lara."
+                                      : "Left/right: orbit. Up/down: zoom.");
+
+            {
+                char brief[48], full[200];
+                if (imm && !interaction)
+                {
+                    const char* click = alt ? (ifp ? nullptr : "accurate aim")
+                                            : "recentre";
+                    const char* drag = nullptr;
+                    if (view == 3)
+                        drag = alt ? "up/down = seat height, left/right = "
+                                     "world scale"
+                             : c.tp_scale_control != 2 ? "up/down = world "
+                                                         "scale"
+                                                       : nullptr;
+                    else if (view == 2)
+                        drag = "up/down = seat height";
+                    else if (view == 1 && c.tp_scale_control != 2)
+                        drag = "up/down = zoom";
+                    snprintf(full, sizeof(full), "%s%s%sHold %.2f s: switch "
+                             "view.%s%s%s",
+                             click ? "Click: " : "", click ? click : "",
+                             click ? (alt ? ". " : ". Double click: PDA. ")
+                                   : "",
+                             c.view_switch_hold,
+                             drag ? " Click and push: " : "",
+                             drag ? drag : "", drag ? "." : "");
+                    snprintf(brief, sizeof(brief), "%s%s",
+                             alt ? (click ? "Accurate aim" : "")
+                                 : "Recentre. 2x: PDA",
+                             alt && !click ? "Hold: view" : ". Hold: view");
+                }
+                else
+                {
+                    // Interaction scheme and plain buttons: weapon switch
+                    // (the gestures or the gear cross do it in immersive
+                    // play), PDA, and the long press.
+                    const bool weapon = !(ifp || itp);
+                    const char* hold = imm ? "switch view" : "binoculars";
+                    snprintf(full, sizeof(full), "%sDouble click: PDA. "
+                             "Hold: %s.",
+                             weapon ? "Click: weapon switch. " : "", hold);
+                    snprintf(brief, sizeof(brief), "%s2x: PDA. Hold: %s",
+                             weapon ? "Weapon. " : "",
+                             imm ? "view" : "binoculars");
+                }
+                set_binding(out[BindRightClick], "Right stick click", brief,
+                            full);
+            }
+
+            set_binding(out[BindA], "A", "Jump", "Jump.");
+            set_binding(out[BindB], "B", "Crouch / roll",
+                        "Crouch, roll, dive.");
+            set_binding(out[BindBothSticks], "Both stick clicks", "",
+                        alt ? "Recentre." : "");
+
+            const bool palm = itp && c.tp_scale_control != 1;
+            set_binding(out[BindPalm], c.left_handed ? "Right palm up"
+                                                     : "Left palm up", "",
+                        palm ? "Scale and zoom sliders; grip a knob to move "
+                               "it." : "");
+            const bool god = view == 3 && c.hands_on_controllers &&
+                c.board_god_hand;
+            set_binding(out[BindGodHands], "God hands", "",
+                        !god ? ""
+                        : c.god_grab_pose
+                            ? "Pinch (trigger + thumb down) or fist (trigger "
+                              "+ grip) grabs Lara; grip alone points and "
+                              "presses."
+                            : "Grip grabs Lara.");
+        }
+
+        // A Quest 3 controller pair seen from above, drawn with ImGui shapes
+        // and labelled from the bindings. A test of the look; sizes follow
+        // the font so it scales with the menu.
+        void draw_controllers(const Binding b[BindCount])
+        {
+            const float s = ImGui::GetFontSize() / 13.0f;
+            const float width = ImGui::GetContentRegionAvail().x;
+            const float height = 228.0f * s;
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            // Opaque: the style's colours are see-through, and the shell's
+            // overlapping shapes would show their seams.
+            const auto opaque = [](ImGuiCol col, float shade) {
+                ImVec4 v = ImGui::GetStyleColorVec4(col);
+                return ImGui::ColorConvertFloat4ToU32(
+                    ImVec4(v.x * shade, v.y * shade, v.z * shade, 1.0f));
+            };
+            const ImU32 body = opaque(ImGuiCol_FrameBg, 1.0f);
+            const ImU32 part = opaque(ImGuiCol_Button, 0.8f);
+            const ImU32 edge = ImGui::GetColorU32(ImGuiCol_Border, 2.0f);
+            const ImU32 ink = ImGui::GetColorU32(ImGuiCol_Text);
+            const ImU32 lead = ImGui::GetColorU32(ImGuiCol_TextDisabled);
+            const float mid = p0.x + width * 0.5f;
+            const float face_r = 40.0f * s;
+            const float cy = p0.y + 76.0f * s;
+
+            for (int hand = 0; hand < 2; ++hand)
+            {
+                // inner: +1 toward the other controller.
+                const float inner = hand == 0 ? 1.0f : -1.0f;
+                const float cx = mid - inner * 58.0f * s;
+                const ImVec2 c(cx, cy);
+                const auto at = [&](float dx, float dy) {
+                    return ImVec2(cx + inner * dx * s, cy + dy * s);
+                };
+
+                // Under the shell: trigger at the front, grip on the inner
+                // side of the handle.
+                dl->AddRectFilled(ImVec2(cx - 14.0f * s, cy - face_r - 9.0f * s),
+                                  ImVec2(cx + 14.0f * s, cy - face_r + 8.0f * s),
+                                  part, 5.0f * s);
+                const ImVec2 g0 = at(16.0f, 36.0f), g1 = at(27.0f, 66.0f);
+                dl->AddRectFilled(ImVec2((std::min)(g0.x, g1.x), g0.y),
+                                  ImVec2((std::max)(g0.x, g1.x), g1.y),
+                                  part, 4.0f * s);
+
+                // The shell: a round face and a tapering handle.
+                const ImVec2 handle[4] = { at(-24.0f, 20.0f), at(24.0f, 20.0f),
+                                           at(17.0f, 112.0f),
+                                           at(-17.0f, 112.0f) };
+                dl->AddConvexPolyFilled(handle, 4, body);
+                dl->AddCircleFilled(at(0.0f, 112.0f), 17.0f * s, body);
+                dl->AddCircleFilled(c, face_r, body, 48);
+                dl->AddCircle(c, face_r, edge, 48, 1.0f);
+
+                // Face, as the Quest 3: the stick toward the outside, the
+                // two buttons toward the inside, the menu / Meta button
+                // below the stick.
+                const ImVec2 stick = at(-19.0f, -12.0f);
+                dl->AddCircleFilled(stick, 13.0f * s, part, 24);
+                dl->AddCircle(stick, 13.0f * s, edge, 24, 1.0f);
+                dl->AddCircleFilled(stick, 7.0f * s, body, 16);
+                const ImVec2 top_button = at(12.0f, -13.0f);
+                const ImVec2 low_button = at(0.0f, 8.0f);
+                const ImVec2 small_button = at(-23.0f, 14.0f);
+                dl->AddCircleFilled(top_button, 7.5f * s, part, 20);
+                dl->AddCircleFilled(low_button, 7.5f * s, part, 20);
+                dl->AddCircleFilled(small_button, 3.5f * s, part, 12);
+                const char* top_name = hand == 0 ? "Y" : "B";
+                const char* low_name = hand == 0 ? "X" : "A";
+                const ImVec2 tn = ImGui::CalcTextSize(top_name);
+                dl->AddText(ImVec2(top_button.x - tn.x * 0.5f,
+                                   top_button.y - tn.y * 0.5f), ink, top_name);
+                const ImVec2 ln = ImGui::CalcTextSize(low_name);
+                dl->AddText(ImVec2(low_button.x - ln.x * 0.5f,
+                                   low_button.y - ln.y * 0.5f), ink, low_name);
+
+                // Labels on the outer side, one row each, with a leader to
+                // the part.
+                struct Label { ImVec2 anchor; const char* text; };
+                const Label labels[7] = {
+                    { ImVec2(cx, cy - face_r - 5.0f * s),
+                      b[hand == 0 ? BindLeftTrigger : BindRightTrigger].brief },
+                    { top_button, b[hand == 0 ? BindY : BindB].brief },
+                    { low_button, b[hand == 0 ? BindX : BindA].brief },
+                    { stick, b[hand == 0 ? BindLeftStick : BindRightStick].brief },
+                    { stick, b[hand == 0 ? BindLeftClick : BindRightClick].brief },
+                    { small_button, hand == 0 ? b[BindMenu].brief : "System" },
+                    { ImVec2((g0.x + g1.x) * 0.5f, (g0.y + g1.y) * 0.5f),
+                      b[hand == 0 ? BindLeftGrip : BindRightGrip].brief },
+                };
+                static const char* const kPrefix[7] = { "Trigger: ", "",
+                    "", "Stick: ", "Click: ", "", "Grip: " };
+                const float column = cx - inner * (face_r + 14.0f * s);
+                for (int i = 0; i < 7; ++i)
+                {
+                    char text[64];
+                    snprintf(text, sizeof(text), "%s%s", kPrefix[i],
+                             labels[i].text[0] ? labels[i].text : "-");
+                    // Two lines when it does not fit beside the controller:
+                    // split at the last space that fits.
+                    const float room = inner > 0.0f
+                        ? column - 3.0f * s - p0.x
+                        : p0.x + width - column - 3.0f * s;
+                    const char* split = nullptr;
+                    if (ImGui::CalcTextSize(text).x > room)
+                        for (const char* q = text; *q; ++q)
+                            if (*q == ' ' &&
+                                ImGui::CalcTextSize(text, q).x <= room)
+                                split = q;
+                    const float line = ImGui::GetTextLineHeight();
+                    const float y = p0.y + (6.0f + i * 31.0f) * s;
+                    const float lines = split ? 2.0f : 1.0f;
+                    dl->AddLine(labels[i].anchor,
+                                ImVec2(column + inner * 3.0f * s,
+                                       y + line * lines * 0.5f), lead, 1.0f);
+                    const char* parts[2][2] = { { text, split ? split : nullptr },
+                                                { split ? split + 1 : nullptr,
+                                                  nullptr } };
+                    for (int k = 0; k < (split ? 2 : 1); ++k)
+                    {
+                        const char* from = parts[k][0];
+                        const char* to = parts[k][1];
+                        const float w = ImGui::CalcTextSize(from, to).x;
+                        const float x = inner > 0.0f
+                            ? column - 3.0f * s - w : column + 3.0f * s;
+                        dl->AddText(ImVec2(x, y + k * line), ink, from, to);
+                    }
+                }
+            }
+            ImGui::Dummy(ImVec2(width, height));
+        }
+
+        void layout_section(Config& c)
+        {
+            static int view = -1;
+            if (view < 0)
+                view = camera_view_first_person() ? 0
+                     : (std::max)(0, (std::min)(2, camera_third_person_mode())) + 1;
+            ImGui::Combo("Show for", &view,
+                         "First person\0Classic\0Shoulder\0Board\0");
+            help("The view the layout below is for. It follows the control "
+                 "settings above as you change them.");
+            Binding b[BindCount];
+            build_bindings(c, view, b);
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImGui::TextWrapped("Meta Quest 3 (Touch Plus). Other controllers "
+                               "differ: without a menu button, pause is a "
+                               "long left stick press and both sticks held "
+                               "open this menu.");
+            ImGui::PopStyleColor();
+            draw_controllers(b);
+            if (ImGui::BeginTable("##bindings", 2,
+                                  ImGuiTableFlags_RowBg |
+                                  ImGuiTableFlags_BordersInnerH |
+                                  ImGuiTableFlags_SizingStretchProp))
+            {
+                ImGui::TableSetupColumn("Input",
+                                        ImGuiTableColumnFlags_WidthFixed,
+                                        ImGui::CalcTextSize(
+                                            "Right stick click  ").x);
+                ImGui::TableSetupColumn("Action");
+                ImGui::TableHeadersRow();
+                for (int i = 0; i < BindCount; ++i)
+                {
+                    if (!b[i].input || !b[i].full[0])
+                        continue;
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    ImGui::TextUnformatted(b[i].input);
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextWrapped("%s", b[i].full);
+                }
+                ImGui::EndTable();
+            }
+        }
+
         void bike_section(Config& c)
         {
             ImGui::BeginDisabled(!c.hands_on_controllers);
@@ -1654,6 +2032,31 @@ namespace trlvr
             if (c.stereo_dxvk != dxvk_started || c.xr_async_end != async_started)
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                                    "Restart the game to apply this.");
+            if (g_adv)
+            {
+                if (c.water_reflection)
+                {
+                    // Performance test (user 2026-11-22: fps halves at water):
+                    // the per-eye reflection draws the mirrored scene twice.
+                    int refl = reflection_stereo_reflection_mode();
+                    if (ImGui::Combo("Water reflection", &refl,
+                                     "Per eye\0One image (both eyes)\0Off\0"))
+                        reflection_stereo_set_reflection_mode(refl);
+                    help("Per eye draws the mirrored scene once for each eye "
+                         "(correct, most expensive). One image draws it once. "
+                         "Off skips it. This session only; the performance log "
+                         "records each change.");
+                }
+                bool fx = false;
+                if (c.water_effects && water_stereo_effects_live(&fx))
+                {
+                    if (ImGui::Checkbox("Water effects", &fx))
+                        water_stereo_set_effects_live(fx);
+                    help("The game's distortion at and under the water surface. "
+                         "This session only; the performance log records each "
+                         "change.");
+                }
+            }
         }
 
         // OpenXR / Quest settings. The runtime is chosen once at startup, so
@@ -1955,6 +2358,8 @@ namespace trlvr
                     weapons_section(c);
                 if (ImGui::CollapsingHeader("Turning and comfort"))
                     turning_section(c);
+                if (ImGui::CollapsingHeader("Button layout"))
+                    layout_section(c);
                 end_tab();
             }
             if (begin_tab("System"))

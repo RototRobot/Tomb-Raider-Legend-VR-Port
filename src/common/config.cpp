@@ -143,7 +143,8 @@ namespace trlvr
             { L"vr", L"body_push_hz", L"2.5" },
             { L"vr", L"body_push_damping", L"0.9" },
             { L"vr", L"god_swat", L"1" },
-            { L"vr", L"god_swat_speed", L"1.5" },
+            { L"vr", L"god_swat_speed", L"2" },
+            { L"vr", L"board_rope_turn", L"0" },
             { L"vr", L"body_push_head_degrees", L"6" },
             { L"vr", L"body_push_chest_degrees", L"4" },
             { L"vr", L"body_push_waist_degrees", L"3" },
@@ -429,6 +430,9 @@ namespace trlvr
             L"; stick follows the headset; 1 = it turns with the game's camera,\r\n"
             L"; which swings round behind Lara.\r\n"
             L"board_follow_lara = 0\r\n"
+            L"; live: board view on a rope, pole or grapple. 0 = the board keeps its\r\n"
+            L"; heading; 1 = the board turns with Lara there.\r\n"
+            L"board_rope_turn = 0\r\n"
             L"; live: god mode (board view with board_god_hand), the pick-up zone round\r\n"
             L"; her head, metres at her size. 0.05 .. 1.\r\n"
             L"god_head_zone = 0.3\r\n"
@@ -579,7 +583,7 @@ namespace trlvr
             L"; live: god mode, a hand hitting her faster than god_swat_speed (real\r\n"
             L"; m/s) knocks her down along its motion, as the Y flick does. 0 = off.\r\n"
             L"god_swat = 1\r\n"
-            L"god_swat_speed = 1.5\r\n"
+            L"god_swat_speed = 2\r\n"
             L"; live: the most each part tilts, in degrees. Head 0 .. 20, chest and\r\n"
             L"; waist 0 .. 15, arms 0 .. 25, hips 0 .. 15, legs 0 .. 8.\r\n"
             L"body_push_head_degrees = 6\r\n"
@@ -1343,6 +1347,7 @@ namespace trlvr
             c.board_leash_height =
                 rf(L"board_leash_height", L"0.1", 0.0f, 1.0f, 0.1f);
             c.board_follow_lara = rb(L"board_follow_lara", false);
+            c.board_rope_turn = rb(L"board_rope_turn", false);
             c.god_head_zone = rf(L"god_head_zone", L"0.3", 0.05f, 1.0f, 0.3f);
             c.god_claim_zone = rf(L"god_claim_zone", L"0.6", 0.0f, 3.0f, 0.6f);
             c.god_arm_zone = rf(L"god_arm_zone", L"0.25", 0.0f, 0.5f, 0.25f);
@@ -1415,7 +1420,7 @@ namespace trlvr
             c.body_push_damping =
                 rf(L"body_push_damping", L"0.9", 0.2f, 1.5f, 0.9f);
             c.god_swat = rb(L"god_swat", true);
-            c.god_swat_speed = rf(L"god_swat_speed", L"1.5", 0.5f, 6.0f, 1.5f);
+            c.god_swat_speed = rf(L"god_swat_speed", L"2", 0.5f, 6.0f, 2.0f);
             c.body_push_head_degrees =
                 rf(L"body_push_head_degrees", L"6", 0.0f, 40.0f, 6.0f);
             c.body_push_chest_degrees =

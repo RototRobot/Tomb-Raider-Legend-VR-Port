@@ -20451,7 +20451,8 @@ namespace trlvr
                     // Game camera mode 2 is what retail switches to on a
                     // rope or pole (log 2026-11-22: 0 -> 2 at the grab);
                     // without it the board turned with her there.
-                    (mode == 0 || mode == 2) &&
+                    (mode == 0 ||
+                     (mode == 2 && !config().board_rope_turn)) &&
                     focus_lara && std::isfinite(saved[2]) &&
                     !camera_cinematic_playing() &&
                     !(ui_menu_active() && !ui_pause_menu_active());
