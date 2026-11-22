@@ -241,6 +241,17 @@ badly, mention roughly where and when -- the log says why.
 
 
 ------------------------------------------------------------
+OPTIONAL: HD TEXTURE PACK FIX
+------------------------------------------------------------
+Using the AI-Enhanced HD texture pack
+(https://www.nexusmods.com/tombraiderlegend/mods/97)? Its textures have no
+mipmaps, so distant surfaces shimmer and sparkle -- much worse in VR. The
+folder "Optional - HD texture pack fix" rebuilds them: drag the unpacked
+pack's folder onto "Fix HD texture pack.bat" and follow its steps. Its
+README.txt explains more. Not needed without that pack.
+
+
+------------------------------------------------------------
 SETTINGS WORTH KNOWING (trlvr.ini)
 ------------------------------------------------------------
 Every setting has a short explanation in the file itself. Missing settings
