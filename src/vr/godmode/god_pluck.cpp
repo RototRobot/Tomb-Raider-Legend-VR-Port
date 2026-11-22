@@ -277,25 +277,42 @@ namespace trlvr
             return pluck_segment_distance(in.drawn_wrist[c], in.drawn_end[c], pt) <= r;
         }
 
+        // The drawn hand velocity v with its speed capped to the real
+        // controller's (real_speed < 0: unknown, unchanged). Only scales
+        // down, so without an arm stretch it is the drawn velocity. (The
+        // stretch's move used to be subtracted instead; a mismatch with the
+        // drawn motion flipped fast throws back toward the pick-up: user
+        // 2026-11-21, boomerang throws.)
+        void cap_to_real(const float v[3], float real_speed, float out[3])
+        {
+            const float sp = length3(v);
+            const float f = (real_speed >= 0.0f && sp > real_speed && sp > 1e-6f)
+                                ? real_speed / sp : 1.0f;
+            for (int k = 0; k < 3; ++k) out[k] = v[k] * f;
+        }
+
         // A hand's velocity in real m/s from its pinch point, smoothed, and
         // the peak of the last 0.15 s (the second hand; the first hand's is
         // inline in pluck_step, where it also drives the pendulum).
-        void track_hand(const PluckParams& p, float dt, const float pt[3], float last[3],
+        void track_hand(const PluckParams& p, float dt, const float pt[3],
+                        float real_speed, float last[3],
                         float vel[3], float smooth[3], float peak[3], float& peak_age,
                         ThrowTracker& track)
         {
-            float step_v[3];
-            for (int k = 0; k < 3; ++k) step_v[k] = (pt[k] - last[k]) / dt / p.table;
+            float step_v[3], real_v[3];
+            for (int k = 0; k < 3; ++k)
+                step_v[k] = (pt[k] - last[k]) / dt / p.table;
+            cap_to_real(step_v, real_speed, real_v);
             const bool jump = length3(step_v) > 4.0f * p.throw_max_speed;
             if (!jump)
-                throw_track_add(track, step_v, nullptr, dt);
+                throw_track_add(track, real_v, nullptr, dt);
             const float sv = dt / (dt + 0.03f);
             for (int k = 0; k < 3; ++k)
             {
                 const float v = jump ? vel[k] : step_v[k];
                 vel[k] = v;
                 last[k] = pt[k];
-                smooth[k] += (v - smooth[k]) * sv;
+                smooth[k] += ((jump ? v : real_v[k]) - smooth[k]) * sv;
             }
             peak_age += dt;
             if (length3(smooth) >= length3(peak) || peak_age > 0.15f)
@@ -699,7 +716,7 @@ namespace trlvr
                 else if (step_ok)
                     ease_arm_snap(s.arm_offset2, s.arm_snap2, dt);
                 if (step_ok)
-                    track_hand(p, dt, pt, s.last_hand2, s.hand_vel2, s.vel_smooth2,
+                    track_hand(p, dt, pt, in.real_speed[s.hand2], s.last_hand2, s.hand_vel2, s.vel_smooth2,
                                s.peak_vel2, s.peak_age2, s.track2);
                 for (int k = 0; k < 3; ++k) s.wrist_target[c2][k] = pt[k] + s.arm_offset2[k];
             }
@@ -917,13 +934,16 @@ namespace trlvr
                 {
                     const float to_metres = 1.0f / p.table;
                     const float smooth_v = dt / (dt + 0.03f);
-                    float step_v[3];
+                    // step_v: the drawn hand (drives the pendulum); real_v:
+                    // capped to the real controller's speed, for the throw.
+                    float step_v[3], real_v[3];
                     for (int k = 0; k < 3; ++k)
                         step_v[k] = (pt[k] - s.last_hand[k]) / dt * to_metres;
+                    cap_to_real(step_v, in.real_speed[s.hand], real_v);
                     // A tracking jump (or a script ending) is no throw.
                     const bool jump = length3(step_v) > 4.0f * p.throw_max_speed;
                     if (!jump)
-                        throw_track_add(s.track, step_v, nullptr, dt);
+                        throw_track_add(s.track, real_v, nullptr, dt);
                     // Two hands: the pendulum is driven by the point between them.
                     const float two_e = s.hand2 >= 0 ? 0.5f * smooth01(s.two_t) : 0.0f;
                     for (int k = 0; k < 3; ++k)
@@ -938,7 +958,7 @@ namespace trlvr
                         }
                         s.hand_vel[k] = drive;
                         s.last_hand[k] = pt[k];
-                        s.vel_smooth[k] += (v - s.vel_smooth[k]) * smooth_v;
+                        s.vel_smooth[k] += ((jump ? v : real_v[k]) - s.vel_smooth[k]) * smooth_v;
                     }
                     // A throw takes the fastest of the last 0.15 s: the
                     // hand slows while the fingers open.

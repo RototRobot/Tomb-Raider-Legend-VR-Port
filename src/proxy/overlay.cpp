@@ -1,3 +1,4 @@
+#include <cmath>
 #include "overlay.h"
 #include "window.h"
 
@@ -8,6 +9,8 @@
 #include "../vr/tr7_menu_hook.h"
 #include "../vr/camera_head.h"
 #include "../vr/ui_space.h"
+#include "../vr/reflection_stereo.h"
+#include "../vr/water_stereo.h"
 
 #include "imgui.h"
 #include "imgui_impl_dx9.h"
@@ -614,6 +617,30 @@ namespace trlvr
 
         void view_section(Config& c)
         {
+            if (c.water_reflection)
+            {
+                // Performance test (user 2026-11-22: fps halves at water):
+                // the per-eye reflection draws the mirrored scene twice.
+                int refl = reflection_stereo_reflection_mode();
+                if (ImGui::Combo("Water reflection", &refl,
+                                 "Per eye\0One image (both eyes)\0Off\0"))
+                    reflection_stereo_set_reflection_mode(refl);
+                help("Per eye draws the mirrored scene once for each eye "
+                     "(correct, most expensive). One image draws it once. "
+                     "Off skips it. This session only; the performance log "
+                     "records each change.");
+            }
+            bool fx = false;
+            if (c.water_effects && water_stereo_effects_live(&fx))
+            {
+                if (ImGui::Checkbox("Water effects", &fx))
+                    water_stereo_set_effects_live(fx);
+                help("The game's distortion at and under the water surface. "
+                     "This session only; the performance log records each "
+                     "change.");
+            }
+            if (c.water_reflection || c.water_effects)
+                ImGui::Spacing();
             static const char* const kThird[3] = { "Classic", "Shoulder",
                                                    "Board" };
             const int third = camera_third_person_mode();
@@ -695,30 +722,77 @@ namespace trlvr
             { "Max",    true,  30.0f, 2.2f, 0.40f, 0.70f, 0.60f },
         };
 
-        void soft_presets(Config& c)
+        bool near_value(float a, float b)
         {
-            ImGui::TextUnformatted("Preset");
-            for (const SoftPreset& preset : kSoftPresets)
+            return std::fabs(a - b) < 0.006f;
+        }
+
+        void apply_soft_preset(Config& c, const SoftPreset& preset)
+        {
+            c.body_soft = preset.on;
+            config_save_setting(L"vr", L"body_soft", preset.on ? L"1" : L"0");
+            if (!preset.on)
+                return;             // Off keeps the tuning for next time
+            c.body_soft_angle = preset.angle;
+            c.body_soft_sway_hz = preset.sway_hz;
+            c.body_soft_damping = preset.damping;
+            c.body_soft_stretch = preset.stretch;
+            c.body_soft_ripple = preset.ripple;
+            save_float(L"vr", L"body_soft_angle", preset.angle);
+            save_float(L"vr", L"body_soft_sway_hz", preset.sway_hz);
+            save_float(L"vr", L"body_soft_damping", preset.damping);
+            save_float(L"vr", L"body_soft_stretch", preset.stretch);
+            save_float(L"vr", L"body_soft_ripple", preset.ripple);
+        }
+
+        bool soft_preset_matches(const Config& c, const SoftPreset& p)
+        {
+            if (!p.on)
+                return !c.body_soft;
+            return c.body_soft && near_value(c.body_soft_angle, p.angle) &&
+                near_value(c.body_soft_sway_hz, p.sway_hz) &&
+                near_value(c.body_soft_damping, p.damping) &&
+                near_value(c.body_soft_stretch, p.stretch) &&
+                near_value(c.body_soft_ripple, p.ripple);
+        }
+
+        // A row of preset buttons, the one that matches the current settings
+        // lit. Returns the index pressed, or -1.
+        int preset_row(const char* const* names, int count, int active)
+        {
+            int pressed = -1;
+            for (int i = 0; i < count; ++i)
             {
                 ImGui::SameLine();
-                if (!ImGui::Button(preset.name))
-                    continue;
-                c.body_soft = preset.on;
-                config_save_setting(L"vr", L"body_soft",
-                                    preset.on ? L"1" : L"0");
-                if (!preset.on)
-                    continue;       // Off keeps the tuning for next time
-                c.body_soft_angle = preset.angle;
-                c.body_soft_sway_hz = preset.sway_hz;
-                c.body_soft_damping = preset.damping;
-                c.body_soft_stretch = preset.stretch;
-                c.body_soft_ripple = preset.ripple;
-                save_float(L"vr", L"body_soft_angle", preset.angle);
-                save_float(L"vr", L"body_soft_sway_hz", preset.sway_hz);
-                save_float(L"vr", L"body_soft_damping", preset.damping);
-                save_float(L"vr", L"body_soft_stretch", preset.stretch);
-                save_float(L"vr", L"body_soft_ripple", preset.ripple);
+                const bool lit = i == active;
+                if (lit)
+                    ImGui::PushStyleColor(ImGuiCol_Button,
+                        ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+                if (ImGui::Button(names[i]))
+                    pressed = i;
+                if (lit)
+                    ImGui::PopStyleColor();
             }
+            return pressed;
+        }
+
+        void soft_presets(Config& c)
+        {
+            ImGui::PushID("soft");
+            ImGui::TextUnformatted("Soft parts preset");
+            static const char* const names[5] = { "Off", "Low", "Medium",
+                                                  "High", "Max" };
+            int active = -1;
+            for (int i = 0; i < 5; ++i)
+                if (soft_preset_matches(c, kSoftPresets[i]))
+                {
+                    active = i;
+                    break;
+                }
+            const int pressed = preset_row(names, 5, active);
+            if (pressed >= 0)
+                apply_soft_preset(c, kSoftPresets[pressed]);
+            ImGui::PopID();
             help("Sets the soft parts' limit, sideways looseness and "
                  "damping together. The sliders below still fine-tune.");
         }
@@ -742,36 +816,57 @@ namespace trlvr
             { "Max",    true,  3.0f, 0.31f, 0.80f, 5.2f, 3.0f, 2.0f,  0.80f },
         };
 
+        void apply_rear_preset(Config& c, const RearPreset& preset)
+        {
+            c.body_rear = preset.on;
+            config_save_setting(L"vr", L"body_rear", preset.on ? L"1" : L"0");
+            if (!preset.on)
+                return;             // Off keeps the tuning for next time
+            c.body_rear_hz = preset.hz;
+            c.body_rear_damping = preset.damping;
+            c.body_rear_gain = preset.gain;
+            c.body_rear_max_cm = preset.max_cm;
+            c.body_rear_limit_cm = preset.limit_cm;
+            c.body_rear_fullness_cm = preset.fullness_cm;
+            c.body_rear_dent = preset.dent;
+            save_float(L"vr", L"body_rear_hz", preset.hz);
+            save_float(L"vr", L"body_rear_damping", preset.damping);
+            save_float(L"vr", L"body_rear_gain", preset.gain);
+            save_float(L"vr", L"body_rear_max_cm", preset.max_cm);
+            save_float(L"vr", L"body_rear_limit_cm", preset.limit_cm);
+            save_float(L"vr", L"body_rear_fullness_cm", preset.fullness_cm);
+            save_float(L"vr", L"body_rear_dent", preset.dent);
+        }
+
+        bool rear_preset_matches(const Config& c, const RearPreset& p)
+        {
+            if (!p.on)
+                return !c.body_rear;
+            return c.body_rear && near_value(c.body_rear_hz, p.hz) &&
+                near_value(c.body_rear_damping, p.damping) &&
+                near_value(c.body_rear_gain, p.gain) &&
+                near_value(c.body_rear_max_cm, p.max_cm) &&
+                near_value(c.body_rear_limit_cm, p.limit_cm) &&
+                near_value(c.body_rear_fullness_cm, p.fullness_cm) &&
+                near_value(c.body_rear_dent, p.dent);
+        }
+
         void rear_presets(Config& c)
         {
             ImGui::PushID("rear");
-            ImGui::TextUnformatted("Preset");
-            for (const RearPreset& preset : kRearPresets)
-            {
-                ImGui::SameLine();
-                if (!ImGui::Button(preset.name))
-                    continue;
-                c.body_rear = preset.on;
-                config_save_setting(L"vr", L"body_rear",
-                                    preset.on ? L"1" : L"0");
-                if (!preset.on)
-                    continue;       // Off keeps the tuning for next time
-                c.body_rear_hz = preset.hz;
-                c.body_rear_damping = preset.damping;
-                c.body_rear_gain = preset.gain;
-                c.body_rear_max_cm = preset.max_cm;
-                c.body_rear_limit_cm = preset.limit_cm;
-                c.body_rear_fullness_cm = preset.fullness_cm;
-                c.body_rear_dent = preset.dent;
-                save_float(L"vr", L"body_rear_hz", preset.hz);
-                save_float(L"vr", L"body_rear_damping", preset.damping);
-                save_float(L"vr", L"body_rear_gain", preset.gain);
-                save_float(L"vr", L"body_rear_max_cm", preset.max_cm);
-                save_float(L"vr", L"body_rear_limit_cm", preset.limit_cm);
-                save_float(L"vr", L"body_rear_fullness_cm",
-                           preset.fullness_cm);
-                save_float(L"vr", L"body_rear_dent", preset.dent);
-            }
+            ImGui::TextUnformatted("Rear preset");
+            static const char* const names[5] = { "Off", "Low", "Medium",
+                                                  "High", "Max" };
+            int active = -1;
+            for (int i = 0; i < 5; ++i)
+                if (rear_preset_matches(c, kRearPresets[i]))
+                {
+                    active = i;
+                    break;
+                }
+            const int pressed = preset_row(names, 5, active);
+            if (pressed >= 0)
+                apply_rear_preset(c, kRearPresets[pressed]);
             ImGui::PopID();
             help("Sets the rear's speed, damping, gain, max lag, absolute "
                  "max, fullness and dent together. Off shows her stock "
@@ -779,22 +874,73 @@ namespace trlvr
                  "fine-tune.");
         }
 
+        // One "Physics" amount for everything soft: the chest spring (first
+        // person), the soft parts and the rear all take the same step.
+        void apply_physics_preset(Config& c, int index)
+        {
+            apply_soft_preset(c, kSoftPresets[index]);
+            apply_rear_preset(c, kRearPresets[index]);
+            c.body_spring = index != 0;
+            config_save_setting(L"vr", L"body_spring",
+                                c.body_spring ? L"1" : L"0");
+        }
+
+        void physics_presets(Config& c)
+        {
+            ImGui::PushID("physics");
+            ImGui::TextUnformatted("Physics");
+            static const char* const names[5] = { "Off", "Low", "Medium",
+                                                  "High", "Max" };
+            int active = -1;
+            for (int i = 0; i < 5; ++i)
+                if (soft_preset_matches(c, kSoftPresets[i]) &&
+                    rear_preset_matches(c, kRearPresets[i]) &&
+                    c.body_spring == (i != 0))
+                {
+                    active = i;
+                    break;
+                }
+            const int pressed = preset_row(names, 5, active);
+            if (pressed >= 0)
+                apply_physics_preset(c, pressed);
+            ImGui::PopID();
+            help("How much her chest, soft parts and rear move and bounce, "
+                 "in first and third person and under your hands. Off shows "
+                 "her stock shape. No button lit means the advanced "
+                 "settings have been tuned by hand.");
+        }
+
         void body_section(Config& c)
         {
-            soft_presets(c);
-            ImGui::Spacing();
-            toggle("Chest spring", &c.body_spring, L"vr", L"body_spring",
-                   "First-person full body: her chest sways a little on a "
-                   "spring.");
-            if (g_adv)
-                slider("Chest spring limit", &c.body_spring_angle, 0.0f,
-                       15.0f, "%.1f deg", L"vr", L"body_spring_angle",
-                       nullptr);
-            toggle("Soft parts", &c.body_soft, L"vr", L"body_soft",
-                   "Her soft parts bounce, in first and third person; in first "
-                   "person they also give under your hands.");
+            if (tr7_menu_hook_present())
+            {
+                // The menu hook's outfit switch, here as well as in the mod
+                // menu: back, the model she wears now, next.
+                ImGui::TextUnformatted("Outfit");
+                ImGui::SameLine();
+                if (ImGui::Button("<"))
+                    tr7_previous_outfit();
+                ImGui::SameLine();
+                char outfit[64];
+                ImGui::TextUnformatted(tr7_current_outfit_name(outfit,
+                    sizeof(outfit)) ? outfit : "-");
+                ImGui::SameLine();
+                if (ImGui::Button(">"))
+                    tr7_next_outfit();
+                help("Back and next through the game's outfits for this "
+                     "level (with a model mod, its models too).");
+                ImGui::Spacing();
+            }
+            physics_presets(c);
             if (g_adv)
             {
+                ImGui::SeparatorText("Chest, soft parts");
+                soft_presets(c);
+                ImGui::Spacing();
+                slider("Chest spring limit", &c.body_spring_angle, 0.0f,
+                       15.0f, "%.1f deg", L"vr", L"body_spring_angle",
+                       "First-person full body: how far her chest sways on "
+                       "its spring.");
                 slider("Soft parts limit", &c.body_soft_angle, 0.0f, 30.0f,
                        "%.1f deg", L"vr", L"body_soft_angle", nullptr);
                 slider("Squash and stretch", &c.body_soft_stretch, 0.0f, 1.0f,
@@ -816,40 +962,10 @@ namespace trlvr
                        "is the old value.");
             }
 
-            ImGui::SeparatorText("Push (god mode)");
-            toggle("Whole-body push", &c.body_push, L"vr", L"body_push",
-                   "A hand leaning on her tilts head, chest, waist, arms, "
-                   "hips and legs a few degrees; board view with god hands.");
-            if (g_adv)
-            {
-                slider("Push strength", &c.body_push_strength, 0.0f, 3.0f,
-                       "%.2f", L"vr", L"body_push_strength", nullptr);
-                slider("Push speed", &c.body_push_hz, 0.5f, 6.0f, "%.1f Hz",
-                       L"vr", L"body_push_hz", "Spring frequency of the tilt.");
-                slider("Push damping", &c.body_push_damping, 0.2f, 1.5f, "%.2f",
-                       L"vr", L"body_push_damping",
-                       "Near 1 = no swing past rest; lower swings a little.");
-                slider("Head tilt", &c.body_push_head_degrees, 0.0f, 20.0f,
-                       "%.1f deg", L"vr", L"body_push_head_degrees", nullptr);
-                slider("Chest tilt", &c.body_push_chest_degrees, 0.0f, 15.0f,
-                       "%.1f deg", L"vr", L"body_push_chest_degrees", nullptr);
-                slider("Waist tilt", &c.body_push_waist_degrees, 0.0f, 15.0f,
-                       "%.1f deg", L"vr", L"body_push_waist_degrees", nullptr);
-                slider("Arm swing", &c.body_push_arm_degrees, 0.0f, 25.0f,
-                       "%.1f deg", L"vr", L"body_push_arm_degrees", nullptr);
-                slider("Hips tilt", &c.body_push_hips_degrees, 0.0f, 15.0f,
-                       "%.1f deg", L"vr", L"body_push_hips_degrees", nullptr);
-                slider("Leg give", &c.body_push_leg_degrees, 0.0f, 8.0f,
-                       "%.1f deg", L"vr", L"body_push_leg_degrees", nullptr);
-            }
-
-            ImGui::SeparatorText("Rear");
-            rear_presets(c);
-            toggle("Rear soft body", &c.body_rear, L"vr", L"body_rear",
-                   "Her buttocks are masses on springs that lag and settle "
-                   "as she moves.");
             if (!g_adv)
                 return;
+            ImGui::SeparatorText("Rear");
+            rear_presets(c);
             slider("Rear speed", &c.body_rear_hz, 0.5f, 8.0f, "%.1f Hz",
                    L"vr", L"body_rear_hz",
                    "How fast a cheek bounces. Lower is softer and slower.");
@@ -904,6 +1020,141 @@ namespace trlvr
                    "your hand touches, white cross = the pelvis origin).");
         }
 
+        // Arm stretch: how many real metres further than your arm the god
+        // hand reaches with the arm fully out. Small is the least worth
+        // having (0.5 m), Max the most (2.5 m).
+        struct StretchPreset
+        {
+            const char* name;
+            float range;
+        };
+        const StretchPreset kStretchPresets[] = {
+            { "Off",    0.0f },
+            { "Small",  0.5f },
+            { "Medium", 1.0f },
+            { "Large",  1.75f },
+            { "Max",    2.5f },
+        };
+
+        void stretch_presets(Config& c)
+        {
+            ImGui::PushID("stretch");
+            ImGui::TextUnformatted("Reach");
+            static const char* const names[5] = { "Off", "Small", "Medium",
+                                                  "Large", "Max" };
+            int active = -1;
+            for (int i = 0; i < 5; ++i)
+                if (near_value(c.god_stretch_range, kStretchPresets[i].range))
+                {
+                    active = i;
+                    break;
+                }
+            const int pressed = preset_row(names, 5, active);
+            if (pressed >= 0)
+            {
+                c.god_stretch_range = kStretchPresets[pressed].range;
+                save_float(L"vr", L"god_stretch_range", c.god_stretch_range);
+            }
+            ImGui::PopID();
+            help("Board view: how much further than your arm the hand can "
+                 "reach: Small 0.5 m, Medium 1 m, Large 1.75 m, Max 2.5 m "
+                 "past your real hand with the arm fully out. Off = the hand "
+                 "stays on the controller.");
+        }
+
+        // Toss: how lively a thrown or swung Lara is. Medium is the tuning
+        // the user settled on (2026-11-22); Low is heavier and stiffer, High
+        // and Max float more, bounce more, tumble and flop more.
+        struct TossPreset
+        {
+            const char* name;
+            bool on;
+            float strength, gravity, bounce, friction;
+            float ragdoll, knee, spin, torso_strength, torso_spin;
+            float max_speed;        // hand speed a throw is capped at, m/s
+        };
+        const TossPreset kTossPresets[] = {
+            { "Off",    false, 1.0f,  9.81f,  0.3f,  0.5f,  1.0f, 12.0f, 1.0f,
+              1.0f, 0.25f,  6.0f },
+            { "Low",    true,  0.7f, 11.81f,  0.1f,  0.7f,  0.5f,  6.0f, 0.4f,
+              0.7f, 0.10f,  5.0f },
+            { "Medium", true,  1.0f,  9.81f,  0.3f,  0.5f,  1.0f, 12.0f, 1.0f,
+              1.0f, 0.25f,  6.0f },
+            { "High",   true,  1.4f,  8.31f,  0.25f, 0.4f,  1.4f, 18.0f, 1.8f,
+              1.4f, 0.50f,  8.0f },
+            { "Max",    true,  1.8f,  7.81f,  0.25f, 0.35f, 2.0f, 30.0f, 3.0f,
+              1.8f, 1.00f, 10.0f },
+        };
+
+        void apply_toss_preset(Config& c, const TossPreset& p)
+        {
+            c.god_throw = p.on;
+            config_save_setting(L"vr", L"god_throw", p.on ? L"1" : L"0");
+            if (!p.on)
+                return;             // Off keeps the tuning for next time
+            c.god_throw_strength = p.strength;
+            c.god_throw_max_speed = p.max_speed;
+            c.god_throw_gravity = p.gravity;
+            c.god_throw_bounce = p.bounce;
+            c.god_throw_friction = p.friction;
+            c.god_ragdoll = p.ragdoll;
+            c.god_knee_bend = p.knee;
+            c.god_throw_spin = p.spin;
+            c.god_torso_throw_scale = p.torso_strength;
+            c.god_torso_spin = p.torso_spin;
+            save_float(L"vr", L"god_throw_strength", p.strength);
+            save_float(L"vr", L"god_throw_max_speed", p.max_speed);
+            save_float(L"vr", L"god_throw_gravity", p.gravity);
+            save_float(L"vr", L"god_throw_bounce", p.bounce);
+            save_float(L"vr", L"god_throw_friction", p.friction);
+            save_float(L"vr", L"god_ragdoll", p.ragdoll);
+            save_float(L"vr", L"god_knee_bend", p.knee);
+            save_float(L"vr", L"god_throw_spin", p.spin);
+            save_float(L"vr", L"god_torso_throw_scale", p.torso_strength);
+            save_float(L"vr", L"god_torso_spin", p.torso_spin);
+        }
+
+        bool toss_preset_matches(const Config& c, const TossPreset& p)
+        {
+            if (!p.on)
+                return !c.god_throw;
+            return c.god_throw && near_value(c.god_throw_strength, p.strength) &&
+                near_value(c.god_throw_max_speed, p.max_speed) &&
+                near_value(c.god_throw_gravity, p.gravity) &&
+                near_value(c.god_throw_bounce, p.bounce) &&
+                near_value(c.god_throw_friction, p.friction) &&
+                near_value(c.god_ragdoll, p.ragdoll) &&
+                near_value(c.god_knee_bend, p.knee) &&
+                near_value(c.god_throw_spin, p.spin) &&
+                near_value(c.god_torso_throw_scale, p.torso_strength) &&
+                near_value(c.god_torso_spin, p.torso_spin);
+        }
+
+        void toss_presets(Config& c)
+        {
+            ImGui::PushID("toss");
+            ImGui::TextUnformatted("Toss physics");
+            static const char* const names[5] = { "Off", "Low", "Medium",
+                                                  "High", "Max" };
+            int active = -1;
+            for (int i = 0; i < 5; ++i)
+                if (toss_preset_matches(c, kTossPresets[i]))
+                {
+                    active = i;
+                    break;
+                }
+            const int pressed = preset_row(names, 5, active);
+            if (pressed >= 0)
+                apply_toss_preset(c, kTossPresets[pressed]);
+            ImGui::PopID();
+            help("How lively she is when you swing, throw or toss her: "
+                 "throw speed, gravity, bounce and friction off walls, limb "
+                 "flop, knee bend and tumble, for both the head and the "
+                 "torso grab. Low is heavy and stiff, Max floaty and wild. "
+                 "Off = no throwing: let go and she is put down. No button "
+                 "lit means the advanced settings were tuned by hand.");
+        }
+
         void god_section(Config& c)
         {
             ImGui::TextWrapped("Board view with god hands only.");
@@ -945,11 +1196,7 @@ namespace trlvr
                        "and push up/down to raise and lower the seat. 0 = off.");
             }
             ImGui::SeparatorText("Arm stretch");
-            slider("Arm stretch", &c.god_stretch_range, 0.0f, 5.0f, "%.2f m",
-                   L"vr", L"god_stretch_range",
-                   "Board view: reach further than your arm. Past the start "
-                   "below, the hand moves out faster, this many metres "
-                   "further with the arm fully out. 0 = off.");
+            stretch_presets(c);
             if (g_adv)
                 slider("Arm stretch starts at", &c.god_stretch_start, 15.0f,
                        80.0f, "%.0f cm", L"vr", L"god_stretch_start",
@@ -992,15 +1239,29 @@ namespace trlvr
                            "Her arms hang limp while she is held by the head.");
                 }
             }
+            ImGui::SeparatorText("Swat");
+            toggle("Swat to knock her down", &c.god_swat, L"vr", L"god_swat",
+                   "Hit her with a free hand fast and she stumbles and falls "
+                   "along your hand's motion, front or back, as the Y flick "
+                   "does.");
+            ImGui::BeginDisabled(!c.god_swat);
+            slider("Swat speed", &c.god_swat_speed, 0.5f, 6.0f, "%.1f m/s",
+                   L"vr", L"god_swat_speed",
+                   "How fast your real hand must be moving when it hits her. "
+                   "Lower = easier to trigger; slower hits only shove.");
+            ImGui::EndDisabled();
             ImGui::SeparatorText("Throw and drop");
-            toggle("Throwing", &c.god_throw, L"vr", L"god_throw",
-                   "Let go mid-swing and she flies off your hand and lands "
-                   "where she hits the level.");
+            toss_presets(c);
             if (g_adv)
             {
                 slider("Throw strength", &c.god_throw_strength, 0.2f, 3.0f,
                        "%.2f", L"vr", L"god_throw_strength",
                        "Your hand's speed times this.");
+                slider("Throw max speed", &c.god_throw_max_speed, 2.0f, 20.0f,
+                       "%.1f m/s", L"vr", L"god_throw_max_speed",
+                       "Your hand's speed is capped at this before the "
+                       "strength applies: a harder swing is no faster. Raise "
+                       "it if throws feel slow.");
                 slider("Throw gravity", &c.god_throw_gravity, 1.0f, 30.0f,
                        "%.2f m/s2", L"vr", L"god_throw_gravity",
                        "9.81 = a doll thrown on your table; lower floats more.");

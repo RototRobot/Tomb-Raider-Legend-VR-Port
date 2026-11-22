@@ -109,6 +109,11 @@ namespace trlvr
         bool grip[2] = {};              // hand grip pressed (0 left, 1 right)
         bool point_valid[2] = {};
         float point[2][3] = {};         // each hand's pinch point (or index tip), game space
+        // Each hand's REAL controller speed this step (m/s, from the raw
+        // tracking pose; < 0 = unknown). With the arm stretch the drawn
+        // hand is faster than the real one: the throw velocities keep the
+        // drawn direction but are capped to this speed (never raised).
+        float real_speed[2] = { -1.0f, -1.0f };
         float root[3] = {};             // Lara's real feet
         bool head_valid = false;        // head_only: her head (between head base and top)
         float head[3] = {};

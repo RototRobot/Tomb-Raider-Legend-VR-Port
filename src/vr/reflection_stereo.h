@@ -63,6 +63,9 @@ namespace trlvr
     // the screen copy: split by eye / split, eyes swapped / whole (retail).
     void reflection_stereo_cycle_mode(bool copy);
     int reflection_stereo_reflection_mode();
+    // The settings menu's choice (user 2026-11-22: function keys overlap):
+    // 0 per eye, 1 one image (retail), 2 not drawn. This session only.
+    void reflection_stereo_set_reflection_mode(int mode);
     // Once per kind of draw: what samples the reflection or the copy.
     void reflection_stereo_note_draw(IDirect3DDevice9* device, bool stereo);
     // The Water Effects screen layer: the game's c0 is the bare projection

@@ -469,6 +469,17 @@ namespace trlvr
         return g_refl_mode;
     }
 
+    void reflection_stereo_set_reflection_mode(int mode)
+    {
+        if (mode < 0 || mode > 2 || mode == g_refl_mode)
+            return;
+        g_refl_mode = mode;
+        static const char* const kNames[3] = {
+            "per eye", "one image for both eyes (retail)", "NOT drawn" };
+        log("water reflection: settings menu -- reflection %s",
+            kNames[g_refl_mode]);
+    }
+
     void reflection_stereo_note_unsubstituted()
     {
         static unsigned count = 0;

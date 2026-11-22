@@ -468,6 +468,33 @@ static void test_god_pluck()
             pluck_step(s, tp, frame(x, 0, 50, false, 1), &ev);
             CHECK(ev.released && !ev.thrown && !s.flying);
         }
+        // The arm stretch: the drawn hand moves at 3 m/s. Real speed unknown
+        // (-1): the throw is the drawn 3 m/s as without a stretch; real
+        // 1 m/s: capped to 1 m/s along the drawn direction; real 5 m/s
+        // (above the drawn): never amplified, still 3 m/s.
+        {
+            const float real[3] = { -1.0f, 1.0f, 5.0f };
+            const float want[3] = { 3.0f, 1.0f, 3.0f };
+            for (int c = 0; c < 3; ++c)
+            {
+                PluckState s; PluckEvents ev;
+                float x = 10.0f;
+                pluck_step(s, tp, frame(x, 0, 50, false, 1), &ev);
+                pluck_step(s, tp, frame(x, 0, 50, true, 1), &ev);
+                for (int i = 0; i < 30; ++i)
+                {
+                    x += 3.0f * tp.table * dt;
+                    PluckInput in = frame(x, 0, 50, true, 1);
+                    for (int h = 0; h < 2; ++h)
+                        in.real_speed[h] = real[c];
+                    pluck_step(s, tp, in, &ev);
+                }
+                pluck_step(s, tp, frame(x, 0, 50, false, 1), &ev);
+                CHECK(ev.released && ev.thrown &&
+                      near(ev.throw_speed, want[c], 0.1f));
+                CHECK(s.fly.vel[0] > 0.0f);
+            }
+        }
         {
             PluckState s; PluckEvents ev;
             float x = 10.0f;

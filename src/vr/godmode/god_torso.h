@@ -136,6 +136,10 @@ namespace trlvr
         float palm_normal[3] = {};      // HandPoints::palm_normal (unit, out of the palm)
         bool part_held = false;         // the hand is on / holds a soft part (chest, rear)
         bool other_grab = false;        // the hand, or she, is taken by another grab (pluck)
+        // The hand's REAL controller speed this step (m/s, raw tracking
+        // pose; < 0 = unknown): the throw velocities keep the drawn
+        // direction but are capped to it (arm stretch; never raised).
+        float real_speed = -1.0f;
     };
 
     struct TorsoInput

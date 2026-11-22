@@ -947,7 +947,7 @@ namespace trlvr
     }
 
     void go_go_reach(const float hand[3], const float body[3], float start,
-                     float range, float out[3])
+                     float range, float out[3], float max_extra)
     {
         const float d[3] = { hand[0] - body[0], hand[1] - body[1],
                              hand[2] - body[2] };
@@ -959,6 +959,8 @@ namespace trlvr
             extra = range * excess * excess / (0.3f * 0.3f);
             if (extra > 4.0f * range)
                 extra = 4.0f * range;
+            if (max_extra > 0.0f && extra > max_extra)
+                extra = max_extra;
         }
         const float k = extra > 0.0f ? extra / distance : 0.0f;
         for (int i = 0; i < 3; ++i)

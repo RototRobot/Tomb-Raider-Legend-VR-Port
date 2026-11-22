@@ -101,6 +101,7 @@ namespace trlvr
             { L"vr", L"god_arms_limp", L"0" },
             { L"vr", L"god_throw", L"1" },
             { L"vr", L"god_throw_strength", L"1" },
+            { L"vr", L"god_throw_max_speed", L"6" },
             { L"vr", L"god_throw_gravity", L"9.81" },
             { L"vr", L"god_land_anim", L"-1" },
             { L"vr", L"god_drop_height", L"1" },
@@ -139,6 +140,8 @@ namespace trlvr
             { L"vr", L"body_push_strength", L"1" },
             { L"vr", L"body_push_hz", L"2.5" },
             { L"vr", L"body_push_damping", L"0.9" },
+            { L"vr", L"god_swat", L"1" },
+            { L"vr", L"god_swat_speed", L"1.5" },
             { L"vr", L"body_push_head_degrees", L"6" },
             { L"vr", L"body_push_chest_degrees", L"4" },
             { L"vr", L"body_push_waist_degrees", L"3" },
@@ -441,6 +444,7 @@ namespace trlvr
             L"god_throw = 1\r\n"
             L"; live: god mode, a throw's speed: your hand's speed times this. 0.2 .. 3.\r\n"
             L"god_throw_strength = 1\r\n"
+            L"god_throw_max_speed = 6\r\n"
             L"; live: god mode, a thrown Lara's gravity, m/s^2 at your size. 1 .. 30.\r\n"
             L"god_throw_gravity = 9.81\r\n"
             L"; live: god mode, a thrown Lara landing plays this animation of hers (the\r\n"
@@ -458,7 +462,8 @@ namespace trlvr
             L"; god_stretch_start (real cm) of a point 20 cm below your head the hand\r\n"
             L"; sits on the controller; past it the hand reaches out faster than your\r\n"
             L"; arm, this many real metres further once the arm is 30 cm past the\r\n"
-            L"; start (about fully out), up to 4x that. 0 = off. 0 .. 5.\r\n"
+            L"; start (about fully out), up to 4x that but never more than 2 m.\r\n"
+            L"; 0 = off. 0 .. 5.\r\n"
             L"god_stretch_range = 1\r\n"
             L"; live: where the arm stretch starts, real cm from a point below your\r\n"
             L"; head. 15 .. 80.\r\n"
@@ -563,6 +568,10 @@ namespace trlvr
             L"; (near 1 = no swing past rest; 0.2 .. 1.5).\r\n"
             L"body_push_hz = 2.5\r\n"
             L"body_push_damping = 0.9\r\n"
+            L"; live: god mode, a hand hitting her faster than god_swat_speed (real\r\n"
+            L"; m/s) knocks her down along its motion, as the Y flick does. 0 = off.\r\n"
+            L"god_swat = 1\r\n"
+            L"god_swat_speed = 1.5\r\n"
             L"; live: the most each part tilts, in degrees. Head 0 .. 20, chest and\r\n"
             L"; waist 0 .. 15, arms 0 .. 25, hips 0 .. 15, legs 0 .. 8.\r\n"
             L"body_push_head_degrees = 6\r\n"
@@ -1333,6 +1342,8 @@ namespace trlvr
             c.god_throw = rb(L"god_throw", true);
             c.god_throw_strength =
                 rf(L"god_throw_strength", L"1", 0.2f, 3.0f, 1.0f);
+            c.god_throw_max_speed =
+                rf(L"god_throw_max_speed", L"6", 2.0f, 20.0f, 6.0f);
             c.god_throw_gravity =
                 rf(L"god_throw_gravity", L"9.81", 1.0f, 30.0f, 9.81f);
             c.god_land_anim = (int)rf(L"god_land_anim", L"-1", -1.0f,
@@ -1393,18 +1404,20 @@ namespace trlvr
             c.body_push_hz = rf(L"body_push_hz", L"2.5", 0.5f, 6.0f, 2.5f);
             c.body_push_damping =
                 rf(L"body_push_damping", L"0.9", 0.2f, 1.5f, 0.9f);
+            c.god_swat = rb(L"god_swat", true);
+            c.god_swat_speed = rf(L"god_swat_speed", L"1.5", 0.5f, 6.0f, 1.5f);
             c.body_push_head_degrees =
-                rf(L"body_push_head_degrees", L"6", 0.0f, 20.0f, 6.0f);
+                rf(L"body_push_head_degrees", L"6", 0.0f, 40.0f, 6.0f);
             c.body_push_chest_degrees =
-                rf(L"body_push_chest_degrees", L"4", 0.0f, 15.0f, 4.0f);
+                rf(L"body_push_chest_degrees", L"4", 0.0f, 30.0f, 4.0f);
             c.body_push_waist_degrees =
-                rf(L"body_push_waist_degrees", L"3", 0.0f, 15.0f, 3.0f);
+                rf(L"body_push_waist_degrees", L"3", 0.0f, 30.0f, 3.0f);
             c.body_push_arm_degrees =
-                rf(L"body_push_arm_degrees", L"8", 0.0f, 25.0f, 8.0f);
+                rf(L"body_push_arm_degrees", L"8", 0.0f, 50.0f, 8.0f);
             c.body_push_hips_degrees =
-                rf(L"body_push_hips_degrees", L"3", 0.0f, 15.0f, 3.0f);
+                rf(L"body_push_hips_degrees", L"3", 0.0f, 30.0f, 3.0f);
             c.body_push_leg_degrees =
-                rf(L"body_push_leg_degrees", L"2", 0.0f, 8.0f, 2.0f);
+                rf(L"body_push_leg_degrees", L"2", 0.0f, 15.0f, 2.0f);
             c.body_push_soft = rf(L"body_push_soft", L"0", 0.0f, 1.0f, 0.0f);
             c.body_rear = rb(L"body_rear", true);
             c.body_rear_hz = rf(L"body_rear_hz", L"4", 0.5f, 8.0f, 4.0f);

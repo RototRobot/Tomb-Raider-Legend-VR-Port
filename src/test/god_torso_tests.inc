@@ -377,6 +377,35 @@ static void test_god_torso()
         }
         return in;
     };
+    // The arm stretch: a 2.5 m/s drawn swing. Real speed unknown (-1): she
+    // flies at 2.5 m/s as without a stretch; real 1.0 m/s: capped to 1.0
+    // along the drawn direction; real 4.0 (above the drawn): not amplified.
+    {
+        const float real[3] = { -1.0f, 1.0f, 4.0f };
+        const float want[3] = { 2.5f, 1.0f, 2.5f };
+        for (int c = 0; c < 3; ++c)
+        {
+            TorsoState s; TorsoEvents ev;
+            TorsoInput in = frame(at_belly, false, toward);
+            CHECK(try_grab(s, in).grabbed);
+            in.hand[1].fist = true;
+            for (int i = 0; i < 20; ++i)
+                torso_step(s, params, in, &ev);
+            for (int i = 1; i <= 18; ++i)
+            {
+                const float t = i * dt;
+                in = frame(translation(hand_pos[0] + 2.5f * table * t, hand_pos[1], hand_pos[2]),
+                           true, toward);
+                in.hand[1].real_speed = real[c];
+                torso_step(s, params, in, &ev);
+            }
+            in.hand[1].fist = false;
+            in.hand[1].real_speed = -1.0f;
+            torso_step(s, params, in, &ev);
+            CHECK(ev.released && ev.thrown);
+            CHECK(near(s.fly.vel[0], want[c] * table, 0.03f));
+        }
+    }
     // A fast release: she flies at the hand's velocity, no spin, along a
     // parabola under doll-scale gravity.
     {

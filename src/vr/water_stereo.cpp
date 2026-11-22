@@ -203,4 +203,43 @@ namespace trlvr
     {
         return g_depth > 0;
     }
+
+    // Live switch for the Water Effects layer (user 2026-11-22, performance
+    // test from the settings menu): the same branch at 0x00446E20 that
+    // disable_mono_waterfx_scene_sample patches at start. Off: NOPs, so
+    // WaterFX takes its disabled exit. On: the retail jnz again. Only
+    // offered when water_effects was on at start (the per-eye split and the
+    // wave hook are set up then).
+    bool water_stereo_effects_live(bool* on)
+    {
+        const unsigned char* branch =
+            reinterpret_cast<const unsigned char*>(0x00446E20);
+        if (branch[0] == 0x75 && branch[1] == 0x02)
+        {
+            if (on)
+                *on = true;
+            return true;
+        }
+        if (branch[0] == 0x90 && branch[1] == 0x90)
+        {
+            if (on)
+                *on = false;
+            return true;
+        }
+        return false;
+    }
+
+    void water_stereo_set_effects_live(bool on)
+    {
+        bool now = false;
+        if (!water_stereo_effects_live(&now) || now == on)
+            return;
+        const unsigned char retail[] = { 0x75, 0x02 };
+        const unsigned char nops[] = { 0x90, 0x90 };
+        if (write_code(reinterpret_cast<unsigned char*>(0x00446E20),
+                       on ? retail : nops, 2))
+            log("water effects: settings menu -- %s", on
+                ? "ON (the game's distortion layer is drawn)"
+                : "OFF (WaterFX takes its disabled exit)");
+    }
 }

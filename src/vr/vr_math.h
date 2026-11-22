@@ -226,7 +226,8 @@ namespace trlvr
     // that it is pushed further out along body -> hand by
     // range * (excess / 0.3)^2, capped at 4 * range, so an arm 30 cm past the
     // start (about fully out) reaches `range` metres further. Any consistent
-    // axes, metres. range <= 0 leaves the hand.
+    // axes, metres. range <= 0 leaves the hand. max_extra > 0 also caps
+    // the push itself at that many metres (Legend: 2 m, user 2026-11-21).
     void go_go_reach(const float hand[3], const float body[3], float start,
-                     float range, float out[3]);
+                     float range, float out[3], float max_extra = 0.0f);
 }

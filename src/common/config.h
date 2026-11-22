@@ -238,6 +238,9 @@ namespace trlvr
         bool god_arms_limp = false;
         bool god_throw = true;
         float god_throw_strength = 1.0f;
+        // A throw's launch speed is capped at this many real m/s of hand
+        // speed (before god_throw_strength); a harder swing is no faster.
+        float god_throw_max_speed = 6.0f;
         float god_throw_gravity = 9.81f;
         int god_land_anim = -1;
         float god_drop_height = 1.0f;
@@ -249,7 +252,7 @@ namespace trlvr
         // below the head the hand sits on the controller; past it the hand
         // reaches out faster, god_stretch_range real metres further once the
         // arm is 30 cm past the start, up to 4x that. 0 = off.
-        float god_stretch_range = 1.0f;         // 0..5 real metres
+        float god_stretch_range = 1.0f;         // 0..5 real metres (push capped at 2 m)
         float god_stretch_start = 40.0f;        // 15..80 real cm
         // Throws and ragdoll (ported back from Underworld). god_throw_velocity:
         // the release speed is the hand's fastest 5-frame average of the last
@@ -324,6 +327,11 @@ namespace trlvr
         float body_push_strength = 1.0f;
         float body_push_hz = 2.5f;
         float body_push_damping = 0.9f;
+        // Swat: a free god hand hitting her faster than god_swat_speed (real
+        // m/s, the hand relative to her) knocks her down along its motion,
+        // as the Y flick does.
+        bool god_swat = true;
+        float god_swat_speed = 1.5f;
         float body_push_head_degrees = 6.0f;
         float body_push_chest_degrees = 4.0f;
         float body_push_waist_degrees = 3.0f;

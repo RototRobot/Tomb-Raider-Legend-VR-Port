@@ -16,6 +16,7 @@
 #include "../common/log.h"
 
 #include <windows.h>
+#include <pdh.h>
 #include <cmath>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -4984,6 +4985,62 @@ namespace trlvr
                   double(g_perf_qpf.QuadPart) : 0.0;
         }
 
+        // The machine's side of a slow frame (user 2026-11-22: was it the
+        // mod or the PC?): the CPU's actual clock as a share of its base
+        // clock (Windows' "% Processor Performance": over 100 = boosting,
+        // falling under load = thermal or power limits) and how busy all
+        // cores are, averaged over the same 5 s window as the perf line.
+        struct PerfMachine
+        {
+            bool tried = false;
+            PDH_HQUERY query = nullptr;
+            PDH_HCOUNTER clock = nullptr;
+            PDH_HCOUNTER busy = nullptr;
+            double base_mhz = 0.0;
+        };
+        PerfMachine g_perf_machine;
+
+        void perf_machine_line()
+        {
+            PerfMachine& m = g_perf_machine;
+            if (!m.tried)
+            {
+                m.tried = true;
+                if (PdhOpenQueryW(nullptr, 0, &m.query) != ERROR_SUCCESS)
+                {
+                    m.query = nullptr;
+                    return;
+                }
+                PdhAddEnglishCounterW(m.query,
+                    L"\\Processor Information(_Total)\\% Processor Performance",
+                    0, &m.clock);
+                PdhAddEnglishCounterW(m.query,
+                    L"\\Processor Information(_Total)\\% Processor Time",
+                    0, &m.busy);
+                PdhCollectQueryData(m.query);       // the window's start
+                DWORD mhz = 0, size = sizeof(mhz);
+                if (RegGetValueW(HKEY_LOCAL_MACHINE,
+                        L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                        L"~MHz", RRF_RT_REG_DWORD, nullptr, &mhz, &size) ==
+                    ERROR_SUCCESS)
+                    m.base_mhz = mhz;
+                return;
+            }
+            if (!m.query || PdhCollectQueryData(m.query) != ERROR_SUCCESS)
+                return;
+            PDH_FMT_COUNTERVALUE clock{}, busy{};
+            const bool have_clock = m.clock && PdhGetFormattedCounterValue(
+                m.clock, PDH_FMT_DOUBLE, nullptr, &clock) == ERROR_SUCCESS;
+            const bool have_busy = m.busy && PdhGetFormattedCounterValue(
+                m.busy, PDH_FMT_DOUBLE, nullptr, &busy) == ERROR_SUCCESS;
+            if (!have_clock && !have_busy)
+                return;
+            log("perf machine: CPU clock %.0f%% of base (%.2f GHz), all cores "
+                "%.0f%% busy", have_clock ? clock.doubleValue : 0.0,
+                have_clock ? clock.doubleValue * 0.01 * m.base_mhz * 0.001 : 0.0,
+                have_busy ? busy.doubleValue : 0.0);
+        }
+
         void perf_frame(const LARGE_INTEGER& after)
         {
             if (!g_perf_qpf.QuadPart)
@@ -5014,6 +5071,7 @@ namespace trlvr
                     g_perf_wait_ms / n, g_perf_not_rendered,
                     g_perf_draw_total / n);
                 perf_cpu_report(g_perf_frames);
+                perf_machine_line();
                 camera_perf_instance_report(g_perf_frames);
                 g_perf_window = after;
                 g_perf_frames = g_perf_not_rendered = 0;

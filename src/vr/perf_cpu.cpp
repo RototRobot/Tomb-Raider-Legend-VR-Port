@@ -5,6 +5,7 @@
 #include "../common/log.h"
 
 #include <windows.h>
+#include <intrin.h>
 #include <tlhelp32.h>
 #include <algorithm>
 #include <cstring>
@@ -500,9 +501,21 @@ namespace trlvr
         }
 
         LARGE_INTEGER g_frequency{};
-        double g_total[PerfBucketCount]{};
-        LARGE_INTEGER g_started[PerfBucketCount]{};
+        // Bucket times are read with the time-stamp counter (2026-11-22:
+        // QueryPerformanceCounter around every draw and eye cost ~0.3 ms a
+        // frame at 2800 draws); converted to ms at each report against the
+        // QPC clock over the same window.
+        double g_total[PerfBucketCount]{};          // TSC ticks until report
+        unsigned long long g_started[PerfBucketCount]{};
+        unsigned long long g_window_tsc = 0;
+        LARGE_INTEGER g_window_qpc{};
         int g_depth[PerfBucketCount]{};
+        // Game draw calls by what was running when they were issued
+        // (user 2026-11-22: what makes the waterfall view 2500 draws?):
+        // inside a BasicDrawable::Draw (effects, sprites, HUD), the terrain
+        // hook, the instance hooks (characters, objects), or none of them.
+        enum DrawSource { SrcBasic, SrcTerrain, SrcInstance, SrcOther, SrcCount };
+        double g_draw_source[SrcCount]{};
         unsigned g_calls[PerfBucketCount]{};
 
         // Frame phases: update = end of Present to the first draw; render =
@@ -526,7 +539,7 @@ namespace trlvr
     {
         // Only the outermost call of a bucket is timed (recursion, nesting).
         if (g_depth[bucket]++ == 0)
-            QueryPerformanceCounter(&g_started[bucket]);
+            g_started[bucket] = __rdtsc();
     }
 
     void perf_cpu_end(PerfBucket bucket)
@@ -535,15 +548,21 @@ namespace trlvr
             return;
         if (--g_depth[bucket] == 0)
         {
-            LARGE_INTEGER now{};
-            QueryPerformanceCounter(&now);
-            g_total[bucket] += elapsed_ms(g_started[bucket], now);
+            g_total[bucket] += double(__rdtsc() - g_started[bucket]);
             ++g_calls[bucket];
         }
     }
 
     void perf_cpu_draw()
     {
+        if (g_depth[PerfUiDraw] > 0)
+            g_draw_source[SrcBasic] += 1.0;
+        else if (g_depth[PerfTerrain] > 0)
+            g_draw_source[SrcTerrain] += 1.0;
+        else if (g_depth[PerfDrawInstance] > 0 || g_depth[PerfDrawLara] > 0)
+            g_draw_source[SrcInstance] += 1.0;
+        else
+            g_draw_source[SrcOther] += 1.0;
         if (!g_sampler_checked)
             sampler_start_if_enabled();
         if (!g_drawn)
@@ -574,8 +593,27 @@ namespace trlvr
     {
         if (g_sampler_on)
             sampler_report();
+        // TSC ticks -> ms over this window (the counter is invariant on
+        // every CPU this runs on; QPC gives the window's length).
+        {
+            LARGE_INTEGER qpc{};
+            QueryPerformanceCounter(&qpc);
+            const unsigned long long tsc = __rdtsc();
+            double ms_per_tick = 0.0;
+            if (g_window_tsc && tsc > g_window_tsc && g_window_qpc.QuadPart)
+                ms_per_tick = elapsed_ms(g_window_qpc, qpc) /
+                              double(tsc - g_window_tsc);
+            g_window_tsc = tsc;
+            g_window_qpc = qpc;
+            for (double& t : g_total)
+                t *= ms_per_tick;
+        }
         if (!frames)
+        {
+            for (double& t : g_total)
+                t = 0.0;
             return;
+        }
         const double n = frames;
         log("perf cpu: per frame %.1f ms game update before drawing, %.1f "
             "ms rendering (draw calls %.1f, of it mod matrix math %.1f), "
@@ -600,6 +638,12 @@ namespace trlvr
             g_total[PerfAimTarget] / n, g_calls[PerfAimTarget] / n,
             g_total[PerfMovement] / n, g_calls[PerfMovement] / n,
             g_total[PerfUiDraw] / n, g_calls[PerfUiDraw] / n);
+        log("perf draws by source, per frame: BasicDrawable (effects, "
+            "sprites, HUD) %.0f, terrain %.0f, instances %.0f, other %.0f",
+            g_draw_source[SrcBasic] / n, g_draw_source[SrcTerrain] / n,
+            g_draw_source[SrcInstance] / n, g_draw_source[SrcOther] / n);
+        for (double& d : g_draw_source)
+            d = 0.0;
         for (int b = 0; b < PerfBucketCount; ++b)
         {
             g_total[b] = 0.0;

@@ -138,6 +138,9 @@ static void test_go_go_reach()
     CHECK(near(out[2], -0.7f));
     go_go_reach(body, body, 0.0f, 1.0f, out);
     CHECK(near(out[1], 1.0f) && near(out[2], 0.0f));
+    // A 2 m cap: the far hand (6 m without it) goes only 2 m further.
+    go_go_reach(far, body, 0.4f, 1.0f, out, 2.0f);
+    CHECK(near(out[2], -4.0f));
 }
 
 int main()

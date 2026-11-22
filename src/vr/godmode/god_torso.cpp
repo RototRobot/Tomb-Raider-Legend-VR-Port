@@ -515,13 +515,25 @@ namespace trlvr
         // The hand's motion while held: her centre's velocity (real m/s)
         // and the hand's spin (rad/s), smoothed, and their peak of the last
         // 0.15 s.
-        void track(TorsoState& s, const TorsoParams& p, const Mat4& hand, float dt, bool step_ok)
+        // real_speed: the real controller's speed (m/s, < 0 unknown); the
+        // drawn velocities keep their direction but are capped to it (arm
+        // stretch). Scaling, not subtracting the stretch's move: that
+        // flipped fast throws back toward the pick-up (user 2026-11-21).
+        void track(TorsoState& s, const TorsoParams& p, const Mat4& hand, float dt, bool step_ok,
+                   float real_speed)
         {
             if (step_ok && s.track_ok)
             {
                 float v[3];
-                for (int k = 0; k < 3; ++k) v[k] = (s.centre[k] - s.last_centre[k]) / dt / p.table;
+                for (int k = 0; k < 3; ++k)
+                    v[k] = (s.centre[k] - s.last_centre[k]) / dt / p.table;
                 const bool jump = len3(v) > 4.0f * p.throw_max_speed;
+                if (real_speed >= 0.0f)
+                {
+                    const float sp = len3(v);
+                    if (sp > real_speed && sp > 1e-6f)
+                        for (int k = 0; k < 3; ++k) v[k] *= real_speed / sp;
+                }
                 float rv[3] = {};
                 const Mat4 delta = rigid_inverse(s.last_hand) * hand;
                 const bool spin_ok = rotation_to_vector(delta, rv) && len3(rv) / dt <= kMaxHandSpin;
@@ -530,9 +542,13 @@ namespace trlvr
                     float hv[3], hw[3] = {};
                     for (int k = 0; k < 3; ++k)
                         hv[k] = (hand.m[3][k] - s.last_hand.m[3][k]) / dt / p.table;
+                    const bool hv_jump = len3(hv) > 4.0f * p.throw_max_speed;
+                    const float hsp = len3(hv);
+                    if (real_speed >= 0.0f && hsp > real_speed && hsp > 1e-6f)
+                        for (int k = 0; k < 3; ++k) hv[k] *= real_speed / hsp;
                     if (spin_ok)
                         for (int k = 0; k < 3; ++k) hw[k] = rv[k] / dt;
-                    if (len3(hv) <= 4.0f * p.throw_max_speed)
+                    if (!hv_jump)
                         throw_track_add(s.track, hv, hw, dt);
                 }
                 const float sm = dt / (dt + 0.03f);
@@ -716,7 +732,7 @@ namespace trlvr
                 for (int k = 0; k < 3; ++k) centre_r[k] = 0.5f * (in.torso_a[k] + in.torso_b[k]);
                 xform_point(centre_r, rigid_inverse(body), s.centre_local);
                 place(s, in);
-                track(s, p, hand, dt, false);
+                track(s, p, hand, dt, false, in.hand[h].real_speed);
                 swing_limbs(s, p, in, dt, false);
                 ev.grabbed = true;
                 ev.hand = h;
@@ -808,7 +824,7 @@ namespace trlvr
                 s.drawn = want;
         }
         place(s, in);
-        track(s, p, hand, dt, step_ok);
+        track(s, p, hand, dt, step_ok, in.hand[h].real_speed);
         swing_limbs(s, p, in, dt, step_ok);
     }
 

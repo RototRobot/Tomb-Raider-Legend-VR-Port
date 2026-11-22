@@ -3813,7 +3813,8 @@ namespace trlvr
         return true;
     }
 
-    bool vr_controller_head_pose(bool left, Mat4* controller_to_head)
+    static bool controller_head_pose_impl(bool left, bool stretch,
+                                          Mat4* controller_to_head)
     {
         if (!controller_to_head || !g_ready || !g_pose_valid)
             return false;
@@ -3835,7 +3836,7 @@ namespace trlvr
         // follows the stretched hand.
         Mat34 pose = controller.mDeviceToAbsoluteTracking;
         const float range = config().god_stretch_range;
-        if (range > 0.0f && !g_cal_active && camera_third_person_mode() == 2 &&
+        if (stretch && range > 0.0f && !g_cal_active && camera_third_person_mode() == 2 &&
             camera_world_scale_factor() >= 1.0f &&
             !camera_first_person_active() && config().hands_on_controllers)
         {
@@ -3845,8 +3846,11 @@ namespace trlvr
             const float hand[3] = { pose.m[0][3], pose.m[1][3],
                                     pose.m[2][3] };
             float reached[3];
+            // At most 2 m past the real hand (user 2026-11-21: far out the
+            // reach felt odd, a throw lost its momentum suddenly), or the
+            // range itself when that is set higher (the Max preset, 2.5 m).
             go_go_reach(hand, body, 0.01f * config().god_stretch_start,
-                        range, reached);
+                        range, reached, range > 2.0f ? range : 2.0f);
             for (int k = 0; k < 3; ++k)
                 if (std::isfinite(reached[k]))
                     pose.m[k][3] = reached[k];
@@ -3862,6 +3866,11 @@ namespace trlvr
         controller_to_head->m[3][1] *= move_scale;
         controller_to_head->m[3][2] *= move_scale;
         return true;
+    }
+
+    bool vr_controller_head_pose(bool left, Mat4* controller_to_head)
+    {
+        return controller_head_pose_impl(left, true, controller_to_head);
     }
 
     bool vr_pointer_head_pose(bool left, Mat4* pointer_to_head)
