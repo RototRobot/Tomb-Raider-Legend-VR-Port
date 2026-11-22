@@ -1088,8 +1088,21 @@ namespace trlvr
         return hud_follow_relative(state, head);
     }
 
+    // The last world-space draw's decomposition (vr_substitute_c0_other_eye).
+    struct WorldDrawParts
+    {
+        bool valid = false;
+        float in[16];
+        Mat4 m;
+        GameProjection projection;
+        Mat4 projection_inv;
+        Mat4 paused_head;
+    };
+    static WorldDrawParts g_world_draw;
+
     bool vr_substitute_c0_for_eye(const float* in, float* out, Eye eye)
     {
+        g_world_draw.valid = false;
         if (!g_ready || !in || !out || !config().head_tracking)
             return false;
         if (!drawing_the_scene())
@@ -1731,6 +1744,12 @@ namespace trlvr
                                                   draw_projection_inv,
                                                   paused_head);
         registers_from_matrix(replaced, out);
+        memcpy(g_world_draw.in, in, sizeof(g_world_draw.in));
+        g_world_draw.m = m;
+        g_world_draw.projection = draw_projection;
+        g_world_draw.projection_inv = draw_projection_inv;
+        g_world_draw.paused_head = paused_head;
+        g_world_draw.valid = true;
 
         // Log one world-space draw per eye, exactly as uploaded. If the two
         // differ only trivially then the eye offset is not reaching world
@@ -1754,6 +1773,19 @@ namespace trlvr
             }
         }
         return true;
+    }
+
+    bool vr_substitute_c0_other_eye(const float* in, float* out, Eye eye)
+    {
+        if (g_world_draw.valid && in && out &&
+            memcmp(g_world_draw.in, in, sizeof(g_world_draw.in)) == 0)
+        {
+            registers_from_matrix(g_world_draw.m * eye_tail_cached(eye,
+                g_world_draw.projection, g_world_draw.projection_inv,
+                g_world_draw.paused_head), out);
+            return true;
+        }
+        return vr_substitute_c0_for_eye(in, out, eye);
     }
 
     void vr_set_render_target_size(unsigned w, unsigned h)

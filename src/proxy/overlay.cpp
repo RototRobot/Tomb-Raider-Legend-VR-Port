@@ -1631,6 +1631,31 @@ namespace trlvr
             ImGui::EndDisabled();
         }
 
+        // The two stereo speed-ups (2026-11-22, on by default after the
+        // headset test). Both are set up when the VR session starts, so a
+        // change needs a restart; they stay in the everyday settings so a
+        // player with trouble can find them.
+        void performance_section(Config& c)
+        {
+            static const bool dxvk_started = c.stereo_dxvk;
+            static const bool async_started = c.xr_async_end;
+            toggle("Draw both eyes in one pass", &c.stereo_dxvk, L"vr",
+                   L"stereo_dxvk",
+                   "On: each scene draw is handed to the graphics driver once "
+                   "for both eyes, which is faster. Turn off if the picture "
+                   "looks wrong in one eye. Takes effect after restarting the "
+                   "game.");
+            toggle("Hand frames to the headset in the background",
+                   &c.xr_async_end, L"vr", L"xr_async_end",
+                   "On: the game goes on to the next frame while the last one "
+                   "is still being sent to the headset, which is faster. Turn "
+                   "off if you see judder, freezes or crashes. Takes effect "
+                   "after restarting the game.");
+            if (c.stereo_dxvk != dxvk_started || c.xr_async_end != async_started)
+                ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
+                                   "Restart the game to apply this.");
+        }
+
         // OpenXR / Quest settings. The runtime is chosen once at startup, so
         // that one needs a restart; the rest apply at once.
         void runtime_section(Config& c)
@@ -1957,6 +1982,8 @@ namespace trlvr
                            "On: movies, menus and loading screens are drawn at "
                            "4:3, as the game made them. Off: they fill the "
                            "headset view and come out about 0.7x too narrow.");
+                ImGui::SeparatorText("Performance");
+                performance_section(c);
                 ImGui::SeparatorText("VR runtime (OpenXR / Quest)");
                 runtime_section(c);
                 if (tr7_menu_hook_present() &&

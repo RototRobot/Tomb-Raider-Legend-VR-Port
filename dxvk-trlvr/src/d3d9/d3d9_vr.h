@@ -113,10 +113,53 @@ IDirect3DVR9 : public IUnknown {
 // HARDWARE_VERTEXPROCESSING | PUREDEVICE), so the proxy forces the flag on at
 // CreateDevice rather than this fork weakening DXVK's locking.
 
+// --- Stereo draws (2026-11-22, experimental) ------------------------------
+// One game draw, both eyes: the caller gives each eye's viewport and vertex
+// shader constants c0..c3, and DXVK records the draw twice -- the first with
+// the full draw path, the second rebinding only the viewport and the vertex
+// constants (every other state is the same). The device's own viewport and
+// c0..c3 are put back afterwards, so its state is the game's again.
+// S_FALSE: nothing was drawn (fixed-function vertex processing, software
+// vertex processing or a state block being recorded); draw it the old way.
+struct D3D9_VR_STEREO_DRAW {
+  D3DVIEWPORT9     Viewport[2];
+  float            VsC0[2][16];      // c0..c3 for each eye
+};
+
+MIDL_INTERFACE("6f2c9e1b-8d4a-4c7e-9b3f-1a5d7e2c4b90")
+IDirect3DVR9_1 : public IDirect3DVR9 {
+  virtual HRESULT STDMETHODCALLTYPE DrawPrimitiveStereo(
+          D3DPRIMITIVETYPE        PrimitiveType,
+          UINT                    StartVertex,
+          UINT                    PrimitiveCount,
+    const D3D9_VR_STEREO_DRAW*    pStereo) = 0;
+
+  virtual HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveStereo(
+          D3DPRIMITIVETYPE        PrimitiveType,
+          INT                     BaseVertexIndex,
+          UINT                    MinVertexIndex,
+          UINT                    NumVertices,
+          UINT                    StartIndex,
+          UINT                    PrimitiveCount,
+    const D3D9_VR_STEREO_DRAW*    pStereo) = 0;
+
+  // Frame end off the calling thread (TRL VR, 2026-11-22). FlushForSubmit
+  // sends everything recorded so far to the CS thread and returns the
+  // sequence number that covers it. LockSubmissionQueueAfter, from any
+  // thread, waits until the CS thread has run that far, then takes the queue
+  // as LockSubmissionQueue does (0 = no wait). It touches no D3D9 state, so
+  // the game may record the next frame meanwhile.
+  virtual HRESULT STDMETHODCALLTYPE FlushForSubmit(UINT64* pSequence) = 0;
+
+  virtual HRESULT STDMETHODCALLTYPE LockSubmissionQueueAfter(UINT64 Sequence) = 0;
+};
+
 #ifdef _MSC_VER
 struct __declspec(uuid("b1e5c0a4-3f7d-4a92-8c16-2d9e47f0a3b5")) IDirect3DVR9;
+struct __declspec(uuid("6f2c9e1b-8d4a-4c7e-9b3f-1a5d7e2c4b90")) IDirect3DVR9_1;
 #else
 __CRT_UUID_DECL(IDirect3DVR9, 0xb1e5c0a4, 0x3f7d, 0x4a92, 0x8c, 0x16, 0x2d, 0x9e, 0x47, 0xf0, 0xa3, 0xb5);
+__CRT_UUID_DECL(IDirect3DVR9_1, 0x6f2c9e1b, 0x8d4a, 0x4c7e, 0x9b, 0x3f, 0x1a, 0x5d, 0x7e, 0x2c, 0x4b, 0x90);
 #endif
 
 // Exported from d3d9.dll. Resolve with GetProcAddress and pass the live device.

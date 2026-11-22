@@ -40,6 +40,7 @@
 #include "../common/config.h"
 #include "../common/log.h"
 
+
 namespace trlvr
 {
     namespace
@@ -157,6 +158,40 @@ namespace trlvr
             // left ours on the device.
             device->SetVertexShaderConstantF(0, vr_draw_c0_restore(), 4);
             g_patched_c0 = false;
+        }
+    }
+
+    void stereo_fill_eyes(IDirect3DDevice9* device, D3DVIEWPORT9 viewport[2],
+                          float c0[2][16])
+    {
+        // DXVK draws with whatever the device holds as the game's state and
+        // puts it back afterwards, so ours must not be on it.
+        if (g_patched_c0 || g_last_vp_valid)
+            stereo_restore_game_state(device);
+        g_last_device = device;
+        if (!g_saved_viewport)
+        {
+            device->GetViewport(&g_viewport);
+            g_saved_viewport = true;
+        }
+        unsigned eye_w = g_eye_w;
+        unsigned eye_h = g_eye_h;
+        vr_stereo_target_eye_size(&eye_w, &eye_h);
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            D3DVIEWPORT9 vp = g_viewport;
+            vp.X = (pass == 0) ? 0 : eye_w;
+            vp.Y = 0;
+            vp.Width = eye_w;
+            vp.Height = eye_h;
+            viewport[pass] = vp;
+            perf_cpu_begin(PerfDrawMath);
+            const bool substituted = pass == 0
+                ? vr_substitute_c0_for_eye(vr_game_c0(), c0[0], EyeLeft)
+                : vr_substitute_c0_other_eye(vr_game_c0(), c0[1], EyeRight);
+            perf_cpu_end(PerfDrawMath);
+            if (!substituted)
+                memcpy(c0[pass], vr_draw_c0_restore(), 16 * sizeof(float));
         }
     }
 

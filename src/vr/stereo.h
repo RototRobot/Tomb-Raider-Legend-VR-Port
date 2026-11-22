@@ -25,6 +25,11 @@ namespace trlvr
     // How many times the draw about to be issued should be sent: two while the
     // scene is being drawn, one otherwise.
     int stereo_passes();
+    // Stereo draws in DXVK: both eyes' viewports and c0..c3 for this draw,
+    // worked out as stereo_begin_pass does for each pass, without touching
+    // the device (which is left with the game's own viewport and c0).
+    void stereo_fill_eyes(IDirect3DDevice9* device, D3DVIEWPORT9 viewport[2],
+                          float c0[2][16]);
 
     // Point the next draw at one eye's half of the target.
     void stereo_begin_pass(IDirect3DDevice9* device, int pass);

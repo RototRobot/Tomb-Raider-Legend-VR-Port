@@ -197,8 +197,18 @@ namespace trlvr
         // halves of a double-wide target. Otherwise it goes out once, with a
         // chance to correct the matrix -- the state that identifies a pass
         // is not always set when the constants were uploaded.
+        // Draws with no stereo-in-DXVK form (the UP draws) fall back to two
+        // passes.
         template <class Issue>
         HRESULT dispatch_draw(Issue issue)
+        {
+            return dispatch_draw(issue, [](const D3DVIEWPORT9*,
+                                           const float (*)[16]) {
+                return S_FALSE; });
+        }
+
+        template <class Issue, class StereoIssue>
+        HRESULT dispatch_draw(Issue issue, StereoIssue stereo_issue)
         {
             perf_cpu_draw();
             PerfCpuScope perf_scope(PerfDrawCalls);
@@ -412,6 +422,25 @@ namespace trlvr
                 WaterLayer waves;
                 const bool own_waves = screen_layer &&
                     water_waves_begin_layer(layer_kind, &waves);
+                // Plain scene draws: once, both eyes recorded by DXVK
+                // (config stereo_dxvk). Anything with per-eye special cases
+                // keeps the two passes below.
+                if (config().stereo_dxvk && vr_submit_stereo_draw_ready() &&
+                    !screen_layer && !own_waves && !hands_in_front &&
+                    hand_state_mark == -1 &&
+                    !reflection_stereo_draw_samples_per_eye(_device))
+                {
+                    D3DVIEWPORT9 eye_viewport[2];
+                    float eye_c0[2][16];
+                    stereo_fill_eyes(_device, eye_viewport, eye_c0);
+                    const HRESULT stereo_hr =
+                        stereo_issue(eye_viewport, eye_c0);
+                    if (stereo_hr != S_FALSE)
+                    {
+                        restore_scoped_state();
+                        return stereo_hr;
+                    }
+                }
                 HRESULT hr = D3D_OK;
                 for (int p = 0; p < passes; ++p)
                 {
@@ -459,7 +488,15 @@ namespace trlvr
             restore_scoped_state();
             return hr;
         }
-        STDMETHOD(DrawPrimitive)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); return dispatch_draw([&] { return _device->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount); }); }
+        STDMETHOD(DrawPrimitive)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT StartVertex, UINT PrimitiveCount)
+        {
+            hud_capture_set_call(_ReturnAddress(), PrimitiveCount);
+            return dispatch_draw(
+                [&] { return _device->DrawPrimitive(PrimitiveType, StartVertex, PrimitiveCount); },
+                [&](const D3DVIEWPORT9* viewport, const float (*c0)[16]) {
+                    return vr_submit_draw_stereo(false, PrimitiveType, 0, 0, 0,
+                        StartVertex, PrimitiveCount, viewport, c0); });
+        }
         STDMETHOD(DrawIndexedPrimitive)(THIS_ D3DPRIMITIVETYPE PrimitiveType, INT BaseVertexIndex, UINT MinVertexIndex, UINT NumVertices, UINT startIndex, UINT primCount)
         {
             // Another mod's ImGui menu: into its own overlay (imgui_overlay.h).
@@ -472,9 +509,14 @@ namespace trlvr
                         startIndex, primCount); });
             }
             hud_capture_set_call(_ReturnAddress(), primCount);
-            return dispatch_draw([&] { return _device->DrawIndexedPrimitive(
-                PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices,
-                startIndex, primCount); });
+            return dispatch_draw(
+                [&] { return _device->DrawIndexedPrimitive(
+                    PrimitiveType, BaseVertexIndex, MinVertexIndex, NumVertices,
+                    startIndex, primCount); },
+                [&](const D3DVIEWPORT9* viewport, const float (*c0)[16]) {
+                    return vr_submit_draw_stereo(true, PrimitiveType,
+                        BaseVertexIndex, MinVertexIndex, NumVertices,
+                        startIndex, primCount, viewport, c0); });
         }
         STDMETHOD(DrawPrimitiveUP)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT PrimitiveCount, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); const HRESULT hr = dispatch_draw([&] { return _device->DrawPrimitiveUP(PrimitiveType, PrimitiveCount, pVertexStreamZeroData, VertexStreamZeroStride); }); return hr; }
         STDMETHOD(DrawIndexedPrimitiveUP)(THIS_ D3DPRIMITIVETYPE PrimitiveType, UINT MinVertexIndex, UINT NumVertices, UINT PrimitiveCount, CONST void* pIndexData, D3DFORMAT IndexDataFormat, CONST void* pVertexStreamZeroData, UINT VertexStreamZeroStride) { hud_capture_set_call(_ReturnAddress(), PrimitiveCount); const HRESULT hr = dispatch_draw([&] { return _device->DrawIndexedPrimitiveUP(PrimitiveType, MinVertexIndex, NumVertices, PrimitiveCount, pIndexData, IndexDataFormat, pVertexStreamZeroData, VertexStreamZeroStride); }); return hr; }

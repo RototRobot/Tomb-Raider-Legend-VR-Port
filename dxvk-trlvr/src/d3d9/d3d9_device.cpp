@@ -23,6 +23,7 @@
 #include "../util/util_math.h"
 
 #include "d3d9_initializer.h"
+#include "d3d9_vr.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -3128,6 +3129,129 @@ namespace dxvk {
     });
 
     new (m_csData->first()) VkDrawIndexedIndirectCommand(draw);
+    return D3D_OK;
+  }
+
+
+  // TRL VR fork (2026-11-22, experimental): the proxy used to issue every
+  // scene draw twice from the game's thread, once per eye, each through the
+  // whole D3D9 draw path. Here the first eye takes that path and the second
+  // rebinds only what differs -- the viewport and c0..c3 -- and records the
+  // same draw again; the CS thread does the rest.
+  uint64_t D3D9DeviceEx::FlushForVR() {
+    D3D9DeviceLock lock = LockDevice();
+    ExecuteFlush(false);
+    return m_csSeqNum;
+  }
+
+
+  void D3D9DeviceEx::WaitCsSequenceVR(uint64_t SequenceNumber) {
+    // No device lock: called from the TRL VR end thread while the game
+    // records the next frame. The CS thread's counters are thread-safe.
+    m_csThread.synchronize(SequenceNumber);
+  }
+
+
+  HRESULT D3D9DeviceEx::DrawStereoVR(
+          bool                          Indexed,
+          D3DPRIMITIVETYPE              PrimitiveType,
+          INT                           BaseVertexIndex,
+          UINT                          MinVertexIndex,
+          UINT                          NumVertices,
+          UINT                          StartIndexOrVertex,
+          UINT                          PrimitiveCount,
+    const ::D3D9_VR_STEREO_DRAW*        pStereo) {
+    D3D9DeviceLock lock = LockDevice();
+
+    if (unlikely(pStereo == nullptr || ShouldRecord()))
+      return S_FALSE;
+
+    if (unlikely(m_state.vertexDecl == nullptr))
+      return D3DERR_INVALIDCALL;
+
+    if (unlikely(!PrimitiveCount || (Indexed && !NumVertices)))
+      return D3D_OK;
+
+    if (unlikely(!UseProgrammableVS() || CanSWVP()))
+      return S_FALSE;
+
+    const D3DVIEWPORT9 gameViewport = m_state.viewport;
+    Vector4 gameC0[4];
+    std::memcpy(gameC0, m_state.vsConsts->fConsts, sizeof(gameC0));
+
+    const uint32_t count = GetVertexCount(PrimitiveType, PrimitiveCount);
+    UINT firstVertex = Indexed ? MinVertexIndex : StartIndexOrVertex;
+    UINT firstIndex  = Indexed ? StartIndexOrVertex : 0u;
+    INT  baseVertex  = Indexed ? BaseVertexIndex : 0;
+    bool dynamicSysmemVBOs = false;
+    bool dynamicSysmemIBO = false;
+
+    auto emitDraw = [&] () {
+      if (Indexed) {
+        VkDrawIndexedIndirectCommand draw = {};
+        draw.indexCount = count;
+        draw.instanceCount = GetInstanceCount();
+        draw.firstIndex = firstIndex;
+        draw.vertexOffset = baseVertex;
+
+        EmitCsCmd<VkDrawIndexedIndirectCommand>(D3D9CmdType::DrawIndexed, 1u,
+          [this] (DxvkContext* ctx, VkDrawIndexedIndirectCommand* drawArgs, uint32_t drawCount) {
+          // As DrawIndexedPrimitive: instanced bindings none of which are
+          // used draw a single instance.
+          if (unlikely(m_iaState.streamsInstanced && !(m_iaState.streamsInstanced & m_iaState.streamsUsed))) {
+            for (uint32_t i = 0u; i < drawCount; i++)
+              drawArgs[i].instanceCount = 1u;
+          }
+
+          ctx->drawIndexed(drawCount, drawArgs);
+        });
+
+        new (m_csData->first()) VkDrawIndexedIndirectCommand(draw);
+      } else {
+        VkDrawIndirectCommand draw = {};
+        draw.vertexCount = count;
+        draw.instanceCount = 1u;
+        draw.firstVertex = firstVertex;
+
+        EmitCsCmd<VkDrawIndirectCommand>(D3D9CmdType::Draw, 1u,
+          [] (DxvkContext* ctx, const VkDrawIndirectCommand* drawArgs, uint32_t drawCount) {
+            ctx->draw(drawCount, drawArgs);
+          });
+
+        new (m_csData->first()) VkDrawIndirectCommand(draw);
+      }
+    };
+
+    // First eye: the whole draw path, as DrawPrimitive / DrawIndexedPrimitive.
+    SetViewport(&pStereo->Viewport[0]);
+    SetVertexShaderConstantF(0, pStereo->VsC0[0], 4);
+
+    if (Indexed) {
+      UploadPerDrawData(firstVertex, NumVertices, firstIndex, count,
+        baseVertex, &dynamicSysmemVBOs, &dynamicSysmemIBO);
+      PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, !dynamicSysmemIBO);
+    } else {
+      UploadPerDrawData(firstVertex, count, firstIndex, 0,
+        baseVertex, &dynamicSysmemVBOs, nullptr);
+      PrepareDraw(PrimitiveType, !dynamicSysmemVBOs, false);
+    }
+
+    emitDraw();
+
+    // Second eye: only the viewport and the vertex constants differ.
+    SetViewport(&pStereo->Viewport[1]);
+    SetVertexShaderConstantF(0, pStereo->VsC0[1], 4);
+
+    if (m_dirty.test(D3D9DeviceDirtyFlag::ViewportScissor))
+      BindViewportAndScissor();
+
+    UpdateShaderConstants<D3D9ShaderType::VertexShader>();
+
+    emitDraw();
+
+    // The game's viewport and c0..c3 again; bound by its next draw.
+    SetViewport(&gameViewport);
+    SetVertexShaderConstantF(0, gameC0[0].data, 4);
     return D3D_OK;
   }
 

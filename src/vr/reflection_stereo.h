@@ -44,6 +44,10 @@ namespace trlvr
 
     // Main scene, per eye: the right eye samples the twin.
     void reflection_stereo_eye_textures(IDirect3DDevice9* device, int eye);
+    // Whether this draw samples a texture that differs per eye (the
+    // reflection twin or a half of the screen copy): such draws keep the
+    // two-pass path, which swaps them per eye.
+    bool reflection_stereo_draw_samples_per_eye(IDirect3DDevice9* device);
     void reflection_stereo_restore_textures(IDirect3DDevice9* device);
 
     // Water Effects (2026-10-11): the game copies the whole screen into a

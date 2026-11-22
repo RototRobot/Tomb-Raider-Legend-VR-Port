@@ -318,6 +318,11 @@ namespace trlvr
     // the headset's own frustum, for drawing with fixed-function clipping.
     bool vr_head_clip_matrix(Eye eye, float out[4][4]);
     bool vr_substitute_c0_for_eye(const float* in_regs16, float* out_regs16, Eye eye);
+    // The other eye of the draw just substituted (stereo draws in DXVK work
+    // out both eyes back to back): a world-space draw reuses the first eye's
+    // decomposition and only takes this eye's tail; anything else goes the
+    // full way.
+    bool vr_substitute_c0_other_eye(const float* in_regs16, float* out_regs16, Eye eye);
 
     // Remember what the game asked for and what we uploaded instead, so a
     // draw can revisit the decision. The state that identifies the interface

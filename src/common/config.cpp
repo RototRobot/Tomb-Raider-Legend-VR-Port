@@ -51,6 +51,8 @@ namespace trlvr
             { L"vr", L"body_soft_ripple", L"0.3" },
             { L"vr", L"stereo", L"1" },
             { L"vr", L"stereo_same_frame", L"1" },
+            { L"vr", L"stereo_dxvk", L"1" },
+            { L"vr", L"xr_async_end", L"1" },
             { L"vr", L"stereo_lock_pose", L"1" },
             { L"vr", L"head_tracking", L"1" },
             { L"vr", L"head_rotation", L"1" },
@@ -322,6 +324,12 @@ namespace trlvr
             L"stereo = 1\r\n"
             L"; Both eyes in one game frame. Keep Depth of Field and Fullscreen Effects off.\r\n"
             L"stereo_same_frame = 1\r\n"
+            L"; 1 = DXVK draws the second eye itself (faster; needs the matching\r\n"
+            L"; d3d9_dxvk.dll). 0 if one eye looks wrong. Needs a game restart.\r\n"
+            L"stereo_dxvk = 1\r\n"
+            L"; 1 = frames go to the headset from a thread of their own (faster). 0 if\r\n"
+            L"; you see judder, freezes or crashes. Needs a game restart.\r\n"
+            L"xr_async_end = 1\r\n"
             L"stereo_lock_pose = 1\r\n"
             L"\r\n"
             L"head_tracking = 1\r\n"
@@ -1146,6 +1154,8 @@ namespace trlvr
             read_bool(L"vr", L"xr_grip_match_openvr", false, path);
         g_config.stereo = read_bool(L"vr", L"stereo", true, path);
         g_config.stereo_same_frame = read_bool(L"vr", L"stereo_same_frame", true, path);
+        g_config.stereo_dxvk = read_bool(L"vr", L"stereo_dxvk", true, path);
+        g_config.xr_async_end = read_bool(L"vr", L"xr_async_end", true, path);
         g_config.stereo_lock_pose = read_bool(L"vr", L"stereo_lock_pose", true, path);
         g_config.head_tracking = read_bool(L"vr", L"head_tracking", true, path);
         g_config.head_rotation = read_bool(L"vr", L"head_rotation", true, path);

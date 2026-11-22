@@ -18,6 +18,17 @@ namespace trlvr
     void vr_submit_device_closing(IDirect3DDevice9* real_device);
     bool vr_submit_ready();
 
+    // Stereo draws in DXVK (config stereo_dxvk, d3d9_vr.h IDirect3DVR9_1):
+    // ready once the fork answered the newer interface. The draw returns
+    // S_FALSE when DXVK drew nothing (draw it the old way).
+    bool vr_submit_stereo_draw_ready();
+    HRESULT vr_submit_draw_stereo(bool indexed, D3DPRIMITIVETYPE type,
+                                  INT base_vertex, UINT min_vertex,
+                                  UINT num_vertices, UINT start,
+                                  UINT primitives,
+                                  const D3DVIEWPORT9 viewport[2],
+                                  const float c0[2][16]);
+
     // Call with the swap chain's back buffer, before presenting it. In stereo
     // this copies the finished frame into whichever eye it was drawn for and
     // submits both; in mono it submits the one image to both eyes.

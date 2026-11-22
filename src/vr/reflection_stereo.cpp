@@ -432,6 +432,24 @@ namespace trlvr
         }
     }
 
+    bool reflection_stereo_draw_samples_per_eye(IDirect3DDevice9* device)
+    {
+        if (!device || device != g_device)
+            return false;
+        const bool refl = g_enabled && g_twin && g_refl_texture &&
+                          g_refl_mode == 0;
+        if (!g_copy && !refl)
+            return false;
+        for (DWORD s = 0; s < 16; ++s)
+        {
+            if (g_copy && g_bound[s] == (IDirect3DBaseTexture9*)g_copy)
+                return true;
+            if (refl && g_bound[s] == (IDirect3DBaseTexture9*)g_refl_texture)
+                return true;
+        }
+        return false;
+    }
+
     void reflection_stereo_restore_textures(IDirect3DDevice9* device)
     {
         if (!device)

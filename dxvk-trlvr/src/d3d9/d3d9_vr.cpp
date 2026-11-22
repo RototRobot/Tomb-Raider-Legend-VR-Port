@@ -8,7 +8,7 @@
 
 namespace dxvk {
 
-  class D3D9VR final : public ComObjectClamp<IDirect3DVR9> {
+  class D3D9VR final : public ComObjectClamp<IDirect3DVR9_1> {
 
   public:
 
@@ -25,13 +25,49 @@ namespace dxvk {
       *ppvObject = nullptr;
 
       if (riid == __uuidof(IUnknown)
-       || riid == __uuidof(IDirect3DVR9)) {
+       || riid == __uuidof(IDirect3DVR9)
+       || riid == __uuidof(IDirect3DVR9_1)) {
         *ppvObject = ref(this);
         return S_OK;
       }
 
       Logger::warn("D3D9VR::QueryInterface: Unknown interface query");
       return E_NOINTERFACE;
+    }
+
+    HRESULT STDMETHODCALLTYPE DrawPrimitiveStereo(
+            D3DPRIMITIVETYPE        PrimitiveType,
+            UINT                    StartVertex,
+            UINT                    PrimitiveCount,
+      const D3D9_VR_STEREO_DRAW*    pStereo) {
+      return m_device->DrawStereoVR(false, PrimitiveType, 0, 0, 0,
+        StartVertex, PrimitiveCount, pStereo);
+    }
+
+    HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveStereo(
+            D3DPRIMITIVETYPE        PrimitiveType,
+            INT                     BaseVertexIndex,
+            UINT                    MinVertexIndex,
+            UINT                    NumVertices,
+            UINT                    StartIndex,
+            UINT                    PrimitiveCount,
+      const D3D9_VR_STEREO_DRAW*    pStereo) {
+      return m_device->DrawStereoVR(true, PrimitiveType, BaseVertexIndex,
+        MinVertexIndex, NumVertices, StartIndex, PrimitiveCount, pStereo);
+    }
+
+    HRESULT STDMETHODCALLTYPE FlushForSubmit(UINT64* pSequence) {
+      if (unlikely(pSequence == nullptr))
+        return D3DERR_INVALIDCALL;
+      *pSequence = m_device->FlushForVR();
+      return D3D_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE LockSubmissionQueueAfter(UINT64 Sequence) {
+      if (Sequence)
+        m_device->WaitCsSequenceVR(Sequence);
+      m_device->GetDXVKDevice()->lockSubmission();
+      return D3D_OK;
     }
 
     HRESULT STDMETHODCALLTYPE GetVRDesc(

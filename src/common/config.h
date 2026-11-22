@@ -33,6 +33,15 @@ namespace trlvr
         bool xr_grip_match_openvr = false;
         bool stereo = true;
         bool stereo_same_frame = true;
+        // Each scene draw is handed to DXVK once with both eyes, and DXVK
+        // records the second eye itself (d3d9_vr.h IDirect3DVR9_1, 2026-11-22).
+        // Needs the matching d3d9_dxvk.dll; off, or an older DLL, falls back
+        // to two draws from the game's thread. System tab > Performance.
+        bool stereo_dxvk = true;
+        // The frame is ended on a thread of its own, so the game's thread no
+        // longer waits for DXVK to finish the frame before going on to the
+        // next (vr_submit.cpp, end thread, 2026-11-22). System tab.
+        bool xr_async_end = true;
         bool stereo_lock_pose = true;
 
         bool head_tracking = true;
