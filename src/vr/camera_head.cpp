@@ -21527,8 +21527,8 @@ namespace trlvr
                 // fall. SetPositionFindGround snaps her onto the ground
                 // within ~96 units (0.33 m), which would make a lesser
                 // height no fall at all: so the least is just past that,
-                // and less where a ceiling is lower.
-                // TODO(headset): check the snap distance in play.
+                // and less where a ceiling is lower. The ~96 is an estimate
+                // from the code, not measured in play.
                 if (min_air > 0.0f)
                 {
                     float air = fmaxf(min_air, 100.0f);
@@ -21680,8 +21680,8 @@ namespace trlvr
         }
 
         // The surface normal at a hit of the ray from -> to at `at`. Legend's
-        // probe gives no hit record's normal (TODO(headset): the PCollideInfo
-        // may hold one, as Underworld's does), so two parallel rays a tenth of
+        // probe gives no hit record's normal (its PCollideInfo may hold one,
+        // as Underworld's does; not looked into), so two parallel rays a tenth of
         // a metre (her size) to the sides give a plane (throw_plane_normal);
         // last resort: straight back along the ray. *src names the source.
         void flight_normal(const float from[3], const float to[3],
