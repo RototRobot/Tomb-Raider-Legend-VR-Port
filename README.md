@@ -103,6 +103,10 @@ place under both. The main menu shows the version and the runtime in use.
 - **Camera collision** keeps the view out of rock and walls.
 - **Smooth view changes**: switching between the camera styles and first
   person glides instead of cutting (`view_transition_seconds`).
+- **Recentre to your defaults**: each view's zoom, height, side and scale in
+  Settings > Cameras are where a recentre (F1, or the stick) puts it back, and
+  the shoulder and board cameras swing round behind Lara
+  (`recenter_behind_lara`).
 - **Scale, zoom and side by hand**: turn your off hand palm up to bring out
   three sliders: the size of the world, the camera nearer or farther, and the
   camera to the left or right of Lara (over either shoulder). Touch a knob
@@ -173,7 +177,9 @@ place under both. The main menu shows the version and the runtime in use.
 ### Interface and comfort
 
 - **HUD on its own layer**, drawn at a comfortable size with a gentle head
-  follow; menus are world-locked panels you can look around.
+  follow, and by default locked at a set height so you glance down at it like
+  a dashboard (`hud_lock_height`, `hud_height_degrees`); menus are
+  world-locked panels you can look around.
 - **World markers** (caution icons, grapple targets, lock-on) are placed at
   their real position in the world, not on a flat screen.
 - **Prompts speak VR**: tutorial and context prompts name the VR controller
@@ -313,7 +319,9 @@ The keyboard keeps working alongside the controllers, and **F1** recentres.
 The default **controller** scheme changes some of these in third person: left
 stick double click recentres and holding it opens the gear menu; right stick
 click recentres, double click opens the PDA and a hold (0.4 s) switches the
-view; the right stick orbits and zooms; X is accurate aim. Settings > Controls
+view; the right stick orbits and zooms; X is accurate aim. Holding the right
+stick in and pushing zooms in classic, sets the seat height in shoulder, and
+in board sets the seat height (up/down) and world scale (left/right). Settings > Controls
 > Button layout shows the live table for any view. `control_scheme =
 interaction` restores the click-for-weapon, long-press-for-view layout.
 
@@ -430,6 +438,8 @@ first and third person at any time in gameplay.
 | `binocular_scale` | `0.6` | Size of the binocular viewfinder |
 | `hud_follow_degrees` | `90` | The gameplay HUD stays put while you look within this many degrees of it, then glides back in front (0 = use `hud_follow`) |
 | `hud_follow` | `0.85` | With `hud_follow_degrees = 0`: how closely the HUD follows your head (1 = locked) |
+| `hud_lock_height` / `hud_height_degrees` | `1` / `10` | The HUD turns with you but stays at this height (degrees from level; negative is below), like a dashboard |
+| `recenter_behind_lara` | `1` | A recentre also swings the shoulder and board cameras round behind Lara |
 | `fsaa` | `on` | The game's anti-aliasing: `on`, `off` or `game` (the Setup dialog's choice) |
 | `msaa` | `4` | Anti-aliasing strength while FSAA is on: `0` (off), `2`, `4` or `8` |
 | `fullscreen_effects` | `off` | The game's glow/bloom: `on`, `off` or `game` |
@@ -437,7 +447,7 @@ first and third person at any time in gameplay.
 | `terrain_culling` | `frustum` | `open` draws every terrain strip of a visible room |
 | `depth_of_field` | `off` | `on` or `game` (keep the launcher's setting) |
 | `world_scale` | `291` | Game units per metre. Raise to feel smaller, lower to feel larger |
-| `vr_runtime` | `auto` | `openxr`, `openvr`, or `auto` (OpenXR, falling back to OpenVR) |
+| `vr_runtime` | `openxr` | `openxr`, `openvr`, or `auto` (OpenXR, falling back to OpenVR) |
 | `picture_brightness` / `picture_contrast` | `0` / `1` | The headset image; `picture_follow_game = 1` also follows the game's brightness |
 | `view_transition_seconds` | `0.3` | How long switching camera style glides (`0` cuts) |
 | `body_rear` | `1` | Third person: her rear gives and bounces |

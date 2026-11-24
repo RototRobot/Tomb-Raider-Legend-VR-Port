@@ -19,6 +19,11 @@ and its launcher writes a separate patched copy named trl_vr.exe.
 
 NEW SINCE 1.1.0
 ---------------
+  * OpenXR with no silent fallback: if OpenXR cannot start you see the
+    failure, rather than the game quietly using SteamVR. To use OpenVR /
+    SteamVR, pick it in the settings panel (VR runtime section) or set
+    vr_runtime = openvr in trlvr.ini, then restart the game. vr_runtime =
+    auto keeps the old OpenXR-then-OpenVR behaviour.
   * Faster. Both eyes of a draw are recorded in one call and the frame is
     ended on its own thread. Both are on by default; switch them off in
     settings panel > System > Performance if you suspect them (restart
@@ -30,6 +35,10 @@ NEW SINCE 1.1.0
     too (first_person_arm_stretch).
   * Reset view: F1, or the settings panel's button, recentres the view and
     now glides there. Camera speed is a setting.
+  * Camera defaults: each view's zoom, height, side and scale sliders
+    (settings panel > Cameras) are where a recentre puts it back; the stick
+    and palm sliders move it from there. A recentre also swings the
+    shoulder and board cameras round behind Lara (recenter_behind_lara).
   * Board camera: it keeps its own heading, stops at geometry instead of
     going through it, no longer drifts when orbiting beside a wall, and
     camera collision can be switched off.
@@ -44,7 +53,10 @@ NEW SINCE 1.1.0
     hands follow yours) and gesture_controls (first-person gestures).
   * Menus, gameplay HUD and binocular viewfinder have their own sizes
     (ui_scale, hud_scale, binocular_scale), and hud_follow_degrees keeps
-    the HUD still until you look away from it.
+    the HUD still until you look away from it. Lock HUD height (on by
+    default) keeps the HUD at one height as it turns with you, so you glance
+    down at it like a dashboard; HUD height sets where.
+  * Body physics: improved.
   * Menus and loading screens are shown at 4:3 as well as movies
     (movie_widen_4x3), and the screen-wipe fade is drawn properly.
   * Water: reflections and the Water Effects distortion are drawn for each
@@ -52,8 +64,9 @@ NEW SINCE 1.1.0
     reflections follow your head, not your gaze. Both water options are in
     System > Performance (restart to change).
   * Settings presets (body physics, god-mode reach and toss), a "Show
-    advanced settings" switch (System tab) that hides the tuning pages, an
-    outfit row, and a "VR runtime" section.
+    advanced settings" switch (System tab) that hides the tuning pages, a
+    "Show debug settings" switch for the fine sliders on the Body and God
+    mode tabs, an outfit row, and a "VR runtime" section.
   * HD texture pack fix: mipmaps rebuilt with a guided script (see OPTIONAL:
     HD TEXTURE PACK FIX).
   * Meta Quest: OpenXR's own grip pose is used (hands no longer tilt) and
@@ -62,11 +75,8 @@ NEW SINCE 1.1.0
 
 NEW IN 1.1.0
 ------------
-  * OpenXR is the default runtime, with no silent fallback: if OpenXR cannot
-    start you see the failure, rather than the game quietly using SteamVR.
-    To use OpenVR / SteamVR instead, pick it in the settings panel (VR
-    runtime section) or set vr_runtime = openvr in trlvr.ini, then restart
-    the game. vr_runtime = auto tries OpenXR first and falls back to OpenVR.
+  * OpenXR, with OpenVR as the fallback. The mod uses OpenXR by default and
+    falls back to OpenVR / SteamVR if OpenXR cannot start.
     The main menu shows the version and the runtime in use.
   * A settings panel in the headset: hold both sticks in for 0.6 s
     (Oculus Touch: hold the left menu button), or press Insert. Point at it
@@ -251,7 +261,8 @@ VR CONTROLLERS (default "controller" scheme, third person)
     Right stick hold (0.4 s)   switch view: classic, shoulder, board, first
                                person
     Right stick click and push classic: up/down zoom; shoulder: up/down
-                               seat height; board: up/down world scale
+                               seat height; board: up/down seat height,
+                               left/right world scale
     Left trigger               action / interact / pull grapple
     Right trigger              fire; select in menus
     Left grip                  throw grapple
@@ -337,6 +348,8 @@ are added on start-up; values you chose are never replaced.
                                 binocular viewfinder
         hud_follow_degrees      the HUD stays put until you look this far
                                 away (0 = use hud_follow)
+        hud_lock_height, hud_height_degrees   the HUD at a fixed height
+        recenter_behind_lara    a recentre swings the camera behind her
         cutscene_mode           theatre / normal (gameplay_theatre = 1 too)
         stereo_dxvk, xr_async_end    the two speed-ups (1 = on; restart)
         water_reflection, water_effects, water_waves   water, per eye
