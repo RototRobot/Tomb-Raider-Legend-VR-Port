@@ -41,6 +41,7 @@
 #include "../proxy/window.h"
 #include "../proxy/overlay.h"
 #include "menu_panel.h"
+#include "dpad_gesture.h"
 
 #include "camera_head.h"
 #include "hud_capture.h"
@@ -48,6 +49,7 @@
 #include "tune.h"
 #include "vr_gesture.h"
 #include "finger_input.h"
+#include "godmode/board_leash.h"
 #include "vr_session.h"
 #include "vr_submit.h"
 
@@ -288,7 +290,7 @@ namespace trlvr
         // Immersive first person keeps its hand gestures.
         bool radial_gear_menu_enabled()
         {
-            if (!config().immersive_controls)
+            if (!config().immersive_any())
                 return true;
             // First person: the gear buttons give way to the gestures, and
             // the stick click is the radial menu, the hold the pause (user
@@ -792,9 +794,6 @@ namespace trlvr
         ULONGLONG g_profile_next_check = 0;
         // The A press that skipped the last calibration step is not a jump.
         bool     g_cal_jump_hold = false;
-        // A recentre a moment after the view switch (user 2026-10-06), once
-        // the new camera has settled.
-        ULONGLONG g_view_recenter_at = 0;
         bool     g_cal_drew_guns = false;
 
         using PFN_PlayerCombat = void(__cdecl*)();
@@ -2093,6 +2092,8 @@ namespace trlvr
             bool down = false;
             bool long_fired = false;
             bool click_pending = false;
+            // single_on_press: this press was the second of a double.
+            bool press_was_double = false;
             ULONGLONG pressed_at = 0;
             ULONGLONG released_at = 0;
         };
@@ -2104,6 +2105,10 @@ namespace trlvr
         bool g_squeeze_down[2] = { false, false };
         // The right stick's long press (immersive): switch the view.
         bool g_view_switch_request = false;
+        // Controller scheme: the right stick pushed while held in, a
+        // click-drag like the left stick's radial menu. Seat height / world
+        // scale follow the stick until it is let go.
+        bool g_seat_drag = false;
 
         // The settings overlay (proxy/overlay.cpp) from the controllers:
         // the menu button's hold-to-open (menu_panel.h), and, once the
@@ -2121,6 +2126,12 @@ namespace trlvr
         ULONGLONG g_both_sticks_since = 0;
         bool g_both_sticks_latched = false;
         bool g_overlay_was_open = false;
+        // control_scheme = underworld: X click recentres, double click is
+        // the PDA (user 2026-11-10; it used to arm a D-pad gesture, X then a
+        // left-stick slide, with X + menu for the PDA -- gear is the left
+        // stick's radial menu again).
+        ComplexButton g_complex_x;
+        bool underworld_scheme() { return config().control_scheme == 2; }
 
         void pulse(int logical, ULONGLONG now)
         {
@@ -2129,9 +2140,33 @@ namespace trlvr
         }
 
         // single / twice / held: logical ids, -1 for none.
+        // single_on_press (held unused): the single fires the moment the
+        // button goes down, and a second press within the double-click
+        // window fires twice as well -- for an action that must not lag
+        // (the reset view on X, user 2026-11-12: it waited out the window).
         void complex_update(ComplexButton& c, bool down, ULONGLONG now,
-                            int single, int twice, int held)
+                            int single, int twice, int held,
+                            bool single_on_press = false)
         {
+            if (single_on_press)
+            {
+                if (down && !c.down)
+                {
+                    c.press_was_double = c.click_pending && twice >= 0 &&
+                        now - c.released_at <= kDoubleClickMs;
+                    c.click_pending = false;
+                    pulse(c.press_was_double ? twice : single, now);
+                }
+                if (!down && c.down && !c.press_was_double)
+                {
+                    c.click_pending = true;
+                    c.released_at = now;
+                }
+                if (c.click_pending && now - c.released_at > kDoubleClickMs)
+                    c.click_pending = false;
+                c.down = down;
+                return;
+            }
             if (down && !c.down)
             {
                 c.pressed_at = now;
@@ -2198,9 +2233,11 @@ namespace trlvr
                 }
                 g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
                 g_complex_face = ComplexButton{};
+                g_complex_x = ComplexButton{};
                 g_trigger_down[0] = g_trigger_down[1] = false;
                 g_squeeze_down[0] = g_squeeze_down[1] = false;
                 g_menu_hold = MenuHold{};
+                g_seat_drag = false;
                 return;
             }
 
@@ -2241,6 +2278,13 @@ namespace trlvr
                 {
                     g_both_sticks_since = 0;
                     g_both_sticks_latched = false;
+                }
+                else if (both && left_menu && underworld_scheme() &&
+                         !g_both_sticks_latched)
+                {
+                    // As Underworld: both stick clicks recentre.
+                    g_both_sticks_latched = true;
+                    pulse(GameRecentre, now);
                 }
                 else if (both && !left_menu && !g_both_sticks_latched)
                 {
@@ -2313,12 +2357,47 @@ namespace trlvr
                             "is not up yet");
                 }
             }
+            // Right stick, control_scheme = controller (immersive): a quick
+            // hold (view_switch_hold) switches the view, a click recentres, a
+            // double click is the PDA. Pushing the stick while it is down
+            // (past half, as the left stick's radial menu) starts the seat
+            // drag instead (g_seat_drag, read by the look stick).
+            // Underworld scheme: the same, but a click is accurate aim.
+            if (config().immersive_any() && config().control_scheme != 1)
+            {
+                ComplexButton& s = g_complex_stick[1];
+                const bool r3 = xr_input_button(1, XrButtonStick) &&
+                                !g_both_sticks_latched;
+                float rx = 0.0f, ry = 0.0f;
+                xr_input_stick(1, &rx, &ry);
+                if (!r3)
+                    g_seat_drag = false;
+                if (s.down && !s.long_fired)
+                {
+                    if (rx * rx + ry * ry > 0.25f)
+                    {
+                        s.long_fired = true;
+                        g_seat_drag = r3;
+                    }
+                    else if (r3 && now - s.pressed_at >=
+                             (ULONGLONG)(config().view_switch_hold * 1000.0f))
+                    {
+                        s.long_fired = true;
+                        g_view_switch_request = true;
+                    }
+                }
+                if (underworld_scheme())
+                    complex_update(s, r3, now, GameAim, -1, -1);
+                else
+                    complex_update(s, r3, now, GameRecentre, GamePda, -1);
+            }
             // Right stick (1.0.0 layout): click weapon switch, double
             // click PDA, long press binoculars -- in immersive play the long
             // press switches the view instead (binoculars are on the gear
             // cross). The Index has trackpads for the long-press actions.
-            if (config().immersive_controls)
+            else if (config().immersive_any())
             {
+                g_seat_drag = false;
                 ComplexButton& s = g_complex_stick[1];
                 const bool r3 = xr_input_button(1, XrButtonStick) &&
                                 !g_both_sticks_latched;
@@ -2331,9 +2410,12 @@ namespace trlvr
                 complex_update(s, r3, now, GameWeapon, GamePda, -1);
             }
             else
+            {
+                g_seat_drag = false;
                 complex_update(g_complex_stick[1],
                     xr_input_button(1, XrButtonStick) && !g_both_sticks_latched,
                     now, GameWeapon, GamePda, index ? -1 : GameBinoculars);
+            }
 
             bool face = false;      // the grenade / light / flick button
             if (left == XrControllerWmr || right == XrControllerWmr)
@@ -2350,7 +2432,16 @@ namespace trlvr
                 // the left A / B) on the left.
                 held[GameJump] = xr_input_button(1, XrButtonPrimary);
                 held[GameDive] = xr_input_button(1, XrButtonSecondary);
-                held[GameAim] = xr_input_button(0, XrButtonPrimary);
+                // Underworld: X click recentres, double click is the PDA.
+                // In first person with gestures on, X gives way to them.
+                const bool x_underworld = underworld_scheme() &&
+                    !(config().gesture_controls &&
+                      camera_first_person_active());
+                complex_update(g_complex_x, x_underworld &&
+                               xr_input_button(0, XrButtonPrimary),
+                               now, GameRecentre, GamePda, -1, true);
+                held[GameAim] = !underworld_scheme() &&
+                    xr_input_button(0, XrButtonPrimary);
                 face = xr_input_button(0, XrButtonSecondary);
                 if (index)
                 {
@@ -2367,7 +2458,9 @@ namespace trlvr
             {
                 g_complex_stick[0] = g_complex_stick[1] = ComplexButton{};
                 g_complex_face = ComplexButton{};
+                g_complex_x = ComplexButton{};
                 g_view_switch_request = false;
+                g_seat_drag = false;
                 for (int i = 0; i < kLogicalCount; ++i)
                     g_pulse_until[i] = 0;
             }
@@ -2432,7 +2525,7 @@ namespace trlvr
             QueryPerformanceCounter(&g_last);
 
             log("controls: connected -- OpenXR actions");
-            if (config().immersive_controls)
+            if (config().gesture_controls)
                 log("controls: immersive gestures enabled -- chest + left "
                     "grip toggles the personal light; either grip picks "
                     "up the nearer belt item; fast forward grip release "
@@ -2766,7 +2859,7 @@ namespace trlvr
     {
         const int hand = left ? 0 : 1;
         if (!g_ready || !g_handhold_haptic[hand] ||
-            !config().immersive_controls || !game_has_focus())
+            !config().gesture_controls || !game_has_focus())
             return;
 
         // One short tactile cue per zone entry; the draw hook owns the
@@ -2859,7 +2952,8 @@ namespace trlvr
             const int off = config().left_handed ? 1 : 0;
             const int other = 1 - off;
             const ULONGLONG now = GetTickCount64();
-            const bool available = !menu && camera_tp_view_available();
+            const bool available = !menu && camera_tp_view_available() &&
+                config().tp_scale_control != 1;
             const float up = available ? camera_palm_up(off) : -2.0f;
             float palm[3]{};
             const bool have_palm = available &&
@@ -3156,7 +3250,7 @@ namespace trlvr
     bool vr_input_pouch_item(int item, float body[3], int* held_hand)
     {
         if (!g_ready || !body || !held_hand || item < 0 || item > 1 ||
-            !config().immersive_controls)
+            !config().gesture_controls)
             return false;
         pouch_point(item, body);
         *held_hand = item == 0 ? g_grenade_hand : g_medipack_hand;
@@ -3333,13 +3427,15 @@ namespace trlvr
             g_last_screen = screen;
         }
 
-        // First gameplay since launch: recentre once, after 0.5 s of real
-        // play (no menu, load or cinematic, Lara present), so the view
+        // First gameplay since launch: recentre once on the first frame of
+        // real play (no menu, load or cinematic, Lara present), so the view
         // starts facing forward wherever the player stood (user,
-        // 2026-10-04).
+        // 2026-10-04). Snapped, not glided, and at the first frame rather
+        // than 0.5 s in (user 2026-11-13: resuming a game, the view slid a
+        // little just after the first render -- the recentre glide easing
+        // this one).
         {
             static bool recentred = false;
-            static ULONGLONG playing_since = 0;
             if (!recentred)
             {
                 bool lara = false;
@@ -3354,14 +3450,10 @@ namespace trlvr
                 }
                 const bool playing = !menu && lara &&
                     !ui_loading_screen_active() && !camera_cinematic_playing();
-                const ULONGLONG t = GetTickCount64();
-                if (!playing)
-                    playing_since = 0;
-                else if (!playing_since)
-                    playing_since = t;
-                else if (t - playing_since > 500)
+                if (playing && vr_pose_valid())
                 {
                     recentred = true;
+                    camera_recentre_snap_next();
                     vr_recenter();
                     log("controls: first gameplay since launch -- view "
                         "recentred once");
@@ -3495,14 +3587,14 @@ namespace trlvr
         }
 
         const bool immersive_first_person =
-            config().immersive_controls && camera_first_person_active();
+            config().gesture_controls && camera_first_person_active();
         // Third-person immersive (branch started 2026-10-01): for now the
         // VR-gamepad button layout in full -- nothing taken away for
         // gestures that need the first-person hands -- plus the body
         // gestures that work without them (chest-grip light). See
         // CONTROLS_IMMERSIVE.md.
         const bool immersive_third_person =
-            config().immersive_controls && !camera_first_person_active();
+            config().immersive_any() && !camera_first_person_active();
         if (immersive_third_person && !g_tp_reported)
         {
             g_tp_reported = true;
@@ -3552,9 +3644,9 @@ namespace trlvr
             vr_hand_calibration_clear_menu_request();
             g_menu_request_at = 0;
             const bool hands_shown =
-                (immersive_first_person &&
-                 config().first_person_tracked_hands) ||
-                immersive_third_person;
+                config().hands_on_controllers &&
+                (!camera_first_person_active() ||
+                 config().first_person_tracked_hands);
             if (!hands_shown)
             {
                 log("controls: hand calibration needs immersive controls "
@@ -3652,7 +3744,7 @@ namespace trlvr
                 Button& recentre_button = g_game[GameRecentre];
                 const bool recentre_down = digital(recentre_button.handle);
                 if (recentre_down && !recentre_button.was)
-                    vr_recenter();
+                    vr_reset_view();
                 recentre_button.was = recentre_down;
                 release_all(true);
                 const bool pause_down = digital(g_game[GamePause].handle);
@@ -3747,7 +3839,7 @@ namespace trlvr
         // first so neither view inherits the other's hand state.
         {
             const bool view_key = (GetAsyncKeyState(VK_OEM_5) & 1) != 0;
-            const bool pressed = (config().immersive_controls &&
+            const bool pressed = (config().immersive_any() &&
                                   g_view_switch_request) || view_key;
             g_view_switch_request = false;
             if (pressed && !menu && !tune_gear_tuning_active() &&
@@ -3758,16 +3850,13 @@ namespace trlvr
                 release_all();
                 camera_toggle_view(view_key ? "\\ key"
                                             : "right stick long press");
-                g_view_recenter_at = GetTickCount64() + 250;
-            }
-            // Once the glide has landed: a recentre in mid-flight would
-            // jerk the heading.
-            if (g_view_recenter_at && GetTickCount64() >= g_view_recenter_at &&
-                !camera_view_tween_active())
-            {
-                g_view_recenter_at = 0;
-                if (!menu)
-                    vr_recenter();
+                // Recentred with the switch, not after it (user 2026-11-13:
+                // the view slid sideways once the switch had landed -- the
+                // recentre 250 ms after the flight moved the view by the
+                // head's drift from the old centre, eased by the recentre
+                // glide). Now the recentre glide runs alongside the view's
+                // flight, so it is part of the switch's own move.
+                vr_recenter();
             }
         }
 
@@ -3850,7 +3939,7 @@ namespace trlvr
             Button& recentre_button = g_game[GameRecentre];
             const bool recentre_down = digital(recentre_button.handle);
             if (recentre_down && !recentre_button.was)
-                vr_recenter();
+                vr_reset_view();
             recentre_button.was = recentre_down;
             release_all();
             const bool pause_down = digital(g_game[GamePause].handle);
@@ -3921,7 +4010,7 @@ namespace trlvr
         const int action_hold = swap_triggers ? 1 : 0;
         // Single-pistol mode with pistols (not the long gun) in hand.
         const bool single_pistols_out = config().single_pistols &&
-            config().immersive_controls &&
+            config().gesture_controls &&
             (g_holster_drawn[0] || g_holster_drawn[1]) &&
             weapon_slot_kind(selected_weapon_slot()) != WeaponLong;
 
@@ -3984,7 +4073,7 @@ namespace trlvr
         // Resolve the visible belt items and pistol holsters first. Their
         // pickup consumes this grip edge; only an unclaimed upper-chest grip
         // may toggle the personal light.
-        g_light_key_pulse = config().immersive_controls && !menu &&
+        g_light_key_pulse = config().gesture_controls && !menu &&
             !handhold_active &&
             left_grip && !g_light_grip_was &&
             !g_holster_grip_consumed[0] &&
@@ -4058,7 +4147,7 @@ namespace trlvr
         Button& recentre = g_game[GameRecentre];
         const bool recentre_on = digital(recentre.handle);
         if (recentre_on && !recentre.was)
-            vr_recenter();
+            vr_reset_view();
         recentre.was = recentre_on;
 
         if (!menu)
@@ -4220,9 +4309,31 @@ namespace trlvr
                          (right_trigger && g_holster_drawn[1] &&
                           !g_tuning_trigger_hold[1]);
                 if (b.out == KEY && on)
-                    want[b.vk] = true;
+                {
+                    // Underworld scheme: the buttons keep their physical
+                    // names here (gestures read them), only the keys swap:
+                    // left trigger locks on, right grip interacts. Not in
+                    // binocular view, where G zooms.
+                    int vk = b.vk;
+                    if (underworld_scheme() && !binocular_view_now())
+                    {
+                        if (i == GameInteract)
+                            vk = 'G';
+                        else if (i == GameLockOn)
+                            vk = 'E';
+                    }
+                    want[vk] = true;
+                }
                 else if (b.out == MOUSE_LEFT && on)
+                {
                     want_mouse_left = true;
+                    // The game's default for Fire is H and left mouse, but
+                    // the mouse half can be missing from its saved bindings
+                    // (2026-11-09: Input\5 was "163", and no gun fired). H
+                    // is held too, except in binocular view, where H zooms.
+                    if (!binocular_view_now())
+                        want['H'] = true;
+                }
             }
 
             if (immersive_first_person)
@@ -4276,7 +4387,7 @@ namespace trlvr
                 if (camera_first_person_secure_grip_pulse())
                     want['E'] = true; // grab secures a precarious catch
             }
-            if (config().immersive_controls)
+            if (config().gesture_controls)
             {
                 if (g_light_key_pulse)
                 {
@@ -4939,13 +5050,64 @@ namespace trlvr
             // deflection, integrated with the remainder carried so slow
             // movements are not lost to rounding.
             analog(g_look, &x, &y);
+            // Control scheme "controller": the right stick runs the seat.
+            // Board: y zooms, x turns, click-drag y = seat height, x = world
+            // scale (both schemes). Shoulder:
+            // y zooms, click-drag is the height. Classic: y pitches, click-
+            // drag zooms. While the stick is in (and 200 ms after, its release
+            // spring) it neither turns nor pitches. Saved once it is centred.
+            {
+                const int view = camera_third_person_mode();
+                const bool seat_stick = config().control_scheme != 1 &&
+                    tp_gameplay && !camera_view_first_person() &&
+                    view >= 0 && view <= 2;
+                static ULONGLONG r3_down_at = 0;
+                const ULONGLONG t = GetTickCount64();
+                const bool r3 = xr_input_button(1, XrButtonStick);
+                if (r3)
+                    r3_down_at = t;
+                float height_in = 0.0f, zoom_in = 0.0f, scale_in = 0.0f;
+                if (seat_stick && r3 && g_seat_drag)
+                {
+                    if (view == 2)
+                    {
+                        // Both schemes, as the Underworld port (the
+                        // controller scheme's own up/down scale merged in,
+                        // user 2026-11-24): clicked and pushed, up/down =
+                        // seat height (up = higher), left/right = world
+                        // scale (right = Lara smaller, the world bigger).
+                        // x does not turn the board (zeroed below while the
+                        // stick is in).
+                        height_in = board_stick_axis(y, 0.2f);
+                        scale_in = board_stick_axis(x, 0.2f);
+                    }
+                    else if (view == 1)
+                        height_in = board_stick_axis(y, 0.2f);
+                    else
+                        zoom_in = board_stick_axis(y, 0.2f);
+                }
+                else if (seat_stick && view != 0 && t - r3_down_at > 200)
+                    zoom_in = board_stick_axis(y, 0.2f);
+                if (seat_stick && (r3 || t - r3_down_at <= 200))
+                {
+                    y = 0.0f;
+                    x = 0.0f;
+                }
+                else if (seat_stick && view != 0)
+                    y = 0.0f;
+                camera_view_stick(height_in, zoom_in, scale_in, dt);
+            }
             if (camera_first_person_active() && fabsf(x) < 0.05f)
             {
                 const float pad = gamepad_right_stick_x();
                 if (pad != 0.0f)
                     x = fmaxf(-1.0f, fminf(1.0f, pad));
             }
-            const float speed = tune_look_speed();
+            // Third person: the look stick orbits the camera, so the
+            // camera speed multiplier applies to it too.
+            const float speed = tune_look_speed() *
+                (tp_gameplay && !camera_view_first_person()
+                     ? config().camera_speed : 1.0f);
             // Turn diagnostic (user 2026-10-12: no turning in first person
             // without immersive controls): what the stick reads and where
             // the first-person turn goes, every 2 s while it is pushed.
@@ -4964,7 +5126,9 @@ namespace trlvr
                         g_first_person_turn * 57.2957795f);
                 }
             }
-            if (camera_first_person_active())
+            // The board view with its own heading turns the same way
+            // (camera_head reads the turn as a delta).
+            if (camera_first_person_active() || camera_board_owns_heading())
             {
                 // Independent first-person heading. Letting the third-person
                 // camera own yaw made strafing and jumps swing the headset.
@@ -5124,7 +5288,7 @@ namespace trlvr
 
     bool vr_input_holster_hand_drawn(bool left)
     {
-        return config().immersive_controls &&
+        return config().gesture_controls &&
             g_holster_drawn[left ? 0 : 1];
     }
 
@@ -5135,8 +5299,13 @@ namespace trlvr
 
     bool vr_input_holster_combat_held()
     {
-        return config().immersive_controls &&
+        return config().gesture_controls &&
             (g_holster_drawn[0] || g_holster_drawn[1]);
+    }
+
+    bool vr_input_lock_on_key_held()
+    {
+        return g_held['G'] && !binocular_view_now();
     }
 
     int vr_input_holster_visual_state(bool left)

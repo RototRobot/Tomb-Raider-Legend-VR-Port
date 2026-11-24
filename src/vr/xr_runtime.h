@@ -85,6 +85,10 @@ namespace trlvr
     // for that frame. False when no frame was begun (session not running).
     // Does not touch the Vulkan queue.
     bool xr_frame_wait(XrFrame* out);
+    // A hand's OpenXR aim pose (0 left, 1 right) for the frame last begun:
+    // -Z is where the controller points, which the grip pose's -Z is not.
+    // False when there is none (SteamVR, or the controller is not tracked).
+    bool xr_aim_pose(int hand, TrackedPose* out);
     bool xr_frame_begun();
     // False while the runtime wants frames kept in step but not drawn.
     bool xr_frame_should_render();

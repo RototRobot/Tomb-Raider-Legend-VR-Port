@@ -25,6 +25,10 @@ namespace trlvr
         const char* const kKey = "SOFTWARE\\TRAE-Menu-Hook";
         bool g_want_health = false;
         bool g_want_outfit = false;
+        bool g_want_previous_outfit = false;
+        const uintptr_t kOutfitListHolder = 0x010C0A58;     // -> { ... +0xC: int16* list }
+        const uintptr_t kObjectTable = 0x010EFC90;          // -> { int count; { int, char* name }[] }
+        const uintptr_t kAltPlayerObjectId = kGameTracker + 0x438;
 
         bool read(const char* name, void* out, DWORD size)
         {
@@ -61,6 +65,60 @@ namespace trlvr
 
     void tr7_refill_health() { g_want_health = true; }
     void tr7_next_outfit() { g_want_outfit = true; }
+    void tr7_previous_outfit() { g_want_previous_outfit = true; }
+
+    namespace
+    {
+    // The id of the outfit she wears now (instance +0x94 -> object +8), or 0.
+    int current_outfit_id()
+    {
+        __try
+        {
+            const uintptr_t player =
+                *reinterpret_cast<uintptr_t*>(kGameTracker + kTrackerPlayer);
+            if (!player)
+                return 0;
+            const uintptr_t object = *reinterpret_cast<uintptr_t*>(player + 0x94);
+            if (!object)
+                return 0;
+            return *reinterpret_cast<int*>(object + 8);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return 0;
+        }
+    }
+    }
+
+    bool tr7_current_outfit_name(char* out, int size)
+    {
+        if (!out || size < 2)
+            return false;
+        out[0] = '\0';
+        const int id = current_outfit_id();
+        if (id <= 0)
+            return false;
+        __try
+        {
+            const uintptr_t table = *reinterpret_cast<uintptr_t*>(kObjectTable);
+            if (!table || id > *reinterpret_cast<int*>(table))
+                return false;
+            const char* name = *reinterpret_cast<const char* const*>(
+                table + 4 + (id - 1) * 8 + 4);
+            if (!name)
+                return false;
+            int i = 0;
+            for (; i < size - 1 && name[i]; ++i)
+                out[i] = name[i];
+            out[i] = '\0';
+            return i > 0;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            out[0] = '\0';
+            return false;
+        }
+    }
 
     namespace
     {
@@ -102,6 +160,48 @@ namespace trlvr
 
     }
 
+    namespace
+    {
+    // The game's own next-outfit list (int16 count, then ids, per level) read
+    // backwards: the id before the current one, wrapping to the last. The
+    // switch takes any id through altPlayerObjectID (decoded from 0x5A40B0).
+    void do_previous_outfit()
+    {
+        __try
+        {
+            const uintptr_t holder =
+                *reinterpret_cast<uintptr_t*>(kOutfitListHolder);
+            if (!holder)
+                return;
+            const short* list = *reinterpret_cast<const short* const*>(holder + 0xC);
+            if (!list)
+                return;
+            const int count = list[0];
+            if (count <= 0 || count > 256)
+                return;
+            const int current = current_outfit_id();
+            int index = count;                  // not in the list: wrap to the last
+            for (int i = 0; i < count; ++i)
+                if (list[1 + i] == current)
+                {
+                    index = i;
+                    break;
+                }
+            index = index <= 0 ? count - 1 : index - 1;
+            const int target = list[1 + index];
+            if (target <= 0)
+                return;
+            *reinterpret_cast<int*>(kAltPlayerObjectId) = target;
+            reinterpret_cast<void(__cdecl*)()>(kSwitchPlayerCharacter)();
+            log("tr7: switched to the previous outfit (id %d)", target);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            log("tr7: switching to the previous outfit faulted");
+        }
+    }
+    }
+
     void tr7_menu_hook_frame()
     {
         // Cleared first: a Present the action itself causes comes back here.
@@ -114,6 +214,11 @@ namespace trlvr
         {
             g_want_outfit = false;
             do_next_outfit();
+        }
+        if (g_want_previous_outfit)
+        {
+            g_want_previous_outfit = false;
+            do_previous_outfit();
         }
     }
 

@@ -41,10 +41,14 @@ set SRC=%SRC% "%ROOT%src\vr\cull.cpp"
 set SRC=%SRC% "%ROOT%src\vr\camera_head.cpp"
 set SRC=%SRC% "%ROOT%src\vr\stereo.cpp"
 set SRC=%SRC% "%ROOT%src\vr\ui_space.cpp"
+set SRC=%SRC% "%ROOT%src\vr\gaze_target.cpp"
 set SRC=%SRC% "%ROOT%src\vr\vr_input.cpp"
 set SRC=%SRC% "%ROOT%src\vr\vr_gesture.cpp"
+set SRC=%SRC% "%ROOT%src\vr\dpad_gesture.cpp"
 set SRC=%SRC% "%ROOT%src\vr\water_stereo.cpp"
 set SRC=%SRC% "%ROOT%src\vr\reflection_stereo.cpp"
+set SRC=%SRC% "%ROOT%src\vr\water_waves.cpp"
+set SRC=%SRC% "%ROOT%src\vr\env_reflect.cpp"
 set SRC=%SRC% "%ROOT%src\vr\input_labels.cpp"
 set SRC=%SRC% "%ROOT%src\vr\lang.cpp"
 set SRC=%SRC% "%ROOT%src\vr\hud_capture.cpp"
@@ -53,6 +57,8 @@ set SRC=%SRC% "%ROOT%src\vr\physics\body_push.cpp"
 set SRC=%SRC% "%ROOT%src\vr\physics\body_volumes.cpp"
 set SRC=%SRC% "%ROOT%src\vr\godmode\god_carry.cpp"
 set SRC=%SRC% "%ROOT%src\vr\godmode\god_pluck.cpp"
+set SRC=%SRC% "%ROOT%src\vr\godmode\god_throw.cpp"
+set SRC=%SRC% "%ROOT%src\vr\godmode\god_torso.cpp"
 set SRC=%SRC% "%ROOT%src\vr\physics\soft_body.cpp"
 set SRC=%SRC% "%ROOT%src\vr\physics\rear_jiggle.cpp"
 set SRC=%SRC% "%ROOT%src\vr\physics\rear_shape.cpp"
@@ -94,7 +100,7 @@ rem Deliberately NOT linking d3d9.lib: this DLL *is* d3d9.dll, and an import
 rem library would make it import from itself. Every entry point is resolved
 rem from the backend with GetProcAddress instead. dxguid.lib supplies the
 rem interface IIDs only, and pulls in no DLL.
-link %LFLAGS% "%OUT%\*.obj" "%OPENXRLIB%" /DELAYLOAD:openxr_loader.dll delayimp.lib dxguid.lib user32.lib kernel32.lib advapi32.lib
+link %LFLAGS% "%OUT%\*.obj" "%OPENXRLIB%" /DELAYLOAD:openxr_loader.dll delayimp.lib dxguid.lib user32.lib kernel32.lib advapi32.lib winmm.lib
 if errorlevel 1 (
     echo BUILD FAILED ^(link^)
     exit /b 1

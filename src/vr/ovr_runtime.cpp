@@ -570,6 +570,7 @@ namespace trlvr
         return true;
     }
 
+    bool ovr_aim_pose(int, TrackedPose*) { return false; }
     bool ovr_frame_begun() { return g_frame_begun; }
     bool ovr_frame_should_render() { return g_frame_begun; }
     double ovr_frame_wait_ms() { return g_wait_ms; }

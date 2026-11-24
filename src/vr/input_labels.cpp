@@ -125,10 +125,33 @@ namespace trlvr
             const bool lefty = config().left_handed;
             const char* action_trigger = lefty ? "RT" : "LT";
             const char* fire_trigger = lefty ? "LT" : "RT";
-            const bool immersive = config().immersive_controls;
-            const bool first = immersive && camera_first_person_active();
-            const bool third = immersive && !first;
+            const bool immersive = config().immersive_any();
+            const bool first = config().gesture_controls && camera_first_person_active();
+            const bool third = immersive && !camera_first_person_active();
 
+            // Underworld scheme outside first-person gestures: its own
+            // places for the keys it moves.
+            if (config().control_scheme == 2 && !first)
+            {
+                if (same(key, "E"))
+                    return "Right Grip";
+                if (same(key, "G"))
+                    return action_trigger;
+                if (same(key, "Z"))
+                    return "Right Stick";
+                if (same(key, "Tab"))
+                    return "X Double";
+                if (same(key, "Home"))
+                    return "Left Stick Hold + Up";
+                if (any(key, "Page Down", "PageDown", "PgDn", "Pg Dn"))
+                    return "Left Stick Hold + Right";
+                if (same(key, "End"))
+                    return "Left Stick Hold + Down";
+                if (any(key, "Delete", "Del"))
+                    return "Left Stick Hold + Left";
+                if (any(key, "Escape", "Esc"))
+                    return "Menu";
+            }
             if (same(key, "E"))
                 return action_trigger;
             if (any(key, "Mouse 1", "Mouse Button 1",
@@ -617,7 +640,7 @@ namespace trlvr
         // VR labels in a level, retail labels in the front end.
         void update_labels()
         {
-            if (!config().immersive_controls)
+            if (!config().immersive_any())
                 return;
             int count = 0;
             const char** table = string_table(&count);
@@ -760,7 +783,7 @@ namespace trlvr
             // keep-these-settings check (user test 2026-10-10). Water
             // Effects in a level is the hardcore toggle: toggled here, the
             // screen is not pushed and the water setting never changes.
-            if (screen == 4700 && in_level() && config().immersive_controls &&
+            if (screen == 4700 && in_level() && config().immersive_any() &&
                 item_is_hardcore(item))
             {
                 toggle_hardcore("pause menu, Water Effects entry");
@@ -1222,7 +1245,7 @@ namespace trlvr
         // other entry is undone and blocked for now.
         int __cdecl detour_keep_check(int arg)
         {
-            if (!in_level() || !config().immersive_controls ||
+            if (!in_level() || !config().immersive_any() ||
                 vr_input_top_screen_id() != 2)
                 return g_keep_check(arg);
 
@@ -1298,7 +1321,7 @@ namespace trlvr
         int __cdecl detour_test_display(void* menu, void* item, int screen,
                                         const char* text, int control)
         {
-            if (control == 5 && in_level() && config().immersive_controls &&
+            if (control == 5 && in_level() && config().immersive_any() &&
                 item_is_hardcore(item))
             {
                 toggle_hardcore("pause menu, display test");
@@ -1306,7 +1329,7 @@ namespace trlvr
             }
             // Any other Display-page entry in a level: the device rebuild
             // crashed the game in VR (user 2026-10-10), so it is not run.
-            if (control == 5 && in_level() && config().immersive_controls)
+            if (control == 5 && in_level() && config().immersive_any())
             {
                 static int reports = 0;
                 if (reports++ < 8)
@@ -1363,7 +1386,7 @@ namespace trlvr
         int __cdecl detour_switch_nextgen(void* menu, void* item, int screen,
                                           const char* text, int control)
         {
-            if (!config().immersive_controls || !in_level())
+            if (!config().immersive_any() || !in_level())
                 return g_switch_nextgen(menu, item, screen, text, control);
             static int reports = 0;
             if (reports < 4)
@@ -1391,9 +1414,11 @@ namespace trlvr
 
     void input_labels_update()
     {
+        if (!config().vr_enabled)
+            return;
         update_labels();
         settings_snapshot();
-        if (in_level() && config().immersive_controls &&
+        if (in_level() && config().immersive_any() &&
             vr_input_top_screen_id() == 2)
         {
             __try
@@ -1408,6 +1433,13 @@ namespace trlvr
 
     void input_labels_init()
     {
+        // Flat run (play_flat_mod.bat / vr enabled = 0): leave the pause menu
+        // alone so Widescreen and the Display page's resolution work.
+        if (!config().vr_enabled)
+        {
+            log("controls: flat run -- pause-menu takeovers not installed");
+            return;
+        }
         // push esi / mov esi,[esp+8] -- two complete instructions.
         const unsigned char sig[] = { 0x56, 0x8B, 0x74, 0x24, 0x08 };
         if (hook_install((void*)kGetButtonName, (void*)&detour,
@@ -1429,7 +1461,7 @@ namespace trlvr
                      sizeof(nextgen_sig),
                      "menucommand_PcCycleDisplayModeOption (diagnostic)");
         // cmp dword ptr [esp+14h], 5 -- one complete instruction.
-        if (config().immersive_controls)
+        if (config().immersive_any())
             hook_install((void*)0x004E5030, (void*)&detour_test_display,
                          (void**)&g_test_display, push_sig, sizeof(push_sig),
                          "menucommand_PcTestDisplayMode (pause-menu hardcore "
@@ -1437,7 +1469,7 @@ namespace trlvr
         // push ebx / push ebp / push esi / mov esi, ecx -- four complete
         // instructions.
         const unsigned char select_sig[] = { 0x53, 0x55, 0x56, 0x8B, 0xF1 };
-        if (config().immersive_controls)
+        if (config().immersive_any())
             hook_install((void*)0x004F55F0, (void*)&detour_menu_select,
                          (void**)&g_menu_select, select_sig,
                          sizeof(select_sig),
@@ -1445,12 +1477,12 @@ namespace trlvr
         // push 0 / push 4700 -- two complete instructions.
         const unsigned char keep_sig[] =
             { 0x6A, 0x00, 0x68, 0x5C, 0x12, 0x00, 0x00 };
-        if (config().immersive_controls)
+        if (config().immersive_any())
             hook_install((void*)0x004E5780, (void*)&detour_keep_check,
                          (void**)&g_keep_check, keep_sig, sizeof(keep_sig),
                          "VR Settings keep-settings check (pause-menu "
                          "hardcore toggle)");
-        if (config().immersive_controls)
+        if (config().immersive_any())
             hook_install((void*)0x004E5560, (void*)&detour_switch_nextgen,
                          (void**)&g_switch_nextgen, nextgen_sig,
                          sizeof(nextgen_sig),
@@ -1459,7 +1491,7 @@ namespace trlvr
         // mov ecx, [0x010FC914] -- one complete instruction.
         const unsigned char wide_sig[] =
             { 0x8B, 0x0D, 0x14, 0xC9, 0x0F, 0x01 };
-        g_wide_menu_setup = config().immersive_controls;
+        g_wide_menu_setup = config().immersive_any();
         if (hook_install((void*)0x0040CA30, (void*)&detour_set_wide,
                          (void**)&g_set_wide, wide_sig, sizeof(wide_sig),
                          "RenderG2_SetWideScreen (kept off; pause-menu "

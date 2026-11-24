@@ -44,6 +44,10 @@ namespace trlvr
 
     // Main scene, per eye: the right eye samples the twin.
     void reflection_stereo_eye_textures(IDirect3DDevice9* device, int eye);
+    // Whether this draw samples a texture that differs per eye (the
+    // reflection twin or a half of the screen copy): such draws keep the
+    // two-pass path, which swaps them per eye.
+    bool reflection_stereo_draw_samples_per_eye(IDirect3DDevice9* device);
     void reflection_stereo_restore_textures(IDirect3DDevice9* device);
 
     // Water Effects (2026-10-11): the game copies the whole screen into a
@@ -63,8 +67,17 @@ namespace trlvr
     // the screen copy: split by eye / split, eyes swapped / whole (retail).
     void reflection_stereo_cycle_mode(bool copy);
     int reflection_stereo_reflection_mode();
+    // The settings menu's choice (user 2026-11-22: function keys overlap):
+    // 0 per eye, 1 one image (retail), 2 not drawn. This session only.
+    void reflection_stereo_set_reflection_mode(int mode);
     // Once per kind of draw: what samples the reflection or the copy.
     void reflection_stereo_note_draw(IDirect3DDevice9* device, bool stereo);
+    // The Water Effects screen layer: the game's c0 is the bare projection
+    // and the screen copy is bound. Drawn per eye with the game's c0.
+    // kind_out: 0 over the screen copy, 1 over the reflection.
+    bool reflection_stereo_screen_layer(IDirect3DDevice9* device,
+                                        const float* c0,
+                                        int* kind_out = nullptr);
     // A reflection draw kept the game's one camera.
     void reflection_stereo_note_unsubstituted();
 

@@ -7,6 +7,7 @@
 
 #include "../vr/vr_math.h"
 #include "../vr/vr_gesture.h"
+#include "../vr/dpad_gesture.h"
 
 #include <cmath>
 #include <cstdio>
@@ -103,12 +104,44 @@ namespace
 #include "body_volumes_tests.inc"
 #include "god_carry_tests.inc"
 #include "god_pluck_tests.inc"
+#include "god_throw_tests.inc"
+#include "god_torso_tests.inc"
 #include "soft_body_tests.inc"
 #include "rear_jiggle_tests.inc"
 #include "rear_shape_tests.inc"
 #include "board_leash_tests.inc"
 #include "menu_panel_tests.inc"
 #include "finger_input_tests.inc"
+
+static void test_go_go_reach()
+{
+    const float body[3] = { 0.0f, 1.0f, 0.0f };
+    float out[3];
+    // Inside the start: untouched.
+    const float close[3] = { 0.0f, 1.0f, -0.3f };
+    go_go_reach(close, body, 0.4f, 1.0f, out);
+    CHECK(near(out[0], 0.0f) && near(out[1], 1.0f) && near(out[2], -0.3f));
+    // 30 cm past the start: `range` further out along body -> hand.
+    const float full[3] = { 0.0f, 1.0f, -0.7f };
+    go_go_reach(full, body, 0.4f, 1.0f, out);
+    CHECK(near(out[0], 0.0f) && near(out[1], 1.0f) && near(out[2], -1.7f));
+    // 15 cm past: a quarter of it (the square).
+    const float half[3] = { 0.0f, 1.0f, -0.55f };
+    go_go_reach(half, body, 0.4f, 2.0f, out);
+    CHECK(near(out[2], -0.55f - 0.5f));
+    // Capped at 4 x range.
+    const float far[3] = { 0.0f, 1.0f, -2.0f };
+    go_go_reach(far, body, 0.4f, 1.0f, out);
+    CHECK(near(out[2], -6.0f));
+    // Off (range 0) and the hand exactly on the body: untouched.
+    go_go_reach(full, body, 0.4f, 0.0f, out);
+    CHECK(near(out[2], -0.7f));
+    go_go_reach(body, body, 0.0f, 1.0f, out);
+    CHECK(near(out[1], 1.0f) && near(out[2], 0.0f));
+    // A 2 m cap: the far hand (6 m without it) goes only 2 m further.
+    go_go_reach(far, body, 0.4f, 1.0f, out, 2.0f);
+    CHECK(near(out[2], -4.0f));
+}
 
 int main()
 {
@@ -119,12 +152,15 @@ int main()
     test_body_volumes_legend();
     test_god_carry();
     test_god_pluck();
+    test_god_throw();
+    test_god_torso();
     test_soft_body();
     test_rear_jiggle();
     test_rear_shape();
     test_board_leash();
     test_menu_panel();
     test_finger_input();
+    test_go_go_reach();
     printf("  %d god-mode checks run quietly\n\n", g_quiet_checks);
 
     // --- reading the game's projection back out of its registers ----------
@@ -329,6 +365,143 @@ int main()
         check(close(no_drag.m[0][0], 1.0f) && close(no_drag.m[2][2], 1.0f) &&
               close(no_drag.m[0][2], 0.0f) && close(no_drag.m[2][0], 0.0f),
               "full HUD follow reduces the residual rotation to identity");
+
+        {
+            // The Underworld scheme's D-pad gesture.
+            DpadGesture dpad;
+            DpadOut d = dpad_gesture_update(dpad, true, false, 0.0f, 0.0f, 0.01f);
+            check(d.modifier && !d.stick_to_game, "X arms the D-pad and holds Lara still");
+            dpad_gesture_update(dpad, false, false, 0.0f, 0.0f, 0.01f);
+            d = dpad_gesture_update(dpad, false, false, 0.0f, 1.0f, 0.01f);
+            check(d.buttons == kDpadUp, "a slide after a tap presses that direction");
+            d = dpad_gesture_update(dpad, false, false, 0.0f, 0.0f, 0.01f);
+            check(!d.modifier && d.buttons == 0, "back at the centre it disarms");
+            d = dpad_gesture_update(dpad, false, false, 0.8f, 0.0f, 0.01f);
+            check(d.buttons == 0 && d.stick_to_game, "disarmed, the stick moves Lara");
+
+            DpadGesture dpad_expiry;
+            dpad_gesture_update(dpad_expiry, true, false, 0.0f, 0.0f, 0.01f);
+            d = dpad_gesture_update(dpad_expiry, false, false, 0.0f, 0.0f, 2.0f);
+            check(!d.modifier, "an unused tap disarms by itself");
+
+            DpadGesture dpad_pushed;
+            d = dpad_gesture_update(dpad_pushed, true, false, 1.0f, 0.0f, 0.01f);
+            check(d.buttons == 0, "a stick already pushed must centre first");
+            DpadGesture dpad_cancel;
+            dpad_gesture_update(dpad_cancel, true, false, 0.0f, 0.0f, 0.01f);
+            d = dpad_gesture_update(dpad_cancel, true, true, 0.0f, 0.0f, 0.01f);
+            check(!d.modifier, "a cancel disarms");
+
+            // First-person arm lengthening.
+            const float shoulder[3] = { 10.0f, 0.0f, 0.0f };
+            float slide[3], stretch = 0.0f;
+            const float near_hand[3] = { 60.0f, 0.0f, 0.0f };
+            arm_reach_extension(shoulder, 30.0f, 30.0f, near_hand, 1.4f,
+                                slide, &stretch);
+            check(stretch == 1.0f && slide[0] == 0.0f,
+                  "a hand within reach leaves the arm alone");
+            const float far_hand[3] = { 90.0f, 0.0f, 0.0f };
+            arm_reach_extension(shoulder, 30.0f, 30.0f, far_hand, 1.4f,
+                                slide, &stretch);
+            check(close(10.0f + slide[0] + 60.0f * stretch - 1.0f, 90.0f, 1e-3f),
+                  "shoulder slide plus longer bones reach a far hand");
+            check(slide[0] > 0.0f && slide[0] <= 0.12f * 60.0f + 1e-4f,
+                  "the shoulder slides toward the hand, within its limit");
+            const float very_far[3] = { 400.0f, 0.0f, 0.0f };
+            arm_reach_extension(shoulder, 30.0f, 30.0f, very_far, 1.4f,
+                                slide, &stretch);
+            check(stretch == 1.4f, "the lengthening stops at its limit");
+            arm_reach_extension(shoulder, 30.0f, 30.0f, far_hand, 1.0f,
+                                slide, &stretch);
+            check(stretch == 1.0f && slide[0] == 0.0f,
+                  "a limit of 1 turns the lengthening off");
+
+            const float axis[3] = { 0.0f, 0.0f, 2.0f };
+            const float pivot[3] = { 1.0f, 2.0f, 3.0f };
+            const Mat4 s = stretch_along(axis, 1.5f, pivot);
+            const auto apply = [&s](float x, float y, float z, int i) {
+                return x*s.m[0][i] + y*s.m[1][i] + z*s.m[2][i] + s.m[3][i];
+            };
+            check(close(apply(1.0f, 2.0f, 3.0f, 2), 3.0f, 1e-4f) &&
+                  close(apply(1.0f, 2.0f, 5.0f, 2), 6.0f, 1e-4f) &&
+                  close(apply(4.0f, 7.0f, 3.0f, 0), 4.0f, 1e-4f),
+                  "stretch_along keeps its pivot and scales only along the axis");
+        }
+
+        {
+            // Lazy HUD follow, in headset view rotations without roll.
+            const auto look = [](float yaw, float up) {
+                Mat4 p = Mat4::identity();
+                p.m[1][1] = cosf(up);  p.m[1][2] = sinf(up);
+                p.m[2][1] = -sinf(up); p.m[2][2] = cosf(up);
+                return yaw_rotation(yaw) * p;
+            };
+            const auto identity = [](const Mat4& m) {
+                for (int r = 0; r < 3; ++r)
+                    for (int c = 0; c < 3; ++c)
+                        if (fabsf(m.m[r][c] - (r == c ? 1.0f : 0.0f)) > 2e-3f)
+                            return false;
+                return true;
+            };
+            const float limit = 20.0f * 0.01745329f;
+            HudFollow f;
+            hud_follow_step(f, look(0.4f, 0.2f), 0.0f, limit);
+            check(identity(hud_follow_relative(f, look(0.4f, 0.2f))),
+                  "lazy HUD starts straight in front of a pitched, turned head");
+
+            const float kept_yaw = f.yaw;
+            const Mat4 near_gaze = look(0.4f + 0.2f, 0.2f);
+            hud_follow_step(f, near_gaze, 0.011f, limit);
+            check(f.yaw == kept_yaw && !f.moving,
+                  "lazy HUD stays in the room while the gaze is inside the zone");
+            check(!identity(hud_follow_relative(f, near_gaze)),
+                  "inside the zone the head moves relative to the HUD");
+
+            const Mat4 far_gaze = look(0.4f + 1.0f, 0.2f);
+            for (int i = 0; i < 300; ++i)
+                hud_follow_step(f, far_gaze, 0.011f, limit);
+            check(!f.moving &&
+                  close(wrap_pi(f.yaw - yaw_of(far_gaze)), 0.0f, 0.03f),
+                  "past the zone the HUD glides back in front and stops");
+
+            HudFollow seam;
+            hud_follow_step(seam, look(3.1f, 0.0f), 0.0f, limit);
+            hud_follow_step(seam, look(-3.1f, 0.0f), 0.011f, limit);
+            check(!seam.moving,
+                  "a small turn across the +-180 degree seam is a small turn");
+
+            HudFollow settle;
+            hud_follow_step(settle, look(0.0f, 0.0f), 0.0f, limit);
+            const Mat4 aside = look(0.2f, 0.0f);
+            hud_follow_step(settle, aside, 0.011f, limit);
+            for (int i = 0; i < 400; ++i)
+                hud_follow_step(settle, aside, 0.011f, limit);
+            check(close(wrap_pi(settle.yaw - yaw_of(aside)), 0.0f, 0.03f),
+                  "a still head draws an off-centre HUD back to the centre");
+
+            // [vr] hud_lock_height: heading only, level, and looking down at
+            // the HUD never sets it moving.
+            HudFollow level;
+            hud_follow_step(level, look(0.4f, 0.3f), 0.0f, limit, true);
+            check(close(level.pitch, 0.0f, 1e-5f) &&
+                  close(wrap_pi(level.yaw - yaw_of(look(0.4f, 0.3f))),
+                        0.0f, 1e-3f),
+                  "a level-only HUD starts at the head's heading, level");
+            for (int i = 0; i < 200; ++i)
+                hud_follow_step(level, look(0.4f, 0.6f), 0.011f, limit, true);
+            check(!level.moving && close(level.pitch, 0.0f, 1e-5f),
+                  "looking down at a level-only HUD leaves it in place");
+            const Mat4 gaze = look(0.4f, 0.3f);
+            check(identity(hud_frame_relative(
+                      yaw_of(gaze), asinf(gaze.m[1][2]), gaze)),
+                  "hud_frame_relative matches hud_follow_relative's frame");
+
+            // Height: with the head straight ahead, a HUD swung up (negative
+            // pitch, engine Y down) has its centre ray pointing up (-Y).
+            const Mat4 up = hud_frame_relative(0.0f, -0.3f, Mat4::identity());
+            check(up.m[2][1] < -0.29f && up.m[2][1] > -0.30f,
+                  "a positive HUD height swings the HUD up");
+        }
 
         Mat4 pitch = Mat4::identity();
         pitch.m[1][1] = cosf(0.30f);  pitch.m[1][2] = -sinf(0.30f);

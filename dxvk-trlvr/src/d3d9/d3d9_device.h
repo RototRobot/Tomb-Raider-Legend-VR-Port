@@ -36,6 +36,8 @@
 #include "../util/util_lru.h"
 #include "../util/util_unmap.h"
 
+struct D3D9_VR_STEREO_DRAW;   // d3d9_vr.h (TRL VR fork)
+
 namespace dxvk {
 
   class D3D9InterfaceEx;
@@ -532,6 +534,21 @@ namespace dxvk {
             UINT             PrimitiveCount,
       const void*            pVertexStreamZeroData,
             UINT             VertexStreamZeroStride);
+
+    // TRL VR fork: one draw, both eyes (d3d9_vr.h, IDirect3DVR9_1).
+    HRESULT DrawStereoVR(
+            bool                          Indexed,
+            D3DPRIMITIVETYPE              PrimitiveType,
+            INT                           BaseVertexIndex,
+            UINT                          MinVertexIndex,
+            UINT                          NumVertices,
+            UINT                          StartIndexOrVertex,
+            UINT                          PrimitiveCount,
+      const ::D3D9_VR_STEREO_DRAW*        pStereo);
+
+    // TRL VR fork: frame end off the game's thread (IDirect3DVR9_1).
+    uint64_t FlushForVR();
+    void WaitCsSequenceVR(uint64_t SequenceNumber);
 
     HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveUP(
             D3DPRIMITIVETYPE PrimitiveType,

@@ -18,6 +18,10 @@ namespace trlvr
     // frame, so the widget after the button found no window).
     void tr7_refill_health();
     void tr7_next_outfit();
+    void tr7_previous_outfit();
+    // The model name of the outfit she is wearing ("lara_biker"), false when
+    // there is no player (menu, loading).
+    bool tr7_current_outfit_name(char* out, int size);
     void tr7_menu_hook_frame();
     // Null when the game's tracker is not there.
     float* tr7_time_multiplier();

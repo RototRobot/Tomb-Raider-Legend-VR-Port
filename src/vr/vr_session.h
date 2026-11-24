@@ -83,6 +83,9 @@ namespace trlvr
     // mouse and keyboard the headset is rarely pointing where the desk is,
     // and reaching for the keyboard turns the chair.
     void vr_recenter();
+    // The player's reset view: vr_recenter plus the live view's hand
+    // adjustments (zoom, side, height, dragged board/theatre), scale kept.
+    void vr_reset_view();
     unsigned vr_recenter_generation();
 
     // The head's displacement from the recentred origin, in engine units,
@@ -126,6 +129,9 @@ namespace trlvr
     // A controller's raw pose in SteamVR's tracking space: position in
     // metres and the 3x3 rotation (row-major, local axes as columns).
     bool vr_controller_tracking_pose(bool left, float pos[3], float rot[9]);
+    // The same for pointing at menus: OpenXR's aim pose where there is one,
+    // otherwise the controller pose.
+    bool vr_pointer_tracking_pose(bool left, float pos[3], float rot[9]);
     // The headset's yaw-only forward in tracking space (x, z), unit.
     bool vr_hmd_tracking_forward(float* fx, float* fz);
 
@@ -166,6 +172,8 @@ namespace trlvr
     // camera-to-world transform without feeding controller motion into game
     // simulation.
     bool vr_controller_head_pose(bool left, Mat4* controller_to_head);
+    // The pointing pose of vr_pointer_tracking_pose, in the same head frame.
+    bool vr_pointer_head_pose(bool left, Mat4* pointer_to_head);
 
     // A yaw-only body-frame point (metres, as vr_controller_body_position
     // reports it) in the same head space and units as the translation of
@@ -310,6 +318,11 @@ namespace trlvr
     // the headset's own frustum, for drawing with fixed-function clipping.
     bool vr_head_clip_matrix(Eye eye, float out[4][4]);
     bool vr_substitute_c0_for_eye(const float* in_regs16, float* out_regs16, Eye eye);
+    // The other eye of the draw just substituted (stereo draws in DXVK work
+    // out both eyes back to back): a world-space draw reuses the first eye's
+    // decomposition and only takes this eye's tail; anything else goes the
+    // full way.
+    bool vr_substitute_c0_other_eye(const float* in_regs16, float* out_regs16, Eye eye);
 
     // Remember what the game asked for and what we uploaded instead, so a
     // draw can revisit the decision. The state that identifies the interface

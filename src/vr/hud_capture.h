@@ -13,6 +13,9 @@ namespace trlvr
     // be skipped: in third-person immersive, an interface draw of one of
     // the game's gear-cross icons or its tile frame (the 3D cross replaces
     // them, whatever fade group or state shows them).
+    // A scene capture is running: hud_capture_note_draw reads the device's
+    // constants and states back.
+    bool hud_capture_scene_active();
     bool hud_capture_note_draw(IDirect3DDevice9* device);
     // Once per presented frame, on the render thread.
     void hud_capture_frame();

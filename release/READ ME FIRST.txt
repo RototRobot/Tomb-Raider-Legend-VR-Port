@@ -10,17 +10,73 @@ WHAT YOU NEED
   * Tomb Raider: Legend for PC -- the Steam or the GOG release
   * A PC VR headset with tracked controllers, and SteamVR (or another
     OpenXR runtime that runs 32-bit games)
-    (tested on HP Reverb G2; Oculus Touch, Index and WMR bindings included)
+    (tested on HP Reverb G2, and on Meta Quest 3 over Virtual Desktop with
+    its OpenXR runtime, VDXR; Oculus Touch, Index and WMR bindings included)
 
 The original game files are not modified. The mod adds files beside trl.exe,
 and its launcher writes a separate patched copy named trl_vr.exe.
 
 
+NEW SINCE 1.1.0
+---------------
+  * OpenXR with no silent fallback: if OpenXR cannot start you see the
+    failure, rather than the game quietly using SteamVR. To use OpenVR /
+    SteamVR, pick it in the settings panel (VR runtime section) or set
+    vr_runtime = openvr in trlvr.ini, then restart the game. vr_runtime =
+    auto keeps the old OpenXR-then-OpenVR behaviour.
+  * Faster. Both eyes of a draw are recorded in one call and the frame is
+    ended on its own thread. Both are on by default; switch them off in
+    settings panel > System > Performance if you suspect them (restart
+    needed).
+  * God mode (board view): throw Lara and she flies, bounces and lands as a
+    ragdoll; use two hands at once; grab her torso with a fist; swat her
+    over with a fast free hand; and your hands reach further than your arms
+    (arm stretch). First-person full-body arms stretch to your controllers
+    too (first_person_arm_stretch).
+  * Reset view: F1, or the settings panel's button, recentres the view and
+    now glides there. Camera speed is a setting.
+  * Camera defaults: each view's zoom, height, side and scale sliders
+    (settings panel > Cameras) are where a recentre puts it back; the stick
+    and palm sliders move it from there. A recentre also swings the
+    shoulder and board cameras round behind Lara (recenter_behind_lara).
+  * Board camera: it keeps its own heading, stops at geometry instead of
+    going through it, no longer drifts when orbiting beside a wall, and
+    camera collision can be switched off.
+  * Gaze lock-on: in third person, lock-on picks the target nearest where you
+    are looking; with nothing locked, the lock-on button aims freely from
+    your head.
+  * Control scheme (settings panel > Controls, or [controls] control_scheme):
+    controller (default), interaction or alternate, an Underworld VR-style
+    layout. A D-pad gesture (click the modifier, then slide the left stick)
+    picks the gear items. Controls > Button layout shows your live layout.
+  * immersive_controls is now two settings: hands_on_controllers (Lara's
+    hands follow yours) and gesture_controls (first-person gestures).
+  * Menus, gameplay HUD and binocular viewfinder have their own sizes
+    (ui_scale, hud_scale, binocular_scale), and hud_follow_degrees keeps
+    the HUD still until you look away from it. Lock HUD height (on by
+    default) keeps the HUD at one height as it turns with you, so you glance
+    down at it like a dashboard; HUD height sets where.
+  * Body physics: improved.
+  * Menus and loading screens are shown at 4:3 as well as movies
+    (movie_widen_4x3), and the screen-wipe fade is drawn properly.
+  * Water: reflections and the Water Effects distortion are drawn for each
+    eye, the waves stay on the water surface, and shiny surfaces'
+    reflections follow your head, not your gaze. Both water options are in
+    System > Performance (restart to change).
+  * Settings presets (body physics, god-mode reach and toss), a "Show
+    advanced settings" switch (System tab) that hides the tuning pages, a
+    "Show debug settings" switch for the fine sliders on the Body and God
+    mode tabs, an outfit row, and a "VR runtime" section.
+  * HD texture pack fix: mipmaps rebuilt with a guided script (see OPTIONAL:
+    HD TEXTURE PACK FIX).
+  * Meta Quest: OpenXR's own grip pose is used (hands no longer tilt) and
+    finger tracking is on by default.
+
+
 NEW IN 1.1.0
 ------------
   * OpenXR, with OpenVR as the fallback. The mod uses OpenXR by default and
-    falls back to OpenVR / SteamVR if OpenXR cannot start. Delete
-    openxr_loader.dll (or set vr_runtime = openvr) to always use OpenVR.
+    falls back to OpenVR / SteamVR if OpenXR cannot start.
     The main menu shows the version and the runtime in use.
   * A settings panel in the headset: hold both sticks in for 0.6 s
     (Oculus Touch: hold the left menu button), or press Insert. Point at it
@@ -61,6 +117,9 @@ dialog says (trlvr.ini, [vr]):
 
 Set any of them to "game" to keep the Setup dialog's choice instead.
 
+Black scene in the headset? Reopen the game's Setup dialog and check that
+Next Generation Content is OFF.
+
 
 ------------------------------------------------------------
 2. INSTALL
@@ -88,11 +147,16 @@ STEAM: right-click the game > Properties > Launch Options and enter
 
     "C:\Program Files (x86)\Steam\steamapps\common\Tomb Raider Legend\trlvr_launcher.exe" %command%
 
-(adjust the path if the game is elsewhere), then start SteamVR (or your
-OpenXR runtime) and launch the game from Steam as usual.
+(adjust the path if the game is elsewhere), then start SteamVR or your
+headset's PC app and launch the game from Steam as usual.
 
-GOG: start SteamVR (or your OpenXR runtime), then run trlvr_launcher.exe from
+GOG: start SteamVR or your headset's PC app, then run trlvr_launcher.exe from
 the game folder (make a shortcut to it if you like).
+
+Meta Quest: with Virtual Desktop, Virtual Desktop sets its OpenXR runtime
+active for 32-bit games itself. Connect the headset to the PC with Virtual
+Desktop, then launch the game from Steam. With Quest Link / Air Link the
+game uses Meta's OpenXR runtime.
 
 The launcher makes trl_vr.exe, a large-address-aware copy of the game: this
 2006 32-bit game otherwise runs out of memory at headset resolution.
@@ -104,25 +168,22 @@ the game. Settings are read at start-up: quit the game, edit, start again.
 ------------------------------------------------------------
 4. MODES -- THIRD PERSON BY DEFAULT, FIRST PERSON OPTIONAL
 ------------------------------------------------------------
-A fresh install plays in THIRD PERSON with immersive controls on and the
-radial gear menu (click the left stick, push towards an item). Long-press
-the right stick to step through the camera styles -- classic, shoulder,
-board -- and first person. For the plain button layout of the game instead,
-set immersive_controls = 0 (the table below).
+A fresh install plays in THIRD PERSON with the "controller" control scheme
+(the sticks do the camera work, see VR CONTROLLERS below), hands on your
+controllers, and the radial gear menu (hold the left stick in, push towards
+an item). Hold the right stick for 0.4 s to step through the camera styles
+-- classic, shoulder, board -- and first person. For the game's plain button
+layout instead, set hands_on_controllers = 0 and gesture_controls = 0.
 
-FIRST PERSON IMMERSIVE (recommended for testers once you are settled):
+FIRST PERSON (recommended for testers once you are settled):
 open trlvr.ini and set
 
     [vr]
     first_person = 1
-    first_person_tracked_hands = 1
 
-    [controls]
-    immersive_controls = 1
-
-  first_person only picks the view you start in: with immersive controls on,
-  long-press the right stick (or press \ on the keyboard) to switch between
-  first and third person at any time in gameplay.
+  first_person only picks the view you start in: hold the right stick (or
+  press \ on the keyboard) to switch between first and third person at any
+  time in gameplay.
 
 You then see through Lara's eyes with your own tracked hands:
   * Pistols: reach to a hip and lift to draw; hold the gun back at the hip to
@@ -159,16 +220,18 @@ You then see through Lara's eyes with your own tracked hands:
         Do this first if her hands or your aim do not line up (common on
         Quest).
 
-Other camera options (third person, immersive controls on):
+Other camera options (third person):
     third_person_mode = classic | shoulder | board | all
   (all: the right-stick long press cycles classic, shoulder, board and
   first person in turn)
   board = Lara a few inches tall on a tabletop world; with board_god_hand = 1
   you can pick her up, stand her on your palm and flick her over (hold Y).
 
-Optional body:  first_person_body = full   (whole body instead of hands only)
+Body:  first_person_body = full is the default (her whole body, head
+removed); set first_person_body = hands to draw only her hands.
 
-Third person extras: turn your off hand palm up for three sliders -- the
+Third person extras: with control_scheme = interaction (or tp_scale_control
+= sliders / both), turn your off hand palm up for three sliders -- the
 size of the world, the camera nearer or farther, and the camera left or
 right of Lara. Touch a knob with your other palm or index finger, grip and
 slide. Each camera style keeps its own; a notch marks each default. Walking
@@ -181,38 +244,53 @@ TR7-Menu-Hook's options when it is installed.
 
 
 ------------------------------------------------------------
-VR CONTROLLERS (classic layout)
+VR CONTROLLERS (default "controller" scheme, third person)
 ------------------------------------------------------------
-    Left stick                 move
-    Left stick click           gear menu: push the stick towards an item --
+    Left stick                 move (a light push walks)
+    Left stick double click    recentre the view
+    Left stick hold            gear menu: push the stick towards an item --
                                up health pack, right binoculars,
                                down switch weapon, left personal light
-                               (in menus: back)
-    Left stick double click    recenter the VR view
-    Left stick long press      pause (Esc)
-                               (Oculus Touch: the left menu button)
-    Both sticks held in        settings panel
-                               (Oculus Touch: hold the left menu button)
-    Right stick                turn
-    Right stick click          switch weapons
+    Menu button (left)         pause (Oculus Touch); hold 0.6 s: settings
+                               panel. Without a menu button (Reverb G2) the
+                               left stick long press pauses
+    Both sticks held in        settings panel (0.6 s)
+    Right stick                orbit the camera (left/right); up/down zooms
+    Right stick click          recentre the view
     Right stick double click   open the PDA
-    Right stick long press     binoculars
+    Right stick hold (0.4 s)   switch view: classic, shoulder, board, first
+                               person
+    Right stick click and push classic: up/down zoom; shoulder: up/down
+                               seat height; board: up/down seat height,
+                               left/right world scale
     Left trigger               action / interact / pull grapple
     Right trigger              fire; select in menus
     Left grip                  throw grapple
     Right grip                 combat lock-on
     A                          jump / surface; select in menus
-    B                          dive / crouch / roll; back in menus
-    X                          accurate aim
-    Y short press              grenade / flare
-    Y long press               personal light
+    B                          crouch / roll / dive; back in menus
+    X                          accurate aim (draws the guns)
+    Y                          grenade / flare (board view: hold to flick
+                               Lara over)
 
-A long press is 0.65 seconds. VR CONTROLLER BINDINGS.txt has the per-headset
-details. Under OpenVR, if SteamVR keeps an old custom binding, open SteamVR >
-Settings > Controllers > Manage Controller Bindings and pick the supplied one.
+First person replaces the grips, X and Y with hand gestures (see above).
+
+Settings panel > Controls > Button layout shows the live layout for the
+view you pick, and follows your control settings. Two other schemes are in
+Controls (control_scheme in trlvr.ini):
+  * interaction: click the right stick for weapon switch, hold it for the
+    view; the 3D gear cross and palm sliders instead of the radial menu.
+  * alternate (Underworld VR style): left trigger locks on, right grip
+    interacts, X recentres (double click: PDA), right stick click is
+    accurate aim, both stick clicks recentre.
+
+A long press is 0.65 seconds (the view switch 0.4 s). VR CONTROLLER
+BINDINGS.txt has the per-headset details. Under OpenVR, if SteamVR keeps an
+old custom binding, open SteamVR > Settings > Controllers > Manage
+Controller Bindings and pick the supplied one.
 Under OpenXR the bindings are built into the mod.
 
-Keyboard: F1 recentres the view. The game's own keys still work.
+Keyboard: F1 resets and recentres the view. The game's own keys still work.
 
 
 ------------------------------------------------------------
@@ -241,21 +319,40 @@ badly, mention roughly where and when -- the log says why.
 
 
 ------------------------------------------------------------
+OPTIONAL: HD TEXTURE PACK FIX
+------------------------------------------------------------
+Using the AI-Enhanced HD texture pack
+(https://www.nexusmods.com/tombraiderlegend/mods/97)? Its textures have no
+mipmaps, so distant surfaces shimmer and sparkle -- much worse in VR. The
+folder "Optional - HD texture pack fix" rebuilds them: drag the unpacked
+pack's folder onto "Fix HD texture pack.bat" and follow its steps. Its
+README.txt explains more. Not needed without that pack.
+
+
+------------------------------------------------------------
 SETTINGS WORTH KNOWING (trlvr.ini)
 ------------------------------------------------------------
 Every setting has a short explanation in the file itself. Missing settings
 are added on start-up; values you chose are never replaced.
 
   [vr]  vr_runtime              auto / openxr / openvr
-        first_person, first_person_tracked_hands, first_person_body
+        first_person, first_person_tracked_hands
+        first_person_body       full / hands
         third_person_mode       classic / shoulder / board / all
         comfort_vignette        off / jumps / full (darkens the view edge)
         physical_crouch         crouch for real to crouch
         auto_secure_catch       off / bars / all: one-hand catches secure
                                 themselves on swing bars, or everywhere
         first_person_no_spread  shots go exactly where the gun points
-        ui_scale, hud_follow    size and head-follow of the HUD
-        cutscene_mode           normal / theatre (gameplay_theatre = 1 too)
+        ui_scale, hud_scale, binocular_scale    sizes of menus, HUD and
+                                binocular viewfinder
+        hud_follow_degrees      the HUD stays put until you look this far
+                                away (0 = use hud_follow)
+        hud_lock_height, hud_height_degrees   the HUD at a fixed height
+        recenter_behind_lara    a recentre swings the camera behind her
+        cutscene_mode           theatre / normal (gameplay_theatre = 1 too)
+        stereo_dxvk, xr_async_end    the two speed-ups (1 = on; restart)
+        water_reflection, water_effects, water_waves   water, per eye
         roomscale               walk in your room (first person)
         finger_tracking         Lara's fingers follow yours (Quest, Index)
         first_person_hardcore   the view turns with Lara through flips
@@ -264,13 +361,15 @@ are added on start-up; values you chose are never replaced.
         picture_brightness, picture_contrast    the headset image
         depth_of_field, fullscreen_effects, fsaa     off / on / game
   [controls]
-        immersive_controls      gestures, holsters, hand climbing
+        control_scheme          controller / interaction / alternate
+        hands_on_controllers    Lara's hands follow your controllers
+        gesture_controls        first-person holsters, belt, hand climbing
         left_handed             swap the main hand
         pistol_mode             akimbo / single
         aim_mode                hand / hands / hands_head
         turn_mode               smooth / snap  (snap_turn_degrees)
         hand_collision          hands stop at walls and floors
-        gear_menu               cross / radial (immersive third person)
+        gear_menu               cross / radial (third person)
 
 To start over with all defaults, rename trlvr.ini and start the game once.
 
@@ -279,12 +378,11 @@ To start over with all defaults, rename trlvr.ini and start the game once.
 KNOWN LIMITATIONS
 ------------------------------------------------------------
   * Next Generation Content is not supported (black scene). Keep it off.
-  * Water reflections and the full-screen water effect are skipped (they only
-    exist for one eye), so deep water looks flatter than on a monitor.
   * Graphics options can only be changed in the Setup dialog (or with the
     trlvr.ini settings above): during a level the in-game Display menu is
     the VR Settings menu instead.
-  * Cinematics play in third person on a world-locked view.
+  * Cinematics play in a theatre window by default (cutscene_mode =
+    theatre); with cutscene_mode = normal they play on a world-locked view.
   * Some original wet-rock "sheen" decals flicker by view angle -- the flat
     game does the same.
 

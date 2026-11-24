@@ -237,6 +237,10 @@ namespace trlvr
         // vr_set_eye_views replace it with the real one on the first frame.
         bool g_eyes_from_runtime = false;
 
+        // Bumped by every write to g_eyes, so eye_tail_cached can tell the
+        // eye frusta and offsets are unchanged without comparing them.
+        unsigned g_eyes_generation = 1;
+
         void read_device_info()
         {
             xr_recommended_size(&g_rt_width, &g_rt_height);
@@ -256,6 +260,7 @@ namespace trlvr
                 info.offset_x = i == 0 ? -0.032f : 0.032f;
                 info.rot[0][0] = info.rot[1][1] = info.rot[2][2] = 1.0f;
             }
+            ++g_eyes_generation;
             g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
             g_eyes_from_runtime = false;
 
@@ -323,6 +328,7 @@ namespace trlvr
                 !(next.tan_bottom > next.tan_top))
                 return;
             g_eyes[i] = next;
+            ++g_eyes_generation;
         }
         g_ipd = g_eyes[EyeRight].offset_x - g_eyes[EyeLeft].offset_x;
         // The IPD wheel moves these a fraction of a millimetre at a time.
@@ -794,6 +800,205 @@ namespace trlvr
         }
     }
 
+    float binocular_zoom(const GameProjection& game);
+
+    // World-view-projection draws arrive twice with identical registers, once
+    // per eye, so the depth recovery and the projection it selects are kept
+    // for the last upload. Keyed on every input: the 16 registers and the
+    // cached pure projection the recovery measures against.
+    struct WvpDepth
+    {
+        float key[16 + 7];
+        bool valid;
+        bool recovered;             // per-draw depth terms were usable
+        GameProjection projection;  // recovered, else the cached pure one
+        Mat4 inverse;
+    };
+
+    static const WvpDepth& wvp_depth_cached(const float* in, const Mat4& m)
+    {
+        static WvpDepth e{};
+        float key[16 + 7];
+        memcpy(key, in, 16 * sizeof(float));
+        key[16] = g_game_proj.sx;
+        key[17] = g_game_proj.sy;
+        key[18] = g_game_proj.ox;
+        key[19] = g_game_proj.oy;
+        key[20] = g_game_proj.q;
+        key[21] = g_game_proj.near_z;
+        key[22] = g_game_proj.far_z;
+        if (e.valid && memcmp(e.key, key, sizeof(key)) == 0)
+            return e;
+        e.recovered = false;
+        e.projection = g_game_proj;
+        e.inverse = g_game_proj_inv;
+        GameProjection recovered{};
+        if (projection_depth_from_wvp(m, g_game_proj, &recovered))
+        {
+            Mat4 recovered_inv{};
+            if (projection_inverse_cached(recovered, &recovered_inv))
+            {
+                e.recovered = true;
+                e.projection = recovered;
+                e.inverse = recovered_inv;
+            }
+        }
+        memcpy(e.key, key, sizeof(key));
+        e.valid = true;
+        return e;
+    }
+
+    // Everything the world-draw tail inverse(P) * paused_head * eye matrix
+    // reads, gathered by value. Nothing here is trusted to a generation
+    // counter alone: the settings menu, the camera modes and the binocular
+    // state all change between draws without one, so they are keyed directly.
+    struct EyeTailKey
+    {
+        int eye;
+        float projection[7];
+        float paused[16];
+        float head_view[16];
+        EyeInfo eyes[2];
+        float zoom, world_scale, ipd_scale, stereo_scale;
+        int flags;
+    };
+
+    // The inputs that can change between two draws of one frame, with no
+    // counter to say so: the binocular zoom, the tuning scales, the camera
+    // modes and the draw's own projection. Small enough to compare on every
+    // call.
+    struct EyeTailDraw
+    {
+        float projection[7];
+        float zoom, world_scale, ipd_scale, stereo_scale;
+        int flags;
+    };
+
+    // The inputs that only change when a counter moves: g_head_view,
+    // g_pose_valid and the paused-head matrix with the head-state and
+    // recentre generations (ingest_poses and the camera build bump them), and
+    // g_eyes with its own generation. While the stamp is unchanged the bulk
+    // of the full key is known to be unchanged too and is not compared.
+    struct EyeTailStamp
+    {
+        unsigned head_state, recenter, eyes;
+    };
+
+    struct EyeTail
+    {
+        bool valid;
+        bool stamp_valid;
+        EyeTailStamp stamp;
+        EyeTailDraw draw;
+        EyeTailKey key;
+        Mat4 tail;
+    };
+
+    static Mat4 eye_tail_cached(Eye eye, const GameProjection& dp,
+                                const Mat4& dp_inv, const Mat4& paused_head)
+    {
+        // Called once per draw whichever way the cache goes, as
+        // vr_eye_projection did, because it also learns the normal x scale.
+        const float zoom = binocular_zoom(dp);
+        const int slot = (int)eye;
+
+        EyeTailDraw draw;
+        memset(&draw, 0, sizeof(draw));
+        draw.projection[0] = dp.sx;
+        draw.projection[1] = dp.sy;
+        draw.projection[2] = dp.ox;
+        draw.projection[3] = dp.oy;
+        draw.projection[4] = dp.q;
+        draw.projection[5] = dp.near_z;
+        draw.projection[6] = dp.far_z;
+        draw.zoom = zoom;
+        draw.world_scale = tune_world_scale();
+        draw.ipd_scale = tune_ipd_scale();
+        draw.stereo_scale = camera_stereo_scale();
+        draw.flags = (config().head_tracking ? 1 : 0) |
+                     (config().hmd_drives_camera ? 4 : 0) |
+                     (camera_first_person_active() ? 8 : 0) |
+                     (camera_accurate_aim_active() ? 16 : 0) |
+                     (movie_playing() ? 32 : 0) |
+                     (ui_loading_screen_active() ? 64 : 0) |
+                     (ui_mission_prep_active() ? 128 : 0);
+        const EyeTailStamp stamp = { g_head_state_generation,
+                                     g_recenter_generation,
+                                     g_eyes_generation };
+
+        static EyeTail cache[3]{};
+        if (slot >= 0 && slot < 3)
+        {
+            const EyeTail& c = cache[slot];
+            // g_pose_valid only changes in ingest_poses, which bumps the
+            // head-state generation, so the stamp covers it as well.
+            if (c.valid && c.stamp_valid &&
+                memcmp(&c.stamp, &stamp, sizeof(stamp)) == 0 &&
+                memcmp(&c.draw, &draw, sizeof(draw)) == 0)
+                return c.tail;
+        }
+
+        EyeTailKey key;
+        memset(&key, 0, sizeof(key));
+        key.eye = slot;
+        key.projection[0] = dp.sx;
+        key.projection[1] = dp.sy;
+        key.projection[2] = dp.ox;
+        key.projection[3] = dp.oy;
+        key.projection[4] = dp.q;
+        key.projection[5] = dp.near_z;
+        key.projection[6] = dp.far_z;
+        memcpy(key.paused, &paused_head, sizeof(key.paused));
+        memcpy(key.head_view, &g_head_view, sizeof(key.head_view));
+        memcpy(key.eyes, g_eyes, sizeof(key.eyes));
+        key.zoom = draw.zoom;
+        key.world_scale = draw.world_scale;
+        key.ipd_scale = draw.ipd_scale;
+        key.stereo_scale = draw.stereo_scale;
+        key.flags = draw.flags | (g_pose_valid ? 2 : 0);
+
+        if (slot < 0 || slot >= 3)
+            return dp_inv * paused_head * vr_eye_matrix(eye, dp);
+        EyeTail& c = cache[slot];
+        if (!c.valid || memcmp(&c.key, &key, sizeof(key)) != 0)
+        {
+            c.tail = dp_inv * paused_head * vr_eye_matrix(eye, dp);
+            c.key = key;
+            c.valid = true;
+        }
+        // Whichever way the full key went, the stamp and per-draw inputs now
+        // describe c.tail.
+        c.stamp = stamp;
+        c.draw = draw;
+        c.stamp_valid = true;
+        return c.tail;
+    }
+
+    // Row 3 (the draw's origin) of m * inverse(P) * inverse(camera): only
+    // that row is used, so the full products are not formed. The 4x4 is kept
+    // for as long as the projection and camera inverse are unchanged.
+    static void sky_origin_cached(const Mat4& m, const GameProjection& dp,
+                                  const Mat4& dp_inv, const Mat4& v_inv,
+                                  float origin[3])
+    {
+        static float key_p[7];
+        static Mat4 key_v{}, pv{};
+        static bool valid = false;
+        const float p[7] = { dp.sx, dp.sy, dp.ox, dp.oy, dp.q, dp.near_z,
+                             dp.far_z };
+        if (!valid || memcmp(key_p, p, sizeof(p)) != 0 ||
+            memcmp(&key_v, &v_inv, sizeof(v_inv)) != 0)
+        {
+            pv = dp_inv * v_inv;
+            memcpy(key_p, p, sizeof(p));
+            key_v = v_inv;
+            valid = true;
+        }
+        for (int k = 0; k < 3; ++k)
+            origin[k] = m.m[3][0] * pv.m[0][k] + m.m[3][1] * pv.m[1][k] +
+                        m.m[3][2] * pv.m[2][k] + m.m[3][3] * pv.m[3][k];
+    }
+
     // Mission Prep's own pure projection (the game's flat shot), for the
     // depth terms of its world-view-projection and flat draws: the scene
     // branch below returns before g_game_proj is updated.
@@ -843,8 +1048,65 @@ namespace trlvr
                                              tune_ui_scale());
     }
 
+    // [vr] hud_follow_degrees: where the gameplay HUD sits this frame. This
+    // runs for every HUD draw and both eyes, so the state only advances when
+    // a new head pose has arrived; both eyes then agree. After a gap (the HUD
+    // not drawn for a second: menu, binoculars) or a recentre it starts
+    // straight in front again.
+    static Mat4 hud_lazy_relative(const Mat4& head, bool level_only)
+    {
+        static HudFollow state;
+        static Mat4 last_head = Mat4::identity();
+        static ULONGLONG last_seen_ms = 0;
+        static LARGE_INTEGER last_step{};
+        static unsigned recenter = 0;
+        static bool was_level_only = false;
+
+        const ULONGLONG now_ms = GetTickCount64();
+        if (now_ms - last_seen_ms > 1000 || recenter != g_recenter_generation ||
+            level_only != was_level_only)
+            state.placed = false;
+        last_seen_ms = now_ms;
+        recenter = g_recenter_generation;
+        was_level_only = level_only;
+
+        bool new_pose = !state.placed;
+        for (int r = 0; r < 3 && !new_pose; ++r)
+            for (int c = 0; c < 3; ++c)
+                new_pose = new_pose || head.m[r][c] != last_head.m[r][c];
+        if (new_pose)
+        {
+            LARGE_INTEGER now, frequency;
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&frequency);
+            const float dt = state.placed
+                ? fminf((float)(now.QuadPart - last_step.QuadPart) /
+                            (float)frequency.QuadPart, 0.1f)
+                : 0.0f;
+            hud_follow_step(state, head, dt,
+                            config().hud_follow_degrees * 0.01745329f,
+                            level_only);
+            last_head = head;
+            last_step = now;
+        }
+        return hud_follow_relative(state, head);
+    }
+
+    // The last world-space draw's decomposition (vr_substitute_c0_other_eye).
+    struct WorldDrawParts
+    {
+        bool valid = false;
+        float in[16];
+        Mat4 m;
+        GameProjection projection;
+        Mat4 projection_inv;
+        Mat4 paused_head;
+    };
+    static WorldDrawParts g_world_draw;
+
     bool vr_substitute_c0_for_eye(const float* in, float* out, Eye eye)
     {
+        g_world_draw.valid = false;
         if (!g_ready || !in || !out || !config().head_tracking)
             return false;
         if (!drawing_the_scene())
@@ -882,7 +1144,29 @@ namespace trlvr
             (ui_drawing_interface() || movie || screen_wipe))
         {
             const GameProjection ui_gp = projection_from_registers(in);
-            const float scale = screen_wipe ? 1.0f : tune_ui_scale();
+            // Menus, the gameplay HUD and the binocular viewfinder are each
+            // sized on their own.
+            const float scale = screen_wipe ? 1.0f
+                : (movie || ui_menu_active()) ? tune_ui_scale()
+                : hud_binocular_view_active() ? config().binocular_scale
+                : config().hud_scale;
+
+            // A screen wipe (the fade to and from black between scenes) is a
+            // full-screen quad: left as the game drew it, it fills each eye's
+            // whole view, whatever the view or menu is doing. Reprojecting it
+            // through the averaged centre frustum left the outer edge of each
+            // (asymmetric) eye uncovered.
+            if (screen_wipe)
+            {
+                memcpy(out, in, 16 * sizeof(float));
+                static bool reported_wipe = false;
+                if (!reported_wipe)
+                {
+                    reported_wipe = true;
+                    log("ui: screen wipe drawn over each eye's whole view");
+                }
+                return true;
+            }
 
             if (ui_gp.valid)
             {
@@ -987,8 +1271,17 @@ namespace trlvr
                     // screen, and in VR the screen is one eye's nearly
                     // square view, so they came out about 3/4 as wide as
                     // they should. Widened back to 4:3 here.
+                    // [vr] movie_widen_4x3 = 0 turns it off (user
+                    // 2026-11-10: menus over the movie backdrop looked
+                    // squashed at 4:3).
                     Mat4 source = projection_from_game(ui_gp);
-                    if (movie_playing())
+                    // Loading screens and menus are the same 4:3 2D layer
+                    // stretched over the same near-square back buffer, but
+                    // only the Bink handle used to trigger this, so menus
+                    // and loading screens came out ~0.69x as wide as they
+                    // should (user 2026-11-12). Everything on this
+                    // world-locked path is widened now.
+                    if (config().movie_widen_4x3)
                     {
                         const float box_aspect =
                             (centre.tan_right - centre.tan_left) /
@@ -1095,9 +1388,21 @@ namespace trlvr
                     // The binocular overlay is a viewfinder: it stays
                     // rigidly head-locked (user, 2026-10-02), not on the
                     // gameplay HUD's hud_follow drag.
-                    const float follow = hud_binocular_view_active()
-                        ? 1.0f : tune_hud_follow();
-                    if (!screen_wipe && !ui_menu_active() && follow < 0.999f)
+                    const bool binoculars = hud_binocular_view_active();
+                    const bool lazy = !screen_wipe && !ui_menu_active() &&
+                                      !binoculars &&
+                                      config().hud_follow_degrees > 0.0f;
+                    const float follow = binoculars ? 1.0f : tune_hud_follow();
+                    // [vr] hud_lock_height / hud_height_degrees: the gameplay
+                    // HUD only, never the binocular viewfinder.
+                    const bool lock_height = !binoculars &&
+                                             config().hud_lock_height;
+                    const float height = binoculars ? 0.0f
+                        : config().hud_height_degrees * 0.01745329f;
+                    const bool placed = lock_height ||
+                                        fabsf(height) > 1.0e-4f;
+                    if (lazy || (!screen_wipe && !ui_menu_active() &&
+                                 (follow < 0.999f || placed)))
                     {
                         // Leave a small fraction of current head rotation in
                         // the gameplay HUD. This makes edge information move
@@ -1113,8 +1418,21 @@ namespace trlvr
                             target.tan_left, target.tan_right,
                             target.tan_top, target.tan_bottom,
                             hud_near, ui_gp.far_z, ui_gp.sy < 0.0f);
-                        const Mat4 relative = rotation_fraction(
-                            vr_head_rotation(), 1.0f - follow);
+                        const Mat4 head = vr_head_rotation();
+                        Mat4 relative;
+                        if (lazy)
+                            relative = hud_lazy_relative(head, lock_height);
+                        else if (lock_height)
+                            // Heading only (follow's share of it), level.
+                            relative = hud_frame_relative(
+                                follow * steady_yaw_of(head), 0.0f, head);
+                        else
+                            relative = rotation_fraction(head, 1.0f - follow);
+                        // Height: swing the HUD around the head, in its own
+                        // frame. Engine Y is down, so up is negative pitch.
+                        if (fabsf(height) > 1.0e-4f)
+                            relative = hud_frame_relative(
+                                0.0f, -height, Mat4::identity()) * relative;
                         ui = reproject_ndc_to_world_locked(
                             projection_from_game(ui_gp), reference,
                             hud_projection, relative, scale);
@@ -1374,30 +1692,20 @@ namespace trlvr
         // matching pure-projection upload. Recover q/near/far from this WVP
         // itself before removing P; using the stale cached depth terms leaves
         // a projective shear that differs across the two eye projections.
-        GameProjection draw_projection = g_game_proj;
-        Mat4 draw_projection_inv = g_game_proj_inv;
-        GameProjection recovered{};
-        if (projection_depth_from_wvp(m, g_game_proj, &recovered))
+        const WvpDepth& depth_terms = wvp_depth_cached(in, m);
+        const GameProjection draw_projection = depth_terms.projection;
+        const Mat4 draw_projection_inv = depth_terms.inverse;
+        if (depth_terms.recovered && camera_accurate_aim_active() &&
+            fabsf(draw_projection.near_z - g_game_proj.near_z) > 0.25f)
         {
-            Mat4 recovered_inv{};
-            if (projection_inverse_cached(recovered, &recovered_inv))
+            static DWORD last_depth_report = 0;
+            const DWORD now = GetTickCount();
+            if (!last_depth_report || now - last_depth_report >= 5000)
             {
-                draw_projection = recovered;
-                draw_projection_inv = recovered_inv;
-
-                if (camera_accurate_aim_active() &&
-                    fabsf(recovered.near_z - g_game_proj.near_z) > 0.25f)
-                {
-                    static DWORD last_depth_report = 0;
-                    const DWORD now = GetTickCount();
-                    if (!last_depth_report || now - last_depth_report >= 5000)
-                    {
-                        last_depth_report = now;
-                        log("stereo: accurate-aim WVP near %.2f (cached pure "
-                            "projection %.2f); using per-draw depth terms",
-                            recovered.near_z, g_game_proj.near_z);
-                    }
-                }
+                last_depth_report = now;
+                log("stereo: accurate-aim WVP near %.2f (cached pure "
+                    "projection %.2f); using per-draw depth terms",
+                    draw_projection.near_z, g_game_proj.near_z);
             }
         }
 
@@ -1439,8 +1747,9 @@ namespace trlvr
             Mat4 v_inv{};
             if (main_camera_wc_inverse(&v_inv))
             {
-                const Mat4 w = m * draw_projection_inv * v_inv;
-                const float origin[3] = { w.m[3][0], w.m[3][1], w.m[3][2] };
+                float origin[3];
+                sky_origin_cached(m, draw_projection, draw_projection_inv,
+                                  v_inv, origin);
                 float delta[3]{};
                 if (std::isfinite(origin[0]) && sky_pinned_draw(origin, delta))
                 {
@@ -1454,9 +1763,16 @@ namespace trlvr
                 }
             }
         }
-        const Mat4 replaced = m * draw_projection_inv * paused_head *
-                              vr_eye_matrix(eye, draw_projection);
+        const Mat4 replaced = m * eye_tail_cached(eye, draw_projection,
+                                                  draw_projection_inv,
+                                                  paused_head);
         registers_from_matrix(replaced, out);
+        memcpy(g_world_draw.in, in, sizeof(g_world_draw.in));
+        g_world_draw.m = m;
+        g_world_draw.projection = draw_projection;
+        g_world_draw.projection_inv = draw_projection_inv;
+        g_world_draw.paused_head = paused_head;
+        g_world_draw.valid = true;
 
         // Log one world-space draw per eye, exactly as uploaded. If the two
         // differ only trivially then the eye offset is not reaching world
@@ -1480,6 +1796,19 @@ namespace trlvr
             }
         }
         return true;
+    }
+
+    bool vr_substitute_c0_other_eye(const float* in, float* out, Eye eye)
+    {
+        if (g_world_draw.valid && in && out &&
+            memcmp(g_world_draw.in, in, sizeof(g_world_draw.in)) == 0)
+        {
+            registers_from_matrix(g_world_draw.m * eye_tail_cached(eye,
+                g_world_draw.projection, g_world_draw.projection_inv,
+                g_world_draw.paused_head), out);
+            return true;
+        }
+        return vr_substitute_c0_for_eye(in, out, eye);
     }
 
     void vr_set_render_target_size(unsigned w, unsigned h)
@@ -1882,7 +2211,7 @@ namespace trlvr
             u += o[1];
             const float ahead = config().board_distance + f + o[2];
             out[0] = g_pos_offset[0] + r * -fz + ahead * fx;
-            out[1] = g_pos_offset[1] - config().board_height + u;
+            out[1] = g_pos_offset[1] - camera_tp_height(2) + u;
             out[2] = g_pos_offset[2] + r * fx + ahead * fz;
         }
 
@@ -2087,6 +2416,35 @@ namespace trlvr
             pos[r] = cm.m[r][3];
             for (int c = 0; c < 3; ++c)
                 rot[r * 3 + c] = cm.m[r][c];
+        }
+        return true;
+    }
+
+    namespace
+    {
+        // OpenXR's grip -Z runs up through the fist; its aim pose points.
+        TrackedPose pointer_pose(bool left)
+        {
+            TrackedPose aim;
+            if (xr_aim_pose(left ? 0 : 1, &aim))
+                return aim;
+            return g_tracked_poses[left ? kPoseLeft : kPoseRight];
+        }
+    }
+
+    bool vr_pointer_tracking_pose(bool left, float pos[3], float rot[9])
+    {
+        if (!g_ready || !g_pose_valid || !pos || !rot)
+            return false;
+        const TrackedPose pointer = pointer_pose(left);
+        if (!pointer.bPoseIsValid || !pointer.bDeviceIsConnected)
+            return false;
+        const Mat34& pm = pointer.mDeviceToAbsoluteTracking;
+        for (int r = 0; r < 3; ++r)
+        {
+            pos[r] = pm.m[r][3];
+            for (int c = 0; c < 3; ++c)
+                rot[r * 3 + c] = pm.m[r][c];
         }
         return true;
     }
@@ -3510,7 +3868,8 @@ namespace trlvr
         return true;
     }
 
-    bool vr_controller_head_pose(bool left, Mat4* controller_to_head)
+    static bool controller_head_pose_impl(bool left, bool stretch,
+                                          Mat4* controller_to_head)
     {
         if (!controller_to_head || !g_ready || !g_pose_valid)
             return false;
@@ -3524,8 +3883,34 @@ namespace trlvr
             return false;
 
         const float scale = tune_world_scale();
-        const Mat4 controller_view = view_from_pose(
-            &controller.mDeviceToAbsoluteTracking.m[0][0], scale);
+        // Board view's god hands: the arm stretch (god_stretch_range, as
+        // Underworld) moves the controller out along a line from a point
+        // 20 cm below the head, in real tracking metres (y up), so the
+        // board's scale does not change how far an arm stretches. Everything
+        // built on this pose (drawn hand, pinch, grab zones, palm gear)
+        // follows the stretched hand.
+        Mat34 pose = controller.mDeviceToAbsoluteTracking;
+        const float range = config().god_stretch_range;
+        if (stretch && range > 0.0f && !g_cal_active && camera_third_person_mode() == 2 &&
+            camera_world_scale_factor() >= 1.0f &&
+            !camera_first_person_active() && config().hands_on_controllers)
+        {
+            const Mat34& hm = hmd.mDeviceToAbsoluteTracking;
+            const float body[3] = { hm.m[0][3], hm.m[1][3] - 0.2f,
+                                    hm.m[2][3] };
+            const float hand[3] = { pose.m[0][3], pose.m[1][3],
+                                    pose.m[2][3] };
+            float reached[3];
+            // At most 2 m past the real hand (user 2026-11-21: far out the
+            // reach felt odd, a throw lost its momentum suddenly), or the
+            // range itself when that is set higher (the Max preset, 2.5 m).
+            go_go_reach(hand, body, 0.01f * config().god_stretch_start,
+                        range, reached, range > 2.0f ? range : 2.0f);
+            for (int k = 0; k < 3; ++k)
+                if (std::isfinite(reached[k]))
+                    pose.m[k][3] = reached[k];
+        }
+        const Mat4 controller_view = view_from_pose(&pose.m[0][0], scale);
         const Mat4 hmd_view = view_from_pose(
             &hmd.mDeviceToAbsoluteTracking.m[0][0], scale);
 
@@ -3535,6 +3920,33 @@ namespace trlvr
         controller_to_head->m[3][0] *= move_scale;
         controller_to_head->m[3][1] *= move_scale;
         controller_to_head->m[3][2] *= move_scale;
+        return true;
+    }
+
+    bool vr_controller_head_pose(bool left, Mat4* controller_to_head)
+    {
+        return controller_head_pose_impl(left, true, controller_to_head);
+    }
+
+    bool vr_pointer_head_pose(bool left, Mat4* pointer_to_head)
+    {
+        if (!pointer_to_head || !g_ready || !g_pose_valid)
+            return false;
+        const TrackedPose pointer = pointer_pose(left);
+        const TrackedPose& hmd = g_tracked_poses[kPoseHmd];
+        if (!pointer.bPoseIsValid || !pointer.bDeviceIsConnected ||
+            !hmd.bPoseIsValid || !hmd.bDeviceIsConnected)
+            return false;
+        const float scale = tune_world_scale();
+        const Mat4 pointer_view = view_from_pose(
+            &pointer.mDeviceToAbsoluteTracking.m[0][0], scale);
+        const Mat4 hmd_view = view_from_pose(
+            &hmd.mDeviceToAbsoluteTracking.m[0][0], scale);
+        *pointer_to_head = rigid_inverse(pointer_view) * hmd_view;
+        const float move_scale = tune_move_scale();
+        pointer_to_head->m[3][0] *= move_scale;
+        pointer_to_head->m[3][1] *= move_scale;
+        pointer_to_head->m[3][2] *= move_scale;
         return true;
     }
 
@@ -3629,6 +4041,29 @@ namespace trlvr
         }
         log("vr: recentred -- facing %+.1f deg is now forward",
             g_yaw_offset * 57.29578f);
+    }
+
+    void vr_reset_view()
+    {
+        // The player's reset (user 2026-11-11): the recentre (heading,
+        // position, height), plus what they have moved by hand in the live
+        // view -- third-person zoom/side/height, the board box or the
+        // theatre window dragged off its spot. Scale stays. The camera
+        // glides to the result (camera_head's recentre glide).
+        const bool board = camera_reset_view_adjust();
+        if (board || g_diorama_active)
+        {
+            board_offset();
+            g_board_offset[0] = g_board_offset[1] = g_board_offset[2] = 0.0f;
+            tune_set_board_offset(g_board_offset);
+        }
+        if (g_theatre_active)
+        {
+            g_theatre_offset[0] = g_theatre_offset[1] =
+                g_theatre_offset[2] = 0.0f;
+            tune_set_theatre_offset(g_theatre_offset);
+        }
+        vr_recenter();
     }
 
     unsigned vr_recenter_generation()

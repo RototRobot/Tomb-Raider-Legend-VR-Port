@@ -76,6 +76,9 @@ namespace trlvr
                                  HWND hDestWindowOverride, CONST RGNDATA* pDirtyRegion)
     {
         // The frame boundary. Everything the mod does per frame hangs off here.
+        // The mod draws on the real device from here, so the game's own
+        // viewport and constants go back first.
+        stereo_restore_game_state(_device);
         if (config().force_windowed)
             window_tick();
         if (vr_ready())
@@ -89,6 +92,7 @@ namespace trlvr
 
     HRESULT ProxyDevice::Reset(D3DPRESENT_PARAMETERS* pPresentationParameters)
     {
+        stereo_restore_game_state(_device);
         gpu_profile_set_device(nullptr);
         if (pPresentationParameters)
         {
@@ -178,6 +182,17 @@ namespace trlvr
                                                   CONST float* pConstantData,
                                                   UINT Vector4fCount)
     {
+        env_reflect_constants(StartRegister, pConstantData, Vector4fCount);
+        // A same-frame stereo pass may have left its own c0..c3 on the
+        // device. An upload that covers all four replaces them; one that
+        // covers only some leaves the rest, which must be the game's.
+        if (StartRegister < 4 && StartRegister + Vector4fCount > 0)
+        {
+            if (StartRegister != 0 || Vector4fCount < 4)
+                stereo_restore_game_state(_device);
+            stereo_note_game_constants(StartRegister, Vector4fCount);
+        }
+
         // c0..c3 is the projection, and this is where the game's camera is
         // replaced by the headset's.
         //
@@ -208,11 +223,15 @@ namespace trlvr
 
     HRESULT ProxyDevice::SetViewport(CONST D3DVIEWPORT9* pViewport)
     {
+        // The game's viewport replaces whatever a stereo pass left.
+        stereo_note_game_viewport();
         return _device->SetViewport(pViewport);
     }
 
     HRESULT ProxyDevice::SetRenderTarget(DWORD RenderTargetIndex, IDirect3DSurface9* pRenderTarget)
     {
+        // Setting a target resets the viewport; the game's goes back first.
+        stereo_restore_game_state(_device);
         if (RenderTargetIndex == 0)
         {
             gpu_profile_render_target(pRenderTarget);

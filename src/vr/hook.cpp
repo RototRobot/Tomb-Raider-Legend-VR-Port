@@ -3,6 +3,7 @@
 
 #include "../common/log.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
@@ -112,6 +113,61 @@ namespace trlvr
 
         *trampoline = tramp;
         log("hook: %s installed at 0x%p", name, target);
+        return true;
+    }
+
+    bool hook_install_or_chain(void* target, void* detour, void** trampoline,
+                               const unsigned char* expect, size_t len,
+                               const char* name)
+    {
+        if (!target || !detour || !trampoline || !expect || len < 5 || len > 32)
+            return false;
+        unsigned char* t = (unsigned char*)target;
+        // Only the case where another mod put its own jmp rel32 over the
+        // first five bytes and left the rest as retail.
+        if (t[0] != 0xE9 || expect[0] == 0xE9 ||
+            memcmp(t + 5, expect + 5, len - 5) != 0)
+            return hook_install(target, detour, trampoline, expect, len, name);
+
+        int32_t rel = 0;
+        memcpy(&rel, t + 1, 4);
+        unsigned char* other = t + 5 + rel;
+        MEMORY_BASIC_INFORMATION mbi{};
+        const DWORD exec = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                           PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        if (!VirtualQuery(other, &mbi, sizeof(mbi)) ||
+            mbi.State != MEM_COMMIT || !(mbi.Protect & exec))
+        {
+            log("hook: %s NOT installed -- 0x%p already jumps to 0x%p, which "
+                "is not executable code", name, target, other);
+            return false;
+        }
+
+        // Our trampoline is just a jump to the other mod's detour, which
+        // still runs the original through its own trampoline. Order: ours,
+        // theirs, the game's.
+        unsigned char* tramp = alloc_exec(5);
+        if (!tramp)
+        {
+            log("hook: %s -- could not allocate a trampoline", name);
+            return false;
+        }
+        write_jmp(tramp, other);
+
+        DWORD old = 0;
+        if (!VirtualProtect(t, 5, PAGE_EXECUTE_READWRITE, &old))
+        {
+            log("hook: %s -- could not unprotect 0x%p", name, target);
+            VirtualFree(tramp, 0, MEM_RELEASE);
+            return false;
+        }
+        write_jmp(t, detour);
+        VirtualProtect(t, 5, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), t, 5);
+
+        *trampoline = tramp;
+        log("hook: %s installed at 0x%p, chained in front of another mod's "
+            "hook (0x%p)", name, target, other);
         return true;
     }
     // [vr] depth_of_field (2026-10-05). The game loads its graphics

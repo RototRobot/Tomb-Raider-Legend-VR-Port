@@ -387,6 +387,11 @@ namespace trlvr
         return g_draw_caller;
     }
 
+    bool hud_capture_scene_active()
+    {
+        return g_scene_active;
+    }
+
     bool hud_capture_note_draw(IDirect3DDevice9* device)
     {
         if (g_scene_active && device && g_scene_draws < 12000)
@@ -499,7 +504,7 @@ namespace trlvr
         if (base->GetType() == D3DRTYPE_TEXTURE)
             check_icon(static_cast<IDirect3DTexture9*>(base));
         bool skip = false;
-        if (config().immersive_controls && !config().gear_menu_radial &&
+        if (config().immersive_any() && !config().gear_menu_radial &&
             !camera_first_person_active())
             for (IDirect3DTexture9* gear : g_gear_hud_texture)
                 if (gear && base == gear)

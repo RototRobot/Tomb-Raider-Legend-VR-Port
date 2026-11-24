@@ -18,4 +18,9 @@ namespace trlvr
 
     // GetProcAddress against the backend, or nullptr.
     FARPROC backend_proc(const char* name);
+
+    // True when TRLVR_VANILLA=1 is set (play_flat.bat). The proxy then does
+    // nothing but forward to the system d3d9: no config, log, hooks, wrapper
+    // or DXVK, so the game runs as if this DLL were not installed.
+    bool vanilla_mode();
 }

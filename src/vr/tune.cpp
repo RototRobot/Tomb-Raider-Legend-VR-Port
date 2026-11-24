@@ -1374,7 +1374,7 @@ namespace trlvr
             return (GetAsyncKeyState(vk) & 1) != 0 && fkeys;
         };
         if (fkey(VK_F1))
-            vr_recenter();
+            vr_reset_view();
         if (fkey(VK_F5))
             load_hand_offsets();
         const bool shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;

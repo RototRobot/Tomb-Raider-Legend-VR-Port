@@ -122,6 +122,7 @@ namespace trlvr
     bool xr_session_exists() { VR_FORWARD(session_exists(), false) }
 
     bool xr_frame_wait(XrFrame* out) { VR_FORWARD(frame_wait(out), false) }
+    bool xr_aim_pose(int hand, TrackedPose* out) { VR_FORWARD(aim_pose(hand, out), false) }
     bool xr_frame_begun() { VR_FORWARD(frame_begun(), false) }
     bool xr_frame_should_render() { VR_FORWARD(frame_should_render(), false) }
     double xr_frame_wait_ms() { VR_FORWARD(frame_wait_ms(), 0.0) }

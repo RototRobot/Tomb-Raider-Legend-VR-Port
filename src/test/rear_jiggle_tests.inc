@@ -161,4 +161,66 @@ static void test_rear_jiggle()
         CHECK(std::fabs(a[2]) > 0.2f);
         CHECK(near(a[2], b[2], 0.05f * std::fabs(b[2]) + 0.02f));
     }
+    // Per-axis springs: with every scale 1 the same as one spring; a heavily
+    // damped up axis settles without swinging back while the sideways one
+    // still swings through.
+    {
+        int cross[3] = {};                          // first frame each axis swung back
+        const auto stop = [&](const JiggleParams& q, float lo[3], float last[3])
+        {
+            cross[0] = cross[1] = cross[2] = -1;
+            JiggleState s;
+            float t[3] = { 0, 0, 0 }, off[3] = {};
+            const float dt = 1.0f / 90.0f;
+            for (int i = 0; i < 270; ++i)
+            {
+                t[0] += 30.0f * dt;
+                t[2] += 30.0f * dt;
+                jiggle_step(s, t, dt, q, off);
+            }
+            lo[0] = lo[1] = lo[2] = 0.0f;
+            for (int i = 0; i < 180; ++i)
+            {
+                jiggle_step(s, t, dt, q, off);
+                for (int k = 0; k < 3; ++k)
+                {
+                    lo[k] = fminf(lo[k], off[k]);
+                    if (cross[k] < 0 && off[k] < 0.0f)
+                        cross[k] = i;
+                }
+            }
+            for (int k = 0; k < 3; ++k)
+                last[k] = off[k];
+        };
+        JiggleParams iso = p;
+        JiggleParams same = p;
+        same.axes_valid = true;
+        float lo_a[3], la[3], lo_b[3], lb[3];
+        stop(iso, lo_a, la);
+        stop(same, lo_b, lb);
+        CHECK(near(lo_a[0], lo_b[0], 1e-3f) && near(lo_a[2], lo_b[2], 1e-3f));
+        CHECK(lo_a[0] < -0.01f);                    // one spring: swings back
+        JiggleParams firm = p;
+        firm.axes_valid = true;
+        firm.damping_scale[2] = 4.0f;               // 0.3 x 4 = over-damped
+        float lo_c[3], lc[3];
+        stop(firm, lo_c, lc);
+        CHECK(lo_c[0] < -0.01f);                    // sideways still swings
+        CHECK(lo_c[2] >= -1e-3f);                   // up settles from one side
+        // A faster up axis: the same stop, and its swing is over sooner.
+        JiggleParams quick = p;
+        quick.axes_valid = true;
+        quick.hz_scale[2] = 2.0f;
+        float lo_d[3], ld[3];
+        stop(quick, lo_d, ld);
+        CHECK(cross[2] >= 0 && cross[0] > cross[2] + 5);
+        // Tilted axes (not orthonormal) still run and stay finite.
+        JiggleParams tilt = p;
+        tilt.axes_valid = true;
+        tilt.axes[1][0] = 0.3f;
+        tilt.axes[2][1] = 0.2f;
+        float lo_e[3], le[3];
+        stop(tilt, lo_e, le);
+        CHECK(std::isfinite(le[0]) && std::isfinite(le[1]) && std::isfinite(le[2]));
+    }
 }

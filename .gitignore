@@ -27,3 +27,10 @@ __pycache__/
 *.pyc
 .vs/
 .vscode/
+
+# Unrelated HD-mods tooling (own pipeline, built binaries)
+/tools/
+
+# Built by extras/drm_mipgen/build.bat
+/extras/drm_mipgen/drm_mipgen.exe
+/extras/drm_mipgen/*.part

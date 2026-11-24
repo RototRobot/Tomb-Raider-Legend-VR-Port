@@ -26,6 +26,9 @@ namespace trlvr
     VrControllerStyle vr_input_controller_style();
     bool vr_input_holster_hand_drawn(bool left);
     bool vr_input_holster_combat_held();
+    // The game's lock-on key (G) is being held down this frame (whatever
+    // button the control scheme puts it on; not the binocular zoom).
+    bool vr_input_lock_on_key_held();
     // The UI screen on top of the menu stack as of the last input update,
     // -1 in gameplay (pause root 1, its settings page 2, load game 3).
     short vr_input_top_screen_id();

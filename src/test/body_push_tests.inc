@@ -70,6 +70,7 @@ static void test_body_push()
     using namespace trlvr;
     const float rad = 0.017453293f;
 
+
     // rotation_from_vector / rotation_to_vector: right-hand rule like
     // rotation_between, and a round trip (also near a half turn).
     {

@@ -38,6 +38,8 @@ extern "C"
             log("Direct3DCreate9: backend has no Direct3DCreate9");
             return nullptr;
         }
+        if (vanilla_mode())
+            return real(SDKVersion);
 
         // Before the backend, not after: DXVK creates its Vulkan instance
         // inside Direct3DCreate9, and by then it has to know which Vulkan
@@ -129,6 +131,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
     case DLL_PROCESS_ATTACH:
     {
         DisableThreadLibraryCalls(module);
+        if (vanilla_mode())
+            break;
         load_config();
         // Before anything reads the hand tuning.
         const int tuning_reset = tune_reset_controller_tuning_on_load();
@@ -177,9 +181,9 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID)
                 "drives_position=%d",
                 config().head_position, config().head_position_scale,
                 config().hmd_drives_position);
-            log("config: [controls] controllers=%d immersive_controls=%d "
+            log("config: [controls] controllers=%d immersive_any=%d "
                 "look_speed=%.0f look_vertical=%d",
-                config().controllers, config().immersive_controls,
+                config().controllers, config().immersive_any(),
                 config().look_speed, config().look_vertical);
         }
         hook_apply_settings_overrides();

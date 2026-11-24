@@ -43,7 +43,20 @@ namespace trlvr
         XrSpace g_local = XR_NULL_HANDLE;
         XrSpace g_view = XR_NULL_HANDLE;
 
-        bool g_frame_begun = false;
+        bool g_frame_begun{};
+        // Async frame end (vr_submit.cpp, config().xr_async_end): xrWaitFrame
+        // has returned but xrBeginFrame waits for the next submit, because
+        // the frame before may still be ending on the end thread and
+        // xrBeginFrame must come after its xrEndFrame.
+        bool g_frame_waited = false;
+        // Waits for that end; set while the end thread runs. Never called
+        // under the queue lock (the end thread needs it).
+        void (*g_end_join)() = nullptr;
+        void join_end()
+        {
+            if (g_end_join)
+                g_end_join();
+        }
         XrFrameState g_frame{XR_TYPE_FRAME_STATE};
         // The eye poses located for the frame in progress, in LOCAL space:
         // what the game is about to render with, and so what xrEndFrame has
@@ -66,8 +79,11 @@ namespace trlvr
         XrAction g_act_squeeze = XR_NULL_HANDLE;
         XrAction g_act_button[XrButtonCount]{};
         XrAction g_act_grip = XR_NULL_HANDLE;
+        XrAction g_act_aim = XR_NULL_HANDLE;
         XrAction g_act_haptic = XR_NULL_HANDLE;
         XrSpace g_grip_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+        XrSpace g_aim_space[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+        TrackedPose g_aim_pose[2]{};
         bool g_actions_attached = false;
         bool g_input_active = false;
         bool g_profile_dirty = true;
@@ -405,6 +421,7 @@ namespace trlvr
             g_act_button[XrTouchTrigger] = make_action("trigger_touch", "Finger on the trigger", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_act_button[XrTouchThumb] = make_action("thumb_touch", "Thumb on the controller", XR_ACTION_TYPE_BOOLEAN_INPUT);
             g_act_grip = make_action("grip_pose", "Hand grip pose", XR_ACTION_TYPE_POSE_INPUT);
+            g_act_aim = make_action("aim_pose", "Pointing pose", XR_ACTION_TYPE_POSE_INPUT);
             g_act_haptic = make_action("haptic", "Vibration", XR_ACTION_TYPE_VIBRATION_OUTPUT);
 
             // Only components the profile defines: one path it does not have
@@ -427,6 +444,7 @@ namespace trlvr
                 {&g_act_button[XrTouchThumb], 1, "/input/a/touch"},
                 {&g_act_button[XrTouchThumb], 1, "/input/b/touch"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/oculus/touch_controller", touch,
@@ -446,6 +464,7 @@ namespace trlvr
                 {&g_act_button[XrTouchThumb], -1, "/input/b/touch"},
                 {&g_act_button[XrTouchThumb], -1, "/input/trackpad/touch"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/valve/index_controller", index,
@@ -459,6 +478,7 @@ namespace trlvr
                 {&g_act_button[XrButtonMenu], -1, "/input/menu/click"},
                 {&g_act_button[XrButtonTrackpad], -1, "/input/trackpad/click"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/microsoft/motion_controller", wmr,
@@ -477,6 +497,7 @@ namespace trlvr
                     {&g_act_button[XrButtonSecondary], 1, "/input/b/click"},
                     {&g_act_button[XrButtonMenu], -1, "/input/menu/click"},
                     {&g_act_grip, -1, "/input/grip/pose"},
+                    {&g_act_aim, -1, "/input/aim/pose"},
                     {&g_act_haptic, -1, "/output/haptic"},
                 };
                 suggest("/interaction_profiles/hp/mixed_reality_controller", hp,
@@ -487,6 +508,7 @@ namespace trlvr
                 {&g_act_trigger, -1, "/input/select/click"},
                 {&g_act_button[XrButtonMenu], -1, "/input/menu/click"},
                 {&g_act_grip, -1, "/input/grip/pose"},
+                {&g_act_aim, -1, "/input/aim/pose"},
                 {&g_act_haptic, -1, "/output/haptic"},
             };
             suggest("/interaction_profiles/khr/simple_controller", simple,
@@ -498,6 +520,7 @@ namespace trlvr
         {
             g_actions_attached = false;
             g_grip_space[0] = g_grip_space[1] = XR_NULL_HANDLE;
+            g_aim_space[0] = g_aim_space[1] = XR_NULL_HANDLE;
             if (!create_actions())
                 return;
             XrSessionActionSetsAttachInfo attach{
@@ -515,6 +538,12 @@ namespace trlvr
                 space.poseInActionSpace.orientation.w = 1.0f;
                 ok(xrCreateActionSpace(g_session, &space, &g_grip_space[hand]),
                    "xrCreateActionSpace (grip)");
+                if (g_act_aim != XR_NULL_HANDLE)
+                {
+                    space.action = g_act_aim;
+                    ok(xrCreateActionSpace(g_session, &space, &g_aim_space[hand]),
+                       "xrCreateActionSpace (aim)");
+                }
             }
             g_actions_attached = true;
             g_profile_dirty = true;
@@ -613,8 +642,9 @@ namespace trlvr
                     }
                     else if (g_state == XR_SESSION_STATE_STOPPING)
                     {
+                        join_end();
                         g_running = false;
-                        g_frame_begun = false;
+                        g_frame_begun = g_frame_waited = false;
                         ok(xrEndSession(g_session), "xrEndSession");
                     }
                     else if (g_state == XR_SESSION_STATE_EXITING ||
@@ -623,7 +653,7 @@ namespace trlvr
                         // The headset went away. The game carries on flat;
                         // nothing here restarts the session.
                         g_running = false;
-                        g_frame_begun = false;
+                        g_frame_begun = g_frame_waited = false;
                     }
                     break;
                 }
@@ -633,7 +663,7 @@ namespace trlvr
                 case XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING:
                     log("xr: the runtime is shutting down (instance loss pending)");
                     g_running = false;
-                    g_frame_begun = false;
+                    g_frame_begun = g_frame_waited = false;
                     break;
                 default:
                     break;
@@ -847,7 +877,7 @@ namespace trlvr
         }
         g_state = XR_SESSION_STATE_UNKNOWN;
         g_running = false;
-        g_frame_begun = false;
+        g_frame_begun = g_frame_waited = false;
 
         XrReferenceSpaceCreateInfo space{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
         space.poseInReferenceSpace.orientation.w = 1.0f;
@@ -883,10 +913,12 @@ namespace trlvr
         g_session = XR_NULL_HANDLE;
         g_local = g_view = XR_NULL_HANDLE;
         g_grip_space[0] = g_grip_space[1] = XR_NULL_HANDLE;
+        g_aim_space[0] = g_aim_space[1] = XR_NULL_HANDLE;
+        g_aim_pose[0] = g_aim_pose[1] = TrackedPose{};
         g_actions_attached = false;
         g_input_active = false;
         g_running = false;
-        g_frame_begun = false;
+        g_frame_begun = g_frame_waited = false;
         g_state = XR_SESSION_STATE_UNKNOWN;
         // An attached action set is immutable and tied to that session's
         // bindings; the next session gets a fresh one.
@@ -899,12 +931,21 @@ namespace trlvr
 
     // --- frame --------------------------------------------------------------
 
-    bool oxr_frame_begun() { return g_frame_begun; }
+    bool oxr_aim_pose(int hand, TrackedPose* out)
+    {
+        if (!out || hand < 0 || hand > 1 || !g_aim_pose[hand].bPoseIsValid)
+            return false;
+        *out = g_aim_pose[hand];
+        return true;
+    }
+
+    bool oxr_frame_begun() { return g_frame_begun || g_frame_waited; }
     double oxr_frame_wait_ms() { return g_wait_ms; }
 
     bool oxr_frame_should_render()
     {
-        return g_frame_begun && g_frame.shouldRender == XR_TRUE;
+        return (g_frame_begun || g_frame_waited) &&
+               g_frame.shouldRender == XR_TRUE;
     }
 
     bool oxr_frame_wait(XrFrame* out)
@@ -914,7 +955,7 @@ namespace trlvr
         poll_events();
         // A frame still open is the caller's to end first; its poses are not
         // refreshed here.
-        if (!g_running || g_frame_begun)
+        if (!g_running || g_frame_begun || g_frame_waited)
             return false;
 
         LARGE_INTEGER frequency{}, before{}, after{};
@@ -931,12 +972,17 @@ namespace trlvr
         g_wait_ms = double(after.QuadPart - before.QuadPart) * 1000.0 /
                     double(frequency.QuadPart);
 
-        log_set_activity("xrBeginFrame");
-        r = xrBeginFrame(g_session, nullptr);
-        log_set_activity(nullptr);
-        if (!ok(r, "xrBeginFrame", &begin_reported))
-            return false;
-        g_frame_begun = true;
+        if (g_end_join)
+            g_frame_waited = true;   // begun at the next submit
+        else
+        {
+            log_set_activity("xrBeginFrame");
+            r = xrBeginFrame(g_session, nullptr);
+            log_set_activity(nullptr);
+            if (!ok(r, "xrBeginFrame", &begin_reported))
+                return false;
+            g_frame_begun = true;
+        }
 
         sync_actions();
         if (!out)
@@ -951,9 +997,13 @@ namespace trlvr
                 locate(g_grip_space[hand], time, &out->poses[kPoseLeft + hand]);
                 grip_to_openvr(g_controller[hand], hand,
                                &out->poses[kPoseLeft + hand]);
+                locate(g_aim_space[hand], time, &g_aim_pose[hand]);
             }
             else
+            {
                 out->poses[kPoseLeft + hand] = TrackedPose{};
+                g_aim_pose[hand] = TrackedPose{};
+            }
         }
 
         XrViewLocateInfo where{XR_TYPE_VIEW_LOCATE_INFO};
@@ -1136,51 +1186,121 @@ namespace trlvr
         g_swapchain_acquired = false;
     }
 
+    namespace
+    {
+        // A frame end as xrEndFrame takes it, filled from the frame's state
+        // on the game's thread: the next xrWaitFrame overwrites g_frame and
+        // the layer views while an async end is still on its way.
+        struct PendingEnd
+        {
+            XrTime time = 0;
+            bool with_layer = false;
+            bool release = false;
+            XrCompositionLayerProjectionView views[2];
+        };
+        PendingEnd g_pending_end;
+
+        void fill_end(const XrRect* left, const XrRect* right, PendingEnd* p)
+        {
+            p->time = g_frame.predictedDisplayTime;
+            p->release = false;
+            p->with_layer = left && right && g_layer_views_valid &&
+                g_swapchain != XR_NULL_HANDLE && g_frame.shouldRender == XR_TRUE;
+            if (!p->with_layer)
+                return;
+            const XrRect* rects[2] = {left, right};
+            for (int i = 0; i < 2; ++i)
+            {
+                XrCompositionLayerProjectionView& view = p->views[i];
+                view = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+                view.pose = g_layer_views[i].pose;
+                view.fov = g_layer_views[i].fov;
+                view.subImage.swapchain = g_swapchain;
+                view.subImage.imageRect.offset = {rects[i]->x, rects[i]->y};
+                view.subImage.imageRect.extent = {rects[i]->width,
+                                                  rects[i]->height};
+                view.subImage.imageArrayIndex = 0;
+            }
+        }
+
+        bool submit_end(const PendingEnd& p)
+        {
+            XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            const XrCompositionLayerBaseHeader* layers[1] = {
+                (const XrCompositionLayerBaseHeader*)&layer};
+            XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
+            end.displayTime = p.time;
+            end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+            if (p.with_layer)
+            {
+                layer.space = g_local;
+                layer.viewCount = 2;
+                layer.views = p.views;
+                end.layerCount = 1;
+                end.layers = layers;
+            }
+            static bool reported = false;
+            log_set_activity("xrEndFrame");
+            const XrResult r = xrEndFrame(g_session, &end);
+            log_set_activity(nullptr);
+            return ok(r, "xrEndFrame", &reported) && p.with_layer;
+        }
+
+        // xrBeginFrame for a frame xr_frame_wait only waited for. The
+        // caller has joined the end thread.
+        bool begin_deferred()
+        {
+            if (g_frame_waited)
+            {
+                g_frame_waited = false;
+                static bool reported = false;
+                log_set_activity("xrBeginFrame");
+                const XrResult r = xrBeginFrame(g_session, nullptr);
+                log_set_activity(nullptr);
+                g_frame_begun = ok(r, "xrBeginFrame", &reported);
+            }
+            return g_frame_begun;
+        }
+    }
+
     bool oxr_frame_end(const XrRect* left, const XrRect* right)
+    {
+        if (g_session == XR_NULL_HANDLE || !begin_deferred())
+            return false;
+        g_frame_begun = false;
+        PendingEnd p;
+        fill_end(left, right, &p);
+        return submit_end(p);
+    }
+
+    bool oxr_frame_begin_deferred()
+    {
+        join_end();
+        return g_session != XR_NULL_HANDLE && begin_deferred();
+    }
+
+    bool oxr_frame_end_async(const XrRect* left, const XrRect* right,
+                             bool release_image)
     {
         if (g_session == XR_NULL_HANDLE || !g_frame_begun)
             return false;
         g_frame_begun = false;
-
-        XrCompositionLayerProjectionView views[2] = {
-            {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
-            {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
-        XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-        const XrCompositionLayerBaseHeader* layers[1] = {
-            (const XrCompositionLayerBaseHeader*)&layer};
-
-        XrFrameEndInfo end{XR_TYPE_FRAME_END_INFO};
-        end.displayTime = g_frame.predictedDisplayTime;
-        end.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-
-        const bool with_layer = left && right && g_layer_views_valid &&
-            g_swapchain != XR_NULL_HANDLE && g_frame.shouldRender == XR_TRUE;
-        if (with_layer)
-        {
-            const XrRect* rects[2] = {left, right};
-            for (int i = 0; i < 2; ++i)
-            {
-                views[i].pose = g_layer_views[i].pose;
-                views[i].fov = g_layer_views[i].fov;
-                views[i].subImage.swapchain = g_swapchain;
-                views[i].subImage.imageRect.offset = {rects[i]->x, rects[i]->y};
-                views[i].subImage.imageRect.extent = {rects[i]->width,
-                                                      rects[i]->height};
-                views[i].subImage.imageArrayIndex = 0;
-            }
-            layer.space = g_local;
-            layer.viewCount = 2;
-            layer.views = views;
-            end.layerCount = 1;
-            end.layers = layers;
-        }
-
-        static bool reported = false;
-        log_set_activity("xrEndFrame");
-        const XrResult r = xrEndFrame(g_session, &end);
-        log_set_activity(nullptr);
-        return ok(r, "xrEndFrame", &reported) && with_layer;
+        fill_end(left, right, &g_pending_end);
+        g_pending_end.release = release_image;
+        return g_pending_end.with_layer;
     }
+
+    bool oxr_frame_end_pending()
+    {
+        if (g_pending_end.release)
+        {
+            g_pending_end.release = false;
+            oxr_swapchain_release();
+        }
+        return submit_end(g_pending_end);
+    }
+
+    void oxr_set_end_join(void (*join)()) { g_end_join = join; }
 
     // --- controllers --------------------------------------------------------
 

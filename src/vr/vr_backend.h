@@ -21,6 +21,7 @@ namespace trlvr
     void oxr_session_destroy();
     bool oxr_session_exists();
     bool oxr_frame_wait(XrFrame* out);
+    bool oxr_aim_pose(int hand, TrackedPose* out);
     bool oxr_frame_begun();
     bool oxr_frame_should_render();
     double oxr_frame_wait_ms();
@@ -31,6 +32,16 @@ namespace trlvr
     bool oxr_swapchain_acquire(uint64_t* vk_image);
     void oxr_swapchain_release();
     bool oxr_frame_end(const XrRect* left, const XrRect* right);
+    // Async frame end (vr_submit.cpp end thread, OpenXR only). While a join
+    // is set, xr_frame_wait leaves xrBeginFrame to oxr_frame_begin_deferred
+    // (which joins first). oxr_frame_end_async snapshots the frame's end on
+    // the game's thread and closes the frame; oxr_frame_end_pending releases
+    // the image and calls xrEndFrame from the end thread.
+    bool oxr_frame_begin_deferred();
+    bool oxr_frame_end_async(const XrRect* left, const XrRect* right,
+                             bool release_image);
+    bool oxr_frame_end_pending();
+    void oxr_set_end_join(void (*join)());
     bool oxr_input_active();
     bool oxr_input_button(int hand, XrButton button);
     float oxr_input_trigger(int hand);
@@ -51,6 +62,7 @@ namespace trlvr
     void ovr_session_destroy();
     bool ovr_session_exists();
     bool ovr_frame_wait(XrFrame* out);
+    bool ovr_aim_pose(int hand, TrackedPose* out);
     bool ovr_frame_begun();
     bool ovr_frame_should_render();
     double ovr_frame_wait_ms();

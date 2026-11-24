@@ -8,6 +8,7 @@
 #include "../vr/stereo.h"
 #include "../vr/camera_head.h"
 #include "../vr/ui_space.h"
+#include "../vr/gaze_target.h"
 #include "../vr/water_stereo.h"
 #include "../vr/input_labels.h"
 #include "../vr/hook.h"
@@ -121,6 +122,7 @@ namespace trlvr
                 cull_init();
                 camera_head_init();
                 ui_space_init();
+                gaze_target_init();
                 water_stereo_init();
                 input_labels_init();
                 hook_apply_gog_crash_guard();

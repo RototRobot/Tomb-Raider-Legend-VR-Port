@@ -34,12 +34,14 @@
 // ray is placed in Camera::targetFocusPoint before the game's own targeting
 // update, so its weapon-range and collision code remains authoritative.
 #include "camera_head.h"
+#include "gaze_target.h"
 #include "godmode/board_leash.h"
 #include "physics/body_push.h"
 #include "physics/body_volumes.h"
 #include "perf_cpu.h"
 #include "cull.h"
 #include "godmode/god_pluck.h"
+#include "godmode/god_torso.h"
 
 
 #include "hook.h"
@@ -60,6 +62,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cfloat>
+#include <unordered_map>
 #include <vector>
 #include <intrin.h>
 
@@ -94,6 +97,11 @@ namespace trlvr
 
         const uintptr_t kCalculateWCTransform = 0x0048E100;
         const uintptr_t kDrawInstance = 0x0040A400;
+        // The wet-skin layer pass (FUN_0044C2A0), its wet model pointer and
+        // the scratch matrix buffer it hands DrawInstance (WET_LAYER.md).
+        const uintptr_t kWetLayer = 0x0044C2A0;
+        const uintptr_t kWetModel = 0x0107F724;
+        const uintptr_t kWetMatrices = 0x0107F730;
         const uintptr_t kGetBoneVB = 0x004142E0;
         const unsigned char kGetBoneVBSignature[6] =
             { 0x8B, 0x0D, 0x0C, 0x25, 0x00, 0x01 };
@@ -418,6 +426,10 @@ namespace trlvr
         const void* const kMainCamera = reinterpret_cast<const void*>(0x010FC660);
         short g_last_mode = -32768;
         bool g_accurate_aim_active = false;
+        // Third person, lock-on key held with nothing locked (user
+        // 2026-11-12): Lara's free aim follows the headset like precision
+        // aim (mode 13), instead of the stick-turned camera's forward.
+        bool g_lock_aim_active = false;
         int g_forward_candidate = -1;
         bool g_forward_candidate_verified = false;
         float g_head_aim_target[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -976,7 +988,7 @@ namespace trlvr
         {
             if (!g_first_person_active || laras_long_gun_held())
                 return false;
-            if (config().immersive_controls)
+            if (config().gesture_controls)
                 return vr_input_holster_hand_drawn(true) &&
                        vr_input_holster_hand_drawn(false);
             // The combat state is never zero (0x23/0x24/0x2D walking,
@@ -989,7 +1001,7 @@ namespace trlvr
         // drawn, where it is that pistol's hand.
         bool aim_hand_left()
         {
-            if (config().single_pistols && config().immersive_controls &&
+            if (config().single_pistols && config().gesture_controls &&
                 g_first_person_active && !laras_long_gun_held())
             {
                 const bool l = vr_input_holster_hand_drawn(true);
@@ -1034,11 +1046,27 @@ namespace trlvr
         void publish_head_aim(void* cam, const Mat4& reference,
                               const Mat4& visual)
         {
+            // Third-person gaze for lock-on (gaze_target): the head-posed
+            // view's centre ray, the same +Z row first-person aim uses.
+            if (cam == kMainCamera && config().gaze_target &&
+                !camera_first_person_active())
+            {
+                Mat4 to_world{};
+                if (invert(visual, &to_world))
+                {
+                    const float eye[3] = { to_world.m[3][0], to_world.m[3][1],
+                                           to_world.m[3][2] };
+                    const float dir[3] = { to_world.m[2][0], to_world.m[2][1],
+                                           to_world.m[2][2] };
+                    gaze_target_set_ray(eye, dir);
+                }
+            }
             if (!config().hmd_aim || cam != kMainCamera)
                 return;
             const short mode = *reinterpret_cast<const short*>(
                 (const unsigned char*)cam + kOffMode);
-            if (mode != 13 && !camera_first_person_active())
+            if (mode != 13 && !camera_first_person_active() &&
+                !g_lock_aim_active)
                 return;
 
             // The view is a row-vector world-to-camera matrix. Its +Z column
@@ -1062,6 +1090,10 @@ namespace trlvr
                 target_distance = 2000.0f;
 
             const bool first_person_aim = camera_first_person_active();
+            // Lock-on free aim: the head-posed view's exact centre ray, from
+            // the drawn eye (the classic seat is not the retail camera's).
+            const bool lock_aim = !first_person_aim && mode != 13 &&
+                                  g_lock_aim_active;
             float match = -2.0f;
             if (!first_person_aim && mode == 13 && !g_forward_candidate_verified)
             {
@@ -1103,7 +1135,7 @@ namespace trlvr
             Mat4 camera_to_world{};
             if (!invert(visual, &camera_to_world))
                 return;
-            if (first_person_aim)
+            if (first_person_aim || lock_aim)
             {
                 // The inverse's +Z row is the exact world-space centre ray,
                 // even if a camera rebuild left small scale/shear in the view.
@@ -1277,8 +1309,8 @@ namespace trlvr
                 origin[0], origin[1], origin[2], old_target[3]
             };
             for (int i = 0; i < 3; ++i)
-                target[i] = (g_aim_from_controller ? aim_origin[i]
-                                                   : origin[i]) +
+                target[i] = (g_aim_from_controller || lock_aim
+                                 ? aim_origin[i] : origin[i]) +
                             direction[i] * target_distance;
 
             memcpy(g_head_aim_target, target, sizeof(g_head_aim_target));
@@ -1509,7 +1541,8 @@ namespace trlvr
             float prior_ray_dot = 0.0f;
             float prior_near_offset = 0.0f;
             if (config().hmd_aim &&
-                (g_accurate_aim_active || camera_first_person_active()) &&
+                (g_accurate_aim_active || g_lock_aim_active ||
+                 camera_first_person_active()) &&
                 g_head_aim_target_valid &&
                 GetTickCount() - g_head_aim_target_time <= 100)
             {
@@ -1637,6 +1670,46 @@ namespace trlvr
                                 aim_vertical_slope_at(result,
                                                       kOffWcTransform), depth);
                         }
+                    }
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    g_head_aim_target_valid = false;
+                }
+            }
+            else if (applied && g_lock_aim_active && !g_accurate_aim_active)
+            {
+                // Lock-on with nothing locked: the stance aims along the
+                // retail camera's forward whatever targetFocusPoint says,
+                // so the final weapon target is put on the headset ray, at
+                // what that ray meets (as the first-person controller aim).
+                __try
+                {
+                    unsigned char* player = *reinterpret_cast<unsigned char**>(
+                        0x0111713C);
+                    float* result = reinterpret_cast<float*>(player + 0x760);
+                    float point[3]{};
+                    void* hit_instance = nullptr;
+                    g_aim_point_hit = aim_probe(g_head_aim_eye,
+                        g_head_aim_direction, aim_weapon_range(), point,
+                        &hit_instance);
+                    g_aim_point_enemy = g_aim_point_hit &&
+                        aim_instance_is_enemy(hit_instance);
+                    for (int i = 0; i < 3; ++i)
+                        result[i] = g_aim_point[i] = point[i];
+                    g_aim_point_time = GetTickCount();
+                    static DWORD last_report = 0;
+                    const DWORD now = GetTickCount();
+                    if (!last_report || now - last_report >= 5000)
+                    {
+                        last_report = now;
+                        float offset[3]{};
+                        for (int i = 0; i < 3; ++i)
+                            offset[i] = point[i] - g_head_aim_eye[i];
+                        log("aim: lock-on free aim on the headset ray, %s at "
+                            "%.1f units", g_aim_point_hit ? "hit"
+                                                          : "clear to range",
+                            sqrtf(dot3(offset, offset)));
                     }
                 }
                 __except(EXCEPTION_EXECUTE_HANDLER)
@@ -1860,7 +1933,7 @@ namespace trlvr
             // it is drawn AND its own trigger is held; with one such pistol
             // every other request fires from it (half rate), with two the
             // retail alternation stands.
-            if (config().single_pistols && config().immersive_controls &&
+            if (config().single_pistols && config().gesture_controls &&
                 g_first_person_active)
             {
                 const int side = pistol_side(weapon);
@@ -3657,7 +3730,7 @@ namespace trlvr
                         ++g_auto_secure_pulses;
                     }
                 }
-                if (traversal.prompt && config().immersive_controls)
+                if (traversal.prompt && config().gesture_controls)
                 {
                     // The retail prompt (a giant glyph at the player's face
                     // that no draw hook reaches) is replaced by the mod's
@@ -3725,15 +3798,32 @@ namespace trlvr
             }
         }
 
+        // `segment` is `head` or below it. A bone sharing head's parent and
+        // joint (a "twin" at the same pivot) counts as part of head's limb:
+        // Lara's left shoulder cap / short sleeve is bone 78, a child of the
+        // clavicle beside the upper arm 59 at the same joint, while on the
+        // right the cap is the upper arm itself (80). The game animates the
+        // twin with the arm; posing only 59's subtree tore the sleeve off.
         bool segment_is_in_head_subtree(const ModelSegment* segments,
                                         int count, int segment, int head)
         {
+            const bool twins = head >= 0 && head < count &&
+                segments[head].parent >= 0;
             for (int guard = 0; guard < count && segment >= 0; ++guard)
             {
                 if (segment == head)
                     return true;
                 if (segment >= count)
                     return false;
+                if (twins && segments[segment].parent == segments[head].parent)
+                {
+                    const float* a = segments[segment].pivot;
+                    const float* b = segments[head].pivot;
+                    const float dx = a[0] - b[0], dy = a[1] - b[1],
+                                dz = a[2] - b[2];
+                    if (dx * dx + dy * dy + dz * dz < 0.25f)
+                        return true;
+                }
                 const int parent = segments[segment].parent;
                 if (parent == segment)
                     return false;
@@ -4732,6 +4822,18 @@ namespace trlvr
         // position; its orientation still follows the controller.
         void two_hand_pin_off_hand(bool left, Mat4* world);
 
+        // A hand's REAL controller position (tracking space, metres) at the
+        // last sample this tracker used, for hand_real_speed: the arm
+        // stretch (god_stretch_range) makes the drawn hand faster than the
+        // real one, and hand velocities that drive Lara are capped to the
+        // real speed (direction kept from the drawn hand).
+        struct RealTrack
+        {
+            float last[3] = {};
+            unsigned seq = 0;           // HandSeen::real_seq last used
+            bool have = false;
+        };
+
         bool first_person_controller_world_pose(bool left, Mat4* world)
         {
             Mat4 controller_to_head;
@@ -5402,7 +5504,7 @@ namespace trlvr
             if (g_bike.frame == g_present_count)
                 return;
             g_bike.frame = g_present_count;
-            const bool riding = config().immersive_controls &&
+            const bool riding = config().hands_on_controllers &&
                 config().bike_handlebars > 0 && g_first_person_active &&
                 lara_riding_vehicle();
             if (riding != g_bike.riding)
@@ -5645,7 +5747,7 @@ namespace trlvr
                                      const Mat4& controller)
         {
             // Immersive controls off: her animated hands, untracked.
-            if (!config().immersive_controls)
+            if (!config().hands_on_controllers)
                 return Mat4::identity();
             // On the handlebar: her hand on the bar (the bar pose learned
             // while she was not shooting).
@@ -5878,14 +5980,14 @@ namespace trlvr
             // On the motorbike retail shoots one pistol (her left); in VR
             // it is the main hand's, whichever hand drew it, and the off
             // hand stays free for the handlebar (user 2026-10-12).
-            if (config().immersive_controls && g_bike.riding)
+            if (config().gesture_controls && g_bike.riding)
             {
                 const int main = config().left_handed ? 0 : 1;
                 return hand == main &&
                     (vr_input_holster_hand_drawn(true) ||
                      vr_input_holster_hand_drawn(false));
             }
-            if (config().immersive_controls)
+            if (config().gesture_controls)
                 return vr_input_holster_hand_drawn(hand == 0);
             return retail_weapons_out();
         }
@@ -5909,12 +6011,12 @@ namespace trlvr
             const bool long_gun_out = laras_long_gun_held();
             if (link_marker == 4 &&
                 weapon_is_pistol(name) &&
-                config().immersive_controls &&
+                config().gesture_controls &&
                 (!vr_input_holster_hand_drawn(true) || long_gun_out))
                 gear = 0;
             else if (link_marker == 6 &&
                      weapon_is_pistol(name) &&
-                     config().immersive_controls &&
+                     config().gesture_controls &&
                      (!vr_input_holster_hand_drawn(false) || long_gun_out))
                 gear = 1;
             else if ((link_marker == 9 ||
@@ -6404,7 +6506,7 @@ namespace trlvr
                        wrist * first_person_hand_delta(side, wrist,
                                                        controller);
             }
-            else if (config().single_pistols && config().immersive_controls)
+            else if (config().single_pistols && config().gesture_controls)
                 root = translation(0.0f, 0.0f, -100000.0f); // out of sight
             else
                 return;
@@ -6518,7 +6620,7 @@ namespace trlvr
             g_build_transforms(instance);
             // Immersive controls off: guns stay where her animation holds
             // them (the drawn copy is the gameplay copy).
-            if (!config().immersive_controls)
+            if (!config().hands_on_controllers)
                 return;
             if (!g_first_person_active || !g_first_person_instance ||
                 !instance || instance == g_first_person_instance ||
@@ -6791,7 +6893,7 @@ namespace trlvr
             // Immersive controls off: her hands are her animated ones, so
             // her guns are drawn where the game holds them (user
             // 2026-10-12: they did not show in her hands).
-            if (!config().immersive_controls)
+            if (!config().hands_on_controllers)
                 return false;
             // Evidence for how each weapon is attached, once per name and
             // drawn state: parent (Lara or not), link bone/marker, and its
@@ -8697,39 +8799,78 @@ namespace trlvr
                     out[0] = out[1] = 0.0f;
                 float hint[3] = { 0.6f * out[0], 0.6f * out[1], -1.0f };
                 normalise3(hint);
+                // A controller past her reach: the hand is drawn on it
+                // regardless, so without this the whole gap opened at the
+                // wrist. Reach from the shoulder a little, then lengthen
+                // both arm bones evenly.
+                float slide[3], stretch = 1.0f;
+                arm_reach_extension(S, l1, l2, target,
+                                    config().first_person_arm_stretch,
+                                    slide, &stretch);
+                float Sp[3];
+                for (int k = 0; k < 3; ++k)
+                    Sp[k] = S[k] + slide[k];
                 float fake_e[3], fake_w[3], solved_e[3], solved_w[3];
                 for (int k = 0; k < 3; ++k)
                 {
-                    fake_e[k] = S[k] + hint[k] * l1;
-                    fake_w[k] = fake_e[k] + hint[k] * l2;
+                    fake_e[k] = Sp[k] + hint[k] * l1 * stretch;
+                    fake_w[k] = fake_e[k] + hint[k] * l2 * stretch;
                 }
-                if (!solve_two_bone_arm(S, fake_e, fake_w, target, solved_e,
+                if (!solve_two_bone_arm(Sp, fake_e, fake_w, target, solved_e,
                                         solved_w))
                     continue;
+                // The turns are worked out at the bones' own lengths; the
+                // lengthening goes on last.
                 float from1[3], to1[3];
                 for (int k = 0; k < 3; ++k)
                 {
                     from1[k] = E[k] - S[k];
-                    to1[k] = solved_e[k] - S[k];
+                    to1[k] = (solved_e[k] - Sp[k]) / stretch;
                 }
-                upper[hand] = translation(-S[0], -S[1], -S[2]) *
-                              rotation_between(from1, to1) *
-                              translation(S[0], S[1], S[2]);
+                const Mat4 upper_rigid =
+                    translation(slide[0], slide[1], slide[2]) *
+                    translation(-Sp[0], -Sp[1], -Sp[2]) *
+                    rotation_between(from1, to1) *
+                    translation(Sp[0], Sp[1], Sp[2]);
+                float e1[3];
+                for (int k = 0; k < 3; ++k)
+                    e1[k] = E[0] * upper_rigid.m[0][k] +
+                            E[1] * upper_rigid.m[1][k] +
+                            E[2] * upper_rigid.m[2][k] + upper_rigid.m[3][k];
+                const Mat4 forearm_base = upper_rigid *
+                    translation(solved_e[0] - e1[0], solved_e[1] - e1[1],
+                                solved_e[2] - e1[2]);
                 float w1[3];
                 for (int k = 0; k < 3; ++k)
-                    w1[k] = W[0] * upper[hand].m[0][k] +
-                            W[1] * upper[hand].m[1][k] +
-                            W[2] * upper[hand].m[2][k] + upper[hand].m[3][k];
+                    w1[k] = W[0] * forearm_base.m[0][k] +
+                            W[1] * forearm_base.m[1][k] +
+                            W[2] * forearm_base.m[2][k] + forearm_base.m[3][k];
                 float from2[3], to2[3];
                 for (int k = 0; k < 3; ++k)
                 {
                     from2[k] = w1[k] - solved_e[k];
-                    to2[k] = solved_w[k] - solved_e[k];
+                    to2[k] = (solved_w[k] - solved_e[k]) / stretch;
                 }
-                forearm[hand] = upper[hand] *
+                upper[hand] = upper_rigid;
+                forearm[hand] = forearm_base *
                     translation(-solved_e[0], -solved_e[1], -solved_e[2]) *
                     rotation_between(from2, to2) *
                     translation(solved_e[0], solved_e[1], solved_e[2]);
+                if (stretch > 1.0001f)
+                {
+                    upper[hand] = upper[hand] *
+                        stretch_along(to1, stretch, Sp);
+                    forearm[hand] = forearm[hand] *
+                        stretch_along(to2, stretch, solved_e);
+                    static bool stretch_logged = false;
+                    if (!stretch_logged)
+                    {
+                        stretch_logged = true;
+                        log("first-person: arm lengthened to reach the "
+                            "controller (x%.2f, limit x%.2f)", stretch,
+                            config().first_person_arm_stretch);
+                    }
+                }
                 arm_ok[hand] = true;
             }
 
@@ -8881,12 +9022,33 @@ namespace trlvr
             PluckInput god_in;
             int bounces = 0;            // a throw's wall/ceiling hits
             int throw_hand = -1;
+            // The input of the frame a throw started: the flight is drawn
+            // (pluck_body_matrix) from it, so her centre stays where the
+            // module put it however her real pose moves on.
+            PluckInput fly_in;
+            // The last point of her drawn centre reached along a clear line
+            // while held (god_throw_free_track): a throw released behind a
+            // wall starts from it.
+            float throw_free[3]{};
+            bool throw_free_ok = false;
+            bool throw_normal_logged = false;
+            // Her arms as last drawn (carry_apply), game space: the second
+            // grab's zone (PluckInput::drawn_*).
+            bool drawn_ok = false;
+            float drawn_shoulder[2][3]{};
+            float drawn_end[2][3]{};
+            float drawn_wrist[2][3]{};
+            // Two hands: each reaching arm's wrist target in her own frame,
+            // kept through a flight.
+            float reach_local[2][3]{};
+            bool reach_local_ok[2] = { false, false };
             DWORD land_anim_due = 0;    // god_land_anim after a thrown landing
             LARGE_INTEGER last_step{};
             // The wrist she hangs by (arm grab), as her last draw raised it.
             float draw_pivot[3]{};
             bool draw_pivot_valid = false;
             float hand_pos[3]{};
+            RealTrack real[2];          // real controller speed per hand (PluckInput)
             // The pinch point (between thumb and index tips) at true world
             // scale, from the last hand draw.
             float pinch[3]{};
@@ -8907,6 +9069,55 @@ namespace trlvr
             DWORD palm_left_at = 0;
         };
         BoardPluck g_pluck;
+
+        // The torso fist "doll" grab (god_torso.h, ported back from
+        // Underworld, user 2026-10-20): state, the last step's input (her
+        // real pose, for the draw), and per hand whether the fist is the
+        // torso's (mask: the pluck does not see it until the hand opens;
+        // block: not a soft-part hold either, god_torso_fist_first).
+        struct BoardTorso
+        {
+            TorsoState god;
+            TorsoInput in;
+            bool mask[2] = { false, false };
+            bool aim[2] = { false, false };
+            bool fist[2] = { false, false };        // the fist, with hysteresis
+            bool fist_block[2] = { false, false };  // g_tp_grip does not hold parts
+            float apparent = 0.0f;                  // her height to the player, metres
+            bool leg_left[2] = { true, false };     // hip c is her left leg
+            // A free hand's index tip last frame, for its speed (touch_nudge).
+            float touch_last[2][3] = {};
+            RealTrack touch_real[2];
+            bool touch_ok[2] = { false, false };
+        };
+        BoardTorso g_torso;
+
+        // Is a hand busy holding Lara (pluck by head or arm, second hand,
+        // palm, torso fist)? Such a hand does not touch her.
+        bool hand_holds_her(int hand)
+        {
+            return g_pluck.hand == hand || g_pluck.palm == hand ||
+                   g_pluck.god.hand2 == hand || g_torso.god.hand == hand;
+        }
+
+        // Her root as the touch systems (soft parts, rear) should see it:
+        // where she is DRAWN. Held by the pluck or the torso, her real
+        // instance stays where she was picked up; the drawn pose is what a
+        // free hand touches.
+        void touch_root(const unsigned char* instance, float root[3])
+        {
+            memcpy(root, instance + 0x10, sizeof(float) * 3);
+            if (torso_drawn(g_torso.god))
+            {
+                for (int k = 0; k < 3; ++k)
+                    root[k] = g_torso.god.feet[k];
+            }
+            else if (pluck_drawn(g_pluck.god) || g_pluck.palm >= 0)
+            {
+                for (int k = 0; k < 3; ++k)
+                    root[k] += g_pluck.carry[k];
+            }
+        }
 
         // Each third-person hand's palm as last drawn: centre (true world
         // scale) and the palm normal; fresh for 250 ms.
@@ -8942,10 +9153,67 @@ namespace trlvr
             // The index tip as drawn, in the head frame (game units, X
             // right, Y down, Z forward): the palm sliders' finger point.
             float index_tip_head[3]{};
+            // The controller's raw tracking position (metres, no arm
+            // stretch), taken with these points at the hand's draw so a
+            // velocity can be capped to the real hand's speed over the same
+            // samples (hand_real_speed). real_seq counts the samples.
+            float real[3]{};
+            unsigned real_seq = 0;
+            bool real_ok = false;
             bool posed = false;
             DWORD time = 0;
         };
         HandSeen g_hand_seen[2];
+
+        // The REAL controller speed (m/s) of a hand between this tracker's
+        // last two hand samples (the raw tracking positions recorded WITH
+        // the drawn points, g_hand_seen), or -1 when unknown: no new
+        // sample, the first sample, the hand lost, dt <= 0. Hand velocities
+        // that drive Lara keep the drawn hand's direction but are capped to
+        // this (cap_hand_speed), so the arm stretch (god_stretch_range)
+        // cannot make throws and pushes stronger. Subtracting the stretch's
+        // own move instead made fast throws boomerang back toward the
+        // pick-up when it mismatched the drawn motion (user 2026-11-21).
+        float hand_real_speed(int h, RealTrack& t, float dt)
+        {
+            const HandSeen& hs = g_hand_seen[h];
+            if (!hs.real_ok || !hs.time ||
+                GetTickCount() - hs.time >= 250)
+            {
+                t.have = false;
+                return -1.0f;
+            }
+            if (t.have && t.seq == hs.real_seq)
+                return -1.0f;
+            float speed = -1.0f;
+            if (t.have && dt > 0.0f)
+            {
+                const float d[3] = { hs.real[0] - t.last[0],
+                                     hs.real[1] - t.last[1],
+                                     hs.real[2] - t.last[2] };
+                speed = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) / dt;
+                if (!std::isfinite(speed))
+                    speed = -1.0f;
+            }
+            for (int k = 0; k < 3; ++k)
+                t.last[k] = hs.real[k];
+            t.seq = hs.real_seq;
+            t.have = true;
+            return speed;
+        }
+
+        // v (game units/s) with its speed capped to real_speed (m/s) times
+        // per_metre (game units per real metre); only ever scaled down.
+        void cap_hand_speed(float v[3], float real_speed, float per_metre)
+        {
+            if (!(real_speed >= 0.0f) || !(per_metre > 0.0f))
+                return;
+            const float cap = real_speed * per_metre;
+            const float sp = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (sp > cap && sp > 1e-6f)
+                for (int k = 0; k < 3; ++k)
+                    v[k] *= cap / sp;
+        }
 
         // A point of the hand as drawn (at 1/F about the head) to its
         // apparent place in the world (F = grow).
@@ -9074,6 +9342,21 @@ namespace trlvr
             LARGE_INTEGER knock_until{};
         };
         BoardFlick g_flick;
+        // Swat (user 2026-11-22): a free god hand entering her body fast
+        // knocks her down like the flick, along the hand's horizontal
+        // motion. Found in the push pass (draw time), acted on in
+        // camera_board_flick_update (input time), as the flick is.
+        struct BoardSwat
+        {
+            bool pending = false;
+            float dir[2] = {};
+            float point[3] = {};
+            float speed = 0.0f;         // real m/s
+            int hand = -1;
+            DWORD tick = 0;             // when found
+            DWORD last = 0;             // the last knock, for the cooldown
+        };
+        BoardSwat g_swat;
         int g_flick_anim = -2;          // INI [vr] board_flick_anim, -1 none
         // The user's picks (2026-10-03): 140 when flicked from the front,
         // 139 from behind. INI board_flick_anim_front / _back.
@@ -10056,6 +10339,48 @@ namespace trlvr
         // that path. Cached per model.
         void* g_hip_model = nullptr;
         int g_hip[2] = { -1, -1 };
+        // The knee of each leg (the bone after the hip: the third from the
+        // lowest leaf up, or the middle one of a three-bone leg), for the
+        // pluck's knee bend.
+        int g_knee[2] = { -1, -1 };
+        // The foot of each leg (the lowest leaf under the hip), for the
+        // torso grab's leg pendulums.
+        int g_foot[2] = { -1, -1 };
+
+        void find_knees(const ModelSegment* segments, int count,
+                        const float (*saved)[16])
+        {
+            g_knee[0] = g_knee[1] = -1;
+            g_foot[0] = g_foot[1] = -1;
+            bool has_child[kMaxSegments] = {};
+            for (int s = 0; s < count; ++s)
+                if (segments[s].parent >= 0 && segments[s].parent < count)
+                    has_child[segments[s].parent] = true;
+            for (int k = 0; k < 2; ++k)
+            {
+                const int hip = g_hip[k];
+                if (hip < 0)
+                    continue;
+                int foot = -1;
+                for (int s = 0; s < count; ++s)
+                    if (!has_child[s] &&
+                        segment_is_in_head_subtree(segments, count, s, hip) &&
+                        (foot < 0 || saved[s][14] < saved[foot][14]))
+                        foot = s;
+                g_foot[k] = foot;
+                int path[64];
+                int n = 0;
+                for (int s = foot; s >= 0 && s < count && n < 64;
+                     s = segments[s].parent)
+                {
+                    path[n++] = s;
+                    if (s == hip)
+                        break;
+                }
+                if (n >= 3 && path[n - 1] == hip)
+                    g_knee[k] = n == 3 ? path[1] : path[2];
+            }
+        }
 
         void find_hips(const ModelSegment* segments, int count,
                        const float (*saved)[16])
@@ -10102,8 +10427,10 @@ namespace trlvr
                         g_hip[k] = a;
                         break;
                     }
-            log("board: dangle legs -- feet %d/%d, pelvis %d, hips %d/%d",
-                foot[0], foot[1], common, g_hip[0], g_hip[1]);
+            find_knees(segments, count, saved);
+            log("board: dangle legs -- feet %d/%d, pelvis %d, hips %d/%d, "
+                "knees %d/%d", foot[0], foot[1], common, g_hip[0], g_hip[1],
+                g_knee[0], g_knee[1]);
         }
 
         // Rotation of `angle` radians about a unit world axis, row-vector
@@ -10590,7 +10917,7 @@ namespace trlvr
 
         bool third_person_gear_hud_hidden()
         {
-            return config().immersive_controls &&
+            return config().immersive_any() &&
                    !config().gear_menu_radial && !g_first_person_active &&
                    !g_first_person_instance;
         }
@@ -10800,7 +11127,7 @@ namespace trlvr
                                      int a4, int a5, void* model, float a7,
                                      void* colour, void* transform)
         {
-            if (!config().immersive_controls || g_first_person_active ||
+            if (!config().hands_on_controllers || g_first_person_active ||
                 g_first_person_instance || !instance)
                 return;
             bool cinematic = false;
@@ -11131,6 +11458,7 @@ namespace trlvr
                     {
                         float joint[3];
                         if (g_pluck.hand != hand &&
+                            g_pluck.god.hand2 != hand &&
                             first_person_palm_local(hand, palm_local) &&
                             pose_begin(g_pose_work, segments, count,
                                        virtual_count, matrices) &&
@@ -11162,7 +11490,9 @@ namespace trlvr
                         // a recorded pose cannot be placed.
                         float pinch[3];
                         bool holding_posed = false;
-                        if (g_pluck.hand == hand &&
+                        // (The second hand of a two-hand hold pinches too.)
+                        if ((g_pluck.hand == hand ||
+                             g_pluck.god.hand2 == hand) &&
                             first_person_palm_local(hand, palm_local))
                         {
                             if (pose_begin(g_pose_work, segments, count,
@@ -11216,14 +11546,21 @@ namespace trlvr
                             // Drawn at 1/F about the head; the projection
                             // scales by F, so the world pinch is there.
                             const float grow = camera_world_scale_factor();
+                            float world_pinch[3];
                             for (int k = 0; k < 3; ++k)
-                                g_pluck.pinch[k] = camera_to_world.m[3][k] +
+                                world_pinch[k] = camera_to_world.m[3][k] +
                                     (pinch[k] - camera_to_world.m[3][k]) *
                                     grow;
-                            g_pluck.pinch_time = GetTickCount();
-                            for (int k = 0; k < 3; ++k)
-                                g_index_seen[hand].point[k] = g_pluck.pinch[k];
-                            g_index_seen[hand].time = g_pluck.pinch_time;
+                            // Only the first hand's pinch is the hang.
+                            if (g_pluck.hand == hand)
+                            {
+                                memcpy(g_pluck.pinch, world_pinch,
+                                       sizeof(world_pinch));
+                                g_pluck.pinch_time = GetTickCount();
+                            }
+                            memcpy(g_index_seen[hand].point, world_pinch,
+                                   sizeof(world_pinch));
+                            g_index_seen[hand].time = GetTickCount();
                         }
                         else if (flick_posed)
                         {
@@ -11294,6 +11631,18 @@ namespace trlvr
                                     v += tip[row] * to_head.m[row][axis];
                                 hs.index_tip_head[axis] = v;
                             }
+                        }
+                        {
+                            // The real controller's tracking position
+                            // (metres, no stretch), sampled with the points.
+                            float rp[3], rr[9];
+                            hs.real_ok = vr_controller_tracking_pose(
+                                hand == 0, rp, rr);
+                            for (int k = 0; k < 3; ++k)
+                                hs.real[k] = (hs.real_ok &&
+                                              std::isfinite(rp[k])) ? rp[k]
+                                                                    : 0.0f;
+                            ++hs.real_seq;
                         }
                         hs.posed = posed_ok;
                         hs.time = GetTickCount();
@@ -11493,6 +11842,12 @@ namespace trlvr
             float full[kMaxSegments][16];
         };
 
+        // The one carry save of a draw of her: in use (non-null matrices)
+        // from carry_apply to carry_restore, by detour_draw_instance_body
+        // for her own draw and by detour_wet_layer around the wet-skin
+        // pass, so a draw nested inside either is not carried again.
+        CarrySave g_draw_carry;
+
         bool carry_apply(void* instance, void* model, CarrySave* save)
         {
             save->matrices = nullptr;
@@ -11500,10 +11855,12 @@ namespace trlvr
             // Held or thrown; an arm lead (only her arm reaches for the
             // hand, she stands); or standing on a palm.
             const bool drawn = pluck_drawn(ps);
+            // Held or tossed by the torso fist (god_torso).
+            const bool tdrawn = torso_drawn(g_torso.god);
             const int held_arm = ps.part == kPluckArm0 ? 0
                 : ps.part == kPluckArm1 ? 1 : -1;
             const bool lead = !drawn && ps.hand >= 0 && held_arm >= 0;
-            if ((!drawn && !lead && g_pluck.palm < 0) ||
+            if ((!drawn && !lead && !tdrawn && g_pluck.palm < 0) ||
                 g_first_person_active || !instance)
                 return false;
             __try
@@ -11568,6 +11925,86 @@ namespace trlvr
                         pose_commit(g_pose_work, matrices);
                     return true;
                 }
+                // The torso fist's doll (god_torso.h): her real pose, the
+                // knees bent about the knees, each limb turned about its
+                // real joint (arms about the shoulders, legs about the
+                // hips, the head about its joint), then every bone by the
+                // body matrix. Her gear follows by the body matrix alone.
+                if (tdrawn)
+                {
+                    const TorsoState& ts = g_torso.god;
+                    const Mat4 body = torso_body_matrix(ts, g_torso.in);
+                    const unsigned char* prop =
+                        *reinterpret_cast<unsigned char* const*>(kPlayerProp);
+                    const int head = prop ? *reinterpret_cast<const int*>(
+                        prop + kOffPlayerPropHeadSegment) : -1;
+                    if (instance == lara && arms_ok && head >= 0 &&
+                        head < count &&
+                        pose_begin(g_pose_work, segments, count, total - count,
+                                   matrices))
+                    {
+                        if (g_hip_model != m)
+                        {
+                            g_hip_model = m;
+                            find_hips(segments, count, g_pose_work.saved);
+                        }
+                        const bool* leg_left = g_torso.leg_left;
+                        for (int c = 0; c < 2; ++c)
+                        {
+                            const int knee = g_knee[c];
+                            if (knee < 0 || knee >= count)
+                                continue;
+                            float pivot[3];
+                            pose_joint(g_pose_work, knee, pivot);
+                            pose_rotate_subtree(g_pose_work, knee, pivot,
+                                ts.knee_rotation[leg_left[c] ? 0 : 1]);
+                        }
+                        for (int c = 0; c < 2; ++c)
+                        {
+                            float pivot[3];
+                            pose_joint(g_pose_work, arm[c][0], pivot);
+                            pose_rotate_subtree(g_pose_work, arm[c][0], pivot,
+                                torso_limb_rotation(ts, kTorsoArm0 + c));
+                        }
+                        for (int c = 0; c < 2; ++c)
+                        {
+                            if (g_hip[c] < 0 || g_hip[c] >= count)
+                                continue;
+                            float pivot[3];
+                            pose_joint(g_pose_work, g_hip[c], pivot);
+                            pose_rotate_subtree(g_pose_work, g_hip[c], pivot,
+                                torso_limb_rotation(ts, leg_left[c]
+                                                        ? kTorsoLeg0
+                                                        : kTorsoLeg1));
+                        }
+                        {
+                            float pivot[3];
+                            pose_joint(g_pose_work, head, pivot);
+                            pose_rotate_subtree(g_pose_work, head, pivot,
+                                torso_limb_rotation(ts, kTorsoHead));
+                        }
+                        for (int s2 = 0; s2 < count; ++s2)
+                        {
+                            g_pose_work.xform[s2] = g_pose_work.xform[s2] * body;
+                            g_pose_work.changed[s2] = true;
+                        }
+                        // Her arms as drawn (the pluck's second-grab zones
+                        // are not used by the torso grab, but keep them true).
+                        g_pluck.drawn_ok = false;
+                        pose_commit(g_pose_work, matrices);
+                    }
+                    else
+                    {
+                        for (int s2 = 0; s2 < total; ++s2)
+                        {
+                            const Mat4 moved =
+                                matrix_from_floats(save->full[s2]) * body;
+                            memcpy(matrices + s2 * 16, &moved.m[0][0],
+                                   sizeof(moved.m));
+                        }
+                    }
+                    return true;
+                }
                 // Standing on a palm: her own animation, moved there.
                 if (!drawn)
                 {
@@ -11617,17 +12054,38 @@ namespace trlvr
                         g_pivot_valid = true;
                     }
                 }
-                // Hanging: the grab point goes to the hand, tilted by the
-                // pendulum (translate(-grab) * body_rotation *
-                // translate(hang), as pluck_body_matrix). The grab point is
+                // Hanging: pluck_body_matrix, translate(-grab) *
+                // body_rotation * translate(hang) (flying: about her centre,
+                // from the frame of the throw, `fly_in`). The grab point is
                 // the raised wrist of a held arm, her higher wrist with a
-                // dangle animation, else where she was pinched.
+                // dangle animation, else where she was pinched. `draw` is
+                // the state with the hang at this draw's pinch.
                 const bool wrist_pivot = held_arm < 0 && g_dangle_active &&
                                          g_pivot_valid;
-                float grab[3];
-                for (int k = 0; k < 3; ++k)
-                    grab[k] = wrist_pivot ? g_pivot[k]
-                        : g_pluck.root[k] - ps.grab_offset[k];
+                PluckState draw = ps;
+                if (!ps.flying && ps.two_t <= 0.0f && ps.hand2 < 0 &&
+                    ps.release_chain < 0)
+                    hang_point(draw.hang);
+                PluckInput gi = ps.flying ? g_pluck.fly_in : g_pluck.god_in;
+                if (!ps.flying)
+                {
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        gi.root[k] = g_pluck.root[k];
+                        gi.wrist_pivot[k] = g_pivot[k];
+                    }
+                    gi.wrist_pivot_valid = wrist_pivot;
+                }
+                // Two hands: an arm drawn reaching to its wrist target (held
+                // by either hand) is not raised, and its pivot is the
+                // module's.
+                const bool reaching[2] = { pluck_arm_reaches(ps, 0),
+                                           pluck_arm_reaches(ps, 1) };
+                const bool reach_any = reaching[0] || reaching[1];
+                const float two_w = pluck_two_weight(ps);
+                Mat4 body = Mat4::identity();
+                if (reach_any)
+                    body = pluck_body_matrix(draw, gi);
                 const bool posed = arms_ok &&
                     pose_begin(g_pose_work, segments, count, total - count,
                                matrices);
@@ -11640,9 +12098,11 @@ namespace trlvr
                     }
                     // Her arms first, on her own pose (procedural, as
                     // Underworld): a held arm raised straight up (she hangs
-                    // from that wrist); held by the head, both arms up
-                    // (default) or limp at her sides (god_arms_limp). The
-                    // elbows of raised arms bend outward, away from her.
+                    // from that wrist) or reaching for its wrist target
+                    // (two hands); held by the head, both arms up (default)
+                    // or limp at her sides (god_arms_limp); the arm she does
+                    // not hang by limp. The elbows of raised arms bend
+                    // outward, away from her.
                     const float metre = config().world_scale;
                     float S[2][3], reach[2], out[2][3];
                     bool out_ok[2];
@@ -11667,13 +12127,55 @@ namespace trlvr
                         out[c][2] = 0.0f;
                         out_ok[c] = normalise3(out[c]) > 1e-3f;
                     }
+                    const Mat4 to_local = reach_any ? rigid_inverse(body)
+                                                    : Mat4::identity();
                     for (int c = 0; c < 2; ++c)
                     {
+                        // Where a limp arm's wrist hangs: a hand's width out
+                        // from her hip, a little forward.
+                        float limp_to[3];
+                        for (int k = 0; k < 3; ++k)
+                            limp_to[k] = S[c][k] + (out_ok[c]
+                                ? out[c][k] * 0.06f * metre : 0.0f) +
+                                (k < 2 ? gi.facing[k] * 0.03f * metre : 0.0f);
+                        limp_to[2] -= reach[c] * 0.96f;
+                        if (reaching[c])
+                        {
+                            if (!ps.flying)
+                            {
+                                const float* w = ps.wrist_target[c];
+                                for (int j = 0; j < 3; ++j)
+                                    g_pluck.reach_local[c][j] =
+                                        w[0] * to_local.m[0][j] +
+                                        w[1] * to_local.m[1][j] +
+                                        w[2] * to_local.m[2][j] +
+                                        to_local.m[3][j];
+                                g_pluck.reach_local_ok[c] = true;
+                            }
+                            if (!g_pluck.reach_local_ok[c])
+                                continue;
+                            // No further than the arm goes.
+                            float to[3], d[3];
+                            for (int k = 0; k < 3; ++k)
+                                d[k] = g_pluck.reach_local[c][k] - S[c][k];
+                            const float len = sqrtf(dot3(d, d));
+                            const float cap = reach[c] * 0.98f;
+                            const float scale = len > cap && len > 1e-4f
+                                ? cap / len : 1.0f;
+                            for (int k = 0; k < 3; ++k)
+                                to[k] = S[c][k] + d[k] * scale;
+                            pose_arm_reach(g_pose_work, arm[c][0], arm[c][1],
+                                           arm[c][2], to,
+                                           out_ok[c] ? out[c] : nullptr);
+                            continue;
+                        }
                         const bool raise = held_arm >= 0
                             ? c == held_arm
                             : !wrist_pivot && !config().god_arms_limp;
-                        const bool limp = held_arm < 0 && !wrist_pivot &&
-                                          config().god_arms_limp;
+                        // The arm she does not hang by hangs limp (ragdoll;
+                        // the limb pendulums swing it), as with god_arms_limp.
+                        const bool limp = held_arm >= 0 ? c != held_arm
+                            : !wrist_pivot && config().god_arms_limp;
                         float to[3];
                         if (raise)
                         {
@@ -11686,58 +12188,123 @@ namespace trlvr
                         }
                         else if (limp)
                         {
-                            // A hand's width out from her hip.
+                            // Just let go of (two hands): from its reach,
+                            // eased down.
                             for (int k = 0; k < 3; ++k)
-                                to[k] = S[c][k] + (out_ok[c]
-                                    ? out[c][k] * 0.06f * metre : 0.0f);
-                            to[2] -= reach[c] * 0.96f;
+                                to[k] = limp_to[k];
+                            if (c == ps.release_chain && two_w > 0.0f &&
+                                g_pluck.reach_local_ok[c])
+                                for (int k = 0; k < 3; ++k)
+                                    to[k] += (g_pluck.reach_local[c][k] -
+                                              to[k]) * two_w;
                             pose_arm_reach(g_pose_work, arm[c][0], arm[c][1],
                                            arm[c][2], to, nullptr);
                         }
                     }
-                    if (held_arm >= 0)
+                    // The held arm's wrist, as raised, is the hang's pivot.
+                    if (!reach_any && held_arm >= 0)
                     {
+                        float grab[3];
                         pose_joint(g_pose_work, arm[held_arm][2], grab);
                         for (int k = 0; k < 3; ++k)
                             g_pluck.draw_pivot[k] = grab[k];
                         g_pluck.draw_pivot_valid = true;
+                        if (!ps.flying)
+                            for (int k = 0; k < 3; ++k)
+                                gi.arm_pivot[held_arm][k] = grab[k];
                     }
-                }
-                else if (held_arm >= 0)
-                    for (int k = 0; k < 3; ++k)
-                        grab[k] = g_pluck.draw_pivot_valid
-                            ? g_pluck.draw_pivot[k]
-                            : g_pluck.god_in.arm_pivot[held_arm][k];
-                float hang[3];
-                hang_point(hang);
-                const Mat4 body = translation(-grab[0], -grab[1], -grab[2]) *
-                    ps.body_rotation *
-                    translation(hang[0], hang[1], hang[2]);
-                if (posed)
-                {
+                    // Which hip is her left (limbs 2 / 3 are her left /
+                    // right leg).
+                    bool leg_left[2] = { true, false };
+                    if (g_hip[0] >= 0 && g_hip[1] >= 0 && g_hip[0] < count &&
+                        g_hip[1] < count)
+                    {
+                        float h0[3], h1[3], d[3], left[3];
+                        pose_joint(g_pose_work, g_hip[0], h0);
+                        pose_joint(g_pose_work, g_hip[1], h1);
+                        for (int k = 0; k < 3; ++k)
+                        {
+                            d[k] = h0[k] - h1[k];
+                            left[k] = S[0][k] - S[1][k];
+                        }
+                        leg_left[0] = dot3(d, left) >= 0.0f;
+                        leg_left[1] = !leg_left[0];
+                    }
+                    // Ragdoll knees: each shin turned back about its knee,
+                    // relaxed and more as the thigh swings forward
+                    // (knee_rotation).
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const int knee = g_knee[c];
+                        if (knee < 0 || knee >= count)
+                            continue;
+                        float pivot[3];
+                        pose_joint(g_pose_work, knee, pivot);
+                        pose_rotate_subtree(g_pose_work, knee, pivot,
+                                            ps.knee_rotation[leg_left[c]
+                                                             ? 0 : 1]);
+                    }
+                    // The limb pendulums, in her own frame before the body
+                    // turn: 0/1 her left/right arm about the shoulder, 2/3
+                    // her legs about the hips; an arm held, or reaching,
+                    // keeps its pose.
+                    for (int l = 0; l < 2; ++l)
+                    {
+                        const int root = arm[l][0];
+                        if (root < 0 || root >= count || l == held_arm ||
+                            reaching[l])
+                            continue;
+                        float pivot[3];
+                        pose_joint(g_pose_work, root, pivot);
+                        pose_rotate_subtree(g_pose_work, root, pivot,
+                                            ps.limb_rotation[l]);
+                    }
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        if (g_hip[c] < 0 || g_hip[c] >= count)
+                            continue;
+                        float pivot[3];
+                        pose_joint(g_pose_work, g_hip[c], pivot);
+                        pose_rotate_subtree(g_pose_work, g_hip[c], pivot,
+                                            ps.limb_rotation[leg_left[c]
+                                                             ? 2 : 3]);
+                    }
+                    if (!reach_any)
+                        body = pluck_body_matrix(draw, gi);
                     for (int s = 0; s < count; ++s)
                     {
                         g_pose_work.xform[s] = g_pose_work.xform[s] * body;
                         g_pose_work.changed[s] = true;
                     }
-                    // The limb pendulums: 0/1 her left/right arm about the
-                    // shoulder, 2/3 her legs about the hips; the held arm
-                    // keeps its pose.
-                    const int limb[4] = { arm[0][0], arm[1][0], g_hip[0],
-                                          g_hip[1] };
-                    for (int l = 0; l < 4; ++l)
+                    // Her arms as drawn: the second grab's zone next frame.
+                    for (int c = 0; c < 2; ++c)
                     {
-                        if (limb[l] < 0 || limb[l] >= count || l == held_arm)
-                            continue;
-                        float pivot[3];
-                        pose_joint(g_pose_work, limb[l], pivot);
-                        pose_rotate_subtree(g_pose_work, limb[l], pivot,
-                                            ps.limb_rotation[l]);
+                        float el[3];
+                        pose_joint(g_pose_work, arm[c][0],
+                                   g_pluck.drawn_shoulder[c]);
+                        pose_joint(g_pose_work, arm[c][1], el);
+                        pose_joint(g_pose_work, arm[c][2],
+                                   g_pluck.drawn_wrist[c]);
+                        for (int k = 0; k < 3; ++k)
+                            g_pluck.drawn_end[c][k] =
+                                g_pluck.drawn_wrist[c][k] +
+                                (g_pluck.drawn_wrist[c][k] - el[k]) * 0.7f;
                     }
+                    g_pluck.drawn_ok = true;
                     pose_commit(g_pose_work, matrices);
                 }
                 else
                 {
+                    if (!reach_any)
+                    {
+                        if (held_arm >= 0 && !ps.flying)
+                            for (int k = 0; k < 3; ++k)
+                                gi.arm_pivot[held_arm][k] =
+                                    g_pluck.draw_pivot_valid
+                                        ? g_pluck.draw_pivot[k]
+                                        : g_pluck.god_in.arm_pivot[held_arm][k];
+                        body = pluck_body_matrix(draw, gi);
+                    }
                     for (int s = 0; s < total; ++s)
                     {
                         const Mat4 moved =
@@ -11946,8 +12513,11 @@ namespace trlvr
                 return false;
             const char* name = *reinterpret_cast<const char**>(
                 obj + kOffObjectName);
+            // The Amanda costumes ("amanda_player", "amanda_player_alt") use
+            // Lara's 109-bone rig, so the body physics work on them too.
             if (!name || (strcmp(name, "lara") != 0 &&
-                          strncmp(name, "lara_", 5) != 0))
+                          strncmp(name, "lara_", 5) != 0 &&
+                          strncmp(name, "amanda_player", 13) != 0))
                 return false;
             const int num_models = *reinterpret_cast<short*>(
                 obj + kOffObjectNumModels);
@@ -12262,7 +12832,8 @@ namespace trlvr
             save->matrices = nullptr;
             if (!config().wall_touch || g_first_person_active ||
                 g_first_person_instance || !instance ||
-                g_pluck.hand >= 0 || g_pluck.palm >= 0 || g_pluck.god.flying)
+                g_pluck.hand >= 0 || g_pluck.palm >= 0 || g_pluck.god.flying ||
+                torso_drawn(g_torso.god))
                 return false;
             void* draw_model = nullptr;
             ModelSegment* segments = nullptr;
@@ -12793,8 +13364,9 @@ namespace trlvr
                 static bool have_root = false, have_velocity = false;
                 float push[3] = { 0.0f, 0.0f, 0.0f };
                 float root[3];
-                memcpy(root, static_cast<const unsigned char*>(instance) +
-                       0x10, sizeof(root));
+                // Where she is drawn (held, tossed, on a palm), not her
+                // real instance.
+                touch_root(static_cast<const unsigned char*>(instance), root);
                 LARGE_INTEGER now{}, frequency{};
                 QueryPerformanceCounter(&now);
                 QueryPerformanceFrequency(&frequency);
@@ -12866,7 +13438,7 @@ namespace trlvr
                         float out[3], normal[3], depth = 0.0f;
                         int box_index = -1;
                         const bool touching = n > 0 &&
-                            g_pluck.hand != hand && g_pluck.palm != hand &&
+                            !hand_holds_her(hand) &&
                             chest_box_push(points, n, out, normal, &depth,
                                            &box_index);
                         // In first person the hand is stopped at her
@@ -12895,7 +13467,9 @@ namespace trlvr
                         static int held_point[2] = { 0, 0 };
                         static bool grabbing[2] = { false, false };
                         static float entry[2][3];
-                        const bool gripping = g_tp_grip[hand];
+                        // (A fist the torso grab owns holds no part.)
+                        const bool gripping = g_tp_grip[hand] &&
+                                              !g_torso.fist_block[hand];
                         if (!gripping)
                             grabbing[hand] = false;
                         if (!touching && !grabbing[hand])
@@ -13171,11 +13745,31 @@ namespace trlvr
         // (soft_body) and fingertip dent, and from those each vertex's new
         // shorts. Third person and board mode; in first person whenever her
         // body is drawn (no hand touch there: those are her own hands).
-        // Her model's vertex shorts are fixed point: 256 per game unit
+        // Her model's vertex shorts are fixed point: 256 per game unit for
+        // vanilla (model_raw_per_unit reads each model's own)
         // (simulator run 2026-10-19: the pelvis spans +-11690 raw for
         // +-0.16 m at 278 units a metre; a thigh -24599 raw = -0.35 m).
         // Joints (bind_joint_position) are plain game units.
         const float kRearRawPerUnit = 256.0f;
+
+        // A model's own raw-to-unit factor: 1 / its model_scale (+0x10, the
+        // vec4 before the vertex count; cdcEditor's importer multiplies
+        // the shorts by it). Vanilla is 1/256, but rebuilt models differ:
+        // the smooth Lara 1/242, the refined one 1/147, so a fixed 256 put
+        // her hips 5% / 42% too small and the fit missed (2026-11-23).
+        // Falls back to 256 when the field is not a sane scale. Call
+        // inside the caller's __try.
+        float model_raw_per_unit(const void* model)
+        {
+            if (!model)
+                return kRearRawPerUnit;
+            const float s = *reinterpret_cast<const float*>(
+                static_cast<const unsigned char*>(model) + 0x10);
+            if (!std::isfinite(s) || !(s > 1.0f / 4096.0f) ||
+                !(s < 1.0f / 32.0f))
+                return kRearRawPerUnit;
+            return 1.0f / s;
+        }
 
         struct RearVertex
         {
@@ -13196,6 +13790,7 @@ namespace trlvr
             const ModelSegment* segments = nullptr;
             int count = 0;
             int virtual_count = 0;
+            float raw = kRearRawPerUnit;    // raw shorts per game unit
             bool usable = false;
             int pelvis = -1;
             int thigh[2] = { -1, -1 };
@@ -13220,6 +13815,7 @@ namespace trlvr
             rear::RearDentSphere dent[2];
             float last_lead[2][3] = {};
             bool have_lead[2] = { false, false };
+            RealTrack real[2];
             float last_root[3] = {};
             bool have_root = false;
             bool touching[2] = { false, false };
@@ -13315,6 +13911,7 @@ namespace trlvr
             r.virtual_count = virtual_count;
             r.vertices = vertices;
             r.vertex_count = vertex_count;
+            r.raw = model_raw_per_unit(model);
             r.usable = false;
             r.weights_valid = false;
             r.verts.clear();
@@ -13395,9 +13992,9 @@ namespace trlvr
                 const unsigned char* p = vertices + i * 16;
                 const int seg = *reinterpret_cast<const short*>(p + 10);
                 const short* xyz = reinterpret_cast<const short*>(p);
-                out[0] = xyz[0] / kRearRawPerUnit;
-                out[1] = xyz[1] / kRearRawPerUnit;
-                out[2] = xyz[2] / kRearRawPerUnit;
+                out[0] = xyz[0] / r.raw;
+                out[1] = xyz[1] / r.raw;
+                out[2] = xyz[2] / r.raw;
                 return seg;
             };
             // Blended joints: where their vertices' origin is in the bind
@@ -13468,6 +14065,14 @@ namespace trlvr
                 for (int m = 1; m < 4; ++m)
                     if (origin_error[m] < origin_error[mode])
                         mode = m;
+                // The scores only advise (they stay in the log): a blended
+                // vertex is stored from its index bone's joint (cdcEditor's
+                // exporter writes it that way, and vanilla Lara and Amanda
+                // score best there). On densely blended smoothed models the
+                // nearest-vertex score picked "w index + (1-w) weight",
+                // which put every blended hip vertex centimetres off, so
+                // they froze or tore while the rest moved (2026-10-29).
+                mode = 2;
             }
             for (int v = 0; v < virtual_count; ++v)
             {
@@ -13508,10 +14113,11 @@ namespace trlvr
             r.usable = !r.verts.empty();
             const float cm = metre * 0.01f;
             const rear::RearFit& f = r.fit;
-            log("rear: model %p -- pelvis bone %d (legs %d / %d, joint %.1f "
+            log("rear: model %p -- %.1f raw per unit, pelvis bone %d (legs "
+                "%d / %d, joint %.1f "
                 "cm up), %d body vertices of %d; blended-joint origin: %s "
                 "(mean miss %.2f / %.2f / %.2f / %.2f cm over %d vertices)",
-                model, pelvis, r.thigh[0], r.thigh[1], pj[2] / cm,
+                model, r.raw, pelvis, r.thigh[0], r.thigh[1], pj[2] / cm,
                 (int)r.verts.size(), vertex_count, kOriginName[mode],
                 origin_samples ? origin_error[0] / origin_samples / cm : 0.0,
                 origin_samples ? origin_error[1] / origin_samples / cm : 0.0,
@@ -13568,7 +14174,7 @@ namespace trlvr
                     {
                         lo[k] = xyz[k] < lo[k] ? xyz[k] : lo[k];
                         hi[k] = xyz[k] > hi[k] ? xyz[k] : hi[k];
-                        const float b = xyz[k] / kRearRawPerUnit +
+                        const float b = xyz[k] / r.raw +
                                         g_rear_origin[sg][k] - pj[k];
                         blo[k] = b < blo[k] ? b : blo[k];
                         bhi[k] = b > bhi[k] ? b : bhi[k];
@@ -13614,6 +14220,8 @@ namespace trlvr
             a.core = cfg.body_rear_core;
             a.seam_cm = cfg.body_rear_seam_cm;
             a.cleft_width_cm = cfg.body_rear_cleft_width_cm;
+            a.seam_inset_cm = cfg.body_rear_seam_inset_cm;
+            a.flare_start_cm = cfg.body_rear_flare_start_cm;
             return a;
         }
 
@@ -13624,7 +14232,49 @@ namespace trlvr
                    a.height == b.height && a.spread_cm == b.spread_cm &&
                    a.lift_cm == b.lift_cm && a.core == b.core &&
                    a.seam_cm == b.seam_cm &&
-                   a.cleft_width_cm == b.cleft_width_cm;
+                   a.cleft_width_cm == b.cleft_width_cm &&
+                   a.seam_inset_cm == b.seam_inset_cm &&
+                   a.flare_start_cm == b.flare_start_cm;
+        }
+
+        // The baseline (rest) shape's offset at a bind point: fullness, hip
+        // flare and cleft close, model units.
+        void rear_baseline_at(const rear::RearShape& shape,
+                              const rear::RearWeights& w, const float p[3],
+                              float delta[3])
+        {
+            const Config& cfg = config();
+            const float cm = cfg.world_scale * 0.01f;
+            rear::rear_baseline(shape, w, p, cfg.body_rear_fullness_cm * cm,
+                                cfg.body_rear_flare_cm * cm,
+                                cfg.body_rear_cleft_close_cm * cm, delta);
+        }
+
+        // Both cheeks' god-mode touch zones: fitted, grown by the touch
+        // slider and the fullness, and moved sideways with the hip flare
+        // and cleft close at their centres so they follow the shape.
+        void rear_touch_zones(const rear::RearFit& fit,
+                              const rear::RearShape& shape,
+                              const rear::RearAdjust& adj, float zone_c[2][3],
+                              float zone_s[2][3])
+        {
+            const Config& cfg = config();
+            const float cm = cfg.world_scale * 0.01f;
+            for (int c = 0; c < 2; ++c)
+            {
+                rear::rear_touch_zone(fit, adj, c, cfg.world_scale,
+                                      cfg.body_rear_touch_cm +
+                                          fmaxf(cfg.body_rear_fullness_cm,
+                                                0.0f), zone_c[c], zone_s[c]);
+                const rear::RearWeights w = rear::rear_weights(shape,
+                                                               zone_c[c]);
+                float side[3] = {};
+                rear::rear_flare(shape, w, zone_c[c],
+                                 cfg.body_rear_flare_cm * cm, side);
+                rear::rear_cleft_close(shape, zone_c[c],
+                                       cfg.body_rear_cleft_close_cm * cm, side);
+                zone_c[c][0] += side[0];
+            }
         }
 
         // God-mode hands on the cheeks (third person): each hand's index
@@ -13645,12 +14295,7 @@ namespace trlvr
                 cfg.hand_body_collision && scale > 0.0f;
             const rear::RearAdjust adj = rear_adjust();
             float zone_c[2][3], zone_s[2][3];
-            for (int c = 0; c < 2; ++c)
-                rear::rear_touch_zone(r.fit, adj, c, metre,
-                                      cfg.body_rear_touch_cm +
-                                          fmaxf(cfg.body_rear_fullness_cm,
-                                                0.0f), zone_c[c],
-                                      zone_s[c]);
+            rear_touch_zones(r.fit, r.shape, adj, zone_c, zone_s);
             const float grow = camera_world_scale_factor();
             const float dent_world = cfg.body_rear_dent * 0.009f * metre * grow;
             for (int h = 0; h < 2; ++h)
@@ -13660,8 +14305,7 @@ namespace trlvr
                 // Underworld's rear; points[0], the index tip, dents).
                 float points[4][3];
                 const int n = hand_contact_points(h, points, true);
-                const bool valid = allowed && n > 0 && g_pluck.hand != h &&
-                                   g_pluck.palm != h;
+                const bool valid = allowed && n > 0 && !hand_holds_her(h);
                 if (!valid)
                 {
                     for (int c = 0; c < 2; ++c)
@@ -13674,12 +14318,20 @@ namespace trlvr
                     continue;
                 }
                 float rel_v[3] = {};
+                const float real_speed = hand_real_speed(h, r.real[h], dt);
                 const bool v_ok = r.have_lead[h] && root_v_ok && dt > 0.0f &&
                                   dt < 0.1f;
                 if (v_ok)
+                {
+                    // The hand's own velocity, capped to the real hand's
+                    // speed (arm stretch), then relative to her root.
+                    float hv[3];
                     for (int k = 0; k < 3; ++k)
-                        rel_v[k] = (points[0][k] - r.last_lead[h][k]) / dt -
-                                   root_v[k];
+                        hv[k] = (points[0][k] - r.last_lead[h][k]) / dt;
+                    cap_hand_speed(hv, real_speed, metre * grow);
+                    for (int k = 0; k < 3; ++k)
+                        rel_v[k] = hv[k] - root_v[k];
+                }
                 memcpy(r.last_lead[h], points[0], sizeof(points[0]));
                 r.have_lead[h] = true;
                 float local[4][3];
@@ -13727,7 +14379,7 @@ namespace trlvr
                     in.point_valid = true;
                     in.velocity_valid = v_ok;
                     in.hand = h;
-                    in.gripping = g_tp_grip[h];
+                    in.gripping = g_tp_grip[h] && !g_torso.fist_block[h];
                     in.metre = metre;
                     in.now_seconds = now;
                     for (int k = 0; k < 3; ++k)
@@ -13806,8 +14458,7 @@ namespace trlvr
                 r.debug_frame = g_present_count;
             }
             float root[3];
-            memcpy(root, static_cast<const unsigned char*>(instance) + 0x10,
-                   sizeof(root));
+            touch_root(static_cast<const unsigned char*>(instance), root);
             float root_v[3] = {};
             const bool root_v_ok = r.have_root && dt > 0.001f && dt < 0.1f;
             if (root_v_ok)
@@ -13832,7 +14483,9 @@ namespace trlvr
                 r.offset[c][0] = r.offset[c][1] = r.offset[c][2] = 0.0f;
             r.cleft[0] = r.cleft[2] = 0.0f;
             r.cleft[1] = -cfg.body_rear_cleft_cm * metre * 0.01f;
-            if (!sane)
+            // Motion off (the physics preset's Off): the shape stays, the
+            // springs, hands and dents rest.
+            if (!sane || !cfg.body_rear_motion)
             {
                 for (int c = 0; c < 2; ++c)
                     r.spring[c] = JiggleState();
@@ -13847,6 +14500,19 @@ namespace trlvr
                 p.max_offset = cfg.body_rear_max_cm * metre * 0.01f;
                 p.touch_offset = 0.04f * metre;     // a hand takes it 4 cm further
                 p.reset_distance = 0.5f * metre;
+                // Her up axis its own spring (speed and damping multiples):
+                // the pelvis's rows are its axes in the world (x left,
+                // y back, z up). 1 and 1 = one spring, as before.
+                if (cfg.body_rear_up_speed != 1.0f ||
+                    cfg.body_rear_up_damping != 1.0f)
+                {
+                    p.axes_valid = true;
+                    for (int a = 0; a < 3; ++a)
+                        for (int k = 0; k < 3; ++k)
+                            p.axes[a][k] = m[4 * a + k];
+                    p.hz_scale[2] = cfg.body_rear_up_speed;
+                    p.damping_scale[2] = cfg.body_rear_up_damping;
+                }
                 const float gain[3] = {
                     cfg.body_rear_side * cfg.body_rear_gain,
                     cfg.body_rear_back * cfg.body_rear_gain,
@@ -13857,6 +14523,30 @@ namespace trlvr
                     float target[3], lag[3] = {};
                     rear::local_point_to_world(m, r.shape.cheek[c].centre,
                                                target);
+                    // Stride bounce: the same point carried by this side's
+                    // thigh, blended in, so each step lifts its own cheek.
+                    const int th = r.thigh[c];
+                    if (cfg.body_rear_stride > 0.0f && th >= 0 &&
+                        th < r.count && th != r.pelvis)
+                    {
+                        const float* mt = matrices + th * 16;
+                        const float ts = rear::matrix_scale(mt);
+                        bool ok = ts > 0.2f && ts < 5.0f;
+                        for (int k = 0; k < 16; ++k)
+                            ok = ok && std::isfinite(mt[k]);
+                        if (ok)
+                        {
+                            float local[3], on_thigh[3];
+                            for (int k = 0; k < 3; ++k)
+                                local[k] = r.shape.cheek[c].centre[k] +
+                                           g_rear_joint[r.pelvis][k] -
+                                           g_rear_joint[th][k];
+                            rear::local_point_to_world(mt, local, on_thigh);
+                            const float s = cfg.body_rear_stride;
+                            for (int k = 0; k < 3; ++k)
+                                target[k] += (on_thigh[k] - target[k]) * s;
+                        }
+                    }
                     JiggleContact contact;
                     rear::RearContact& t = r.contact[c];
                     for (int h = 0; h < 2; ++h)
@@ -13895,10 +14585,14 @@ namespace trlvr
                     if (!rear::world_dir_to_local(m, lag, lag_local))
                         lag_local[0] = lag_local[1] = lag_local[2] = 0.0f;
                     memcpy(r.lag[c], lag_local, sizeof(lag_local));
+                    // Big motions (jumps, landings, being carried) ease the
+                    // axis gains below 1 toward 1; gait bounce keeps them.
+                    const float event = rear::event_ramp(lag_local,
+                        cfg.body_rear_event_cm * metre * 0.01f, p.max_offset);
                     rear::cheek_offset(lag_local, gain, r.spring[c].boost,
                                        cfg.body_rear_inward,
                                        cfg.body_rear_test_cm * metre * 0.01f,
-                                       r.offset[c]);
+                                       r.offset[c], event);
                     // The absolute limit is applied once, per vertex below
                     // (a second curve here squeezed the range twice).
                 }
@@ -13910,16 +14604,17 @@ namespace trlvr
             for (int i = 0; i < (int)r.verts.size(); ++i)
             {
                 RearVertex& v = r.verts[i];
-                if (!dents && v.w.cheek[0] == 0.0f && v.w.cheek[1] == 0.0f &&
-                    v.w.cleft == 0.0f)
-                    continue;
-                // Baseline fullness first (body_rear_fullness_cm: the
-                // cheeks' own size at rest), then the spring's offsets and
-                // the dents on top of it.
+                // The baseline shape first (fullness, hip flare, cleft
+                // close: the cheeks at rest), then the spring's offsets and
+                // the dents on top of it. The flare reaches past the cheeks'
+                // regions (over the hip side), so only a vertex with no
+                // weight, no rest shape and no dent near is left alone.
                 float shifted[3] = { v.bind[0], v.bind[1], v.bind[2] };
-                rear::rear_inflate(r.shape, v.w, v.bind,
-                                   cfg.body_rear_fullness_cm * metre * 0.01f,
-                                   shifted);
+                rear_baseline_at(r.shape, v.w, v.bind, shifted);
+                if (!dents && v.w.cheek[0] == 0.0f && v.w.cheek[1] == 0.0f &&
+                    v.w.cleft == 0.0f && shifted[0] == v.bind[0] &&
+                    shifted[1] == v.bind[1] && shifted[2] == v.bind[2])
+                    continue;
                 float moved[3];
                 rear::rear_deform(shifted, v.w, r.offset, r.cleft, r.dent, 2,
                                   moved);
@@ -13938,7 +14633,7 @@ namespace trlvr
                 for (int k = 0; k < 3; ++k)
                 {
                     v.out[k] = rear::round_short((float)v.orig[k] +
-                        (moved[k] - v.bind[k]) * kRearRawPerUnit);
+                        (moved[k] - v.bind[k]) * r.raw);
                     differs = differs || v.out[k] != v.orig[k];
                 }
                 if (differs)
@@ -13950,7 +14645,7 @@ namespace trlvr
                 // goes body_rear_test_cm along bind +y (her back).
                 r.changed.clear();
                 const float push = cfg.body_rear_test_cm * metre * 0.01f *
-                                   kRearRawPerUnit;
+                                   r.raw;
                 for (int i = 0; i < (int)r.verts.size(); ++i)
                 {
                     RearVertex& v = r.verts[i];
@@ -14175,6 +14870,7 @@ namespace trlvr
             bool touching_last[2] = { false, false };
             float last_lead[2][3] = {};
             bool have_lead[2] = { false, false };
+            RealTrack real[2];
             float last_root[3] = {};
             bool have_root = false;
             // Her bone map, per model (push_map).
@@ -14518,11 +15214,13 @@ namespace trlvr
             const Config& cfg = config();
             const float metre = cfg.world_scale;
             // Board view's god hands, she is free.
-            const bool allowed = cfg.body_push && cfg.immersive_controls &&
+            const bool allowed = (cfg.body_push || cfg.god_swat) &&
+                cfg.hands_on_controllers &&
                 cfg.board_god_hand && camera_third_person_mode() == 2 &&
-                camera_world_scale_factor() >= 1.25f && g_pluck.hand < 0 &&
+                camera_world_scale_factor() >= 1.0f && g_pluck.hand < 0 &&
                 g_pluck.palm < 0 && !g_pluck.god.flying &&
-                !pluck_drawn(g_pluck.god) && metre > 0.0f;
+                !pluck_drawn(g_pluck.god) && !torso_drawn(g_torso.god) &&
+                metre > 0.0f;
             BodyBoneMap map;
             if (!allowed || !push_map(model, segments, count, mats, &map))
             {
@@ -14585,8 +15283,8 @@ namespace trlvr
             {
                 float points[4][3];
                 const int n = hand_contact_points(h, points, false);
-                if (!cfg.hand_body_collision || n == 0 || g_pluck.hand == h ||
-                    g_pluck.palm == h || push_hand_busy(h, tick))
+                if (!cfg.hand_body_collision || n == 0 || hand_holds_her(h) ||
+                    push_hand_busy(h, tick))
                 {
                     p.have_lead[h] = false;
                     p.touching_last[h] = false;
@@ -14594,10 +15292,19 @@ namespace trlvr
                 }
                 const bool v_ok = p.have_lead[h] && root_ok;
                 float rel_v[3] = {};
+                const float real_speed = hand_real_speed(h, p.real[h], dt);
                 if (v_ok)
+                {
+                    // The hand's own velocity, capped to the real hand's
+                    // speed (arm stretch), then relative to her root.
+                    float hv[3];
                     for (int k = 0; k < 3; ++k)
-                        rel_v[k] = (points[0][k] - p.last_lead[h][k]) / dt -
-                                   root_v[k];
+                        hv[k] = (points[0][k] - p.last_lead[h][k]) / dt;
+                    cap_hand_speed(hv, real_speed,
+                                   metre * camera_world_scale_factor());
+                    for (int k = 0; k < 3; ++k)
+                        rel_v[k] = hv[k] - root_v[k];
+                }
                 memcpy(p.last_lead[h], points[0], sizeof(points[0]));
                 p.have_lead[h] = true;
                 BodyHit best;
@@ -14619,6 +15326,35 @@ namespace trlvr
                 const bool inside = best_point >= 0;
                 if (inside)
                     g_tp_touch_time[h] = tick ? tick : 1;
+                // A swat: the hand arrives inside her this frame faster
+                // than god_swat_speed (real m/s), moving sideways enough to
+                // give a direction. One per second at most.
+                // KNOWN OVERLAP (user 2026-11-22): a fast hand into a soft
+                // part (chest, rear -- best.soft >= 0) is also a soft-body
+                // slap/jiggle; today it knocks her down as well. If that
+                // gets in the way: skip soft hits here, or raise
+                // god_swat_speed for them.
+                if (inside && cfg.god_swat && v_ok && !p.touching_last[h] &&
+                    !g_swat.pending && tick - g_swat.last > 1000)
+                {
+                    const float real_unit = metre * camera_world_scale_factor();
+                    const float speed = real_unit > 0.0f
+                        ? sqrtf(dot3(rel_v, rel_v)) / real_unit : 0.0f;
+                    const float flat = sqrtf(rel_v[0] * rel_v[0] +
+                                             rel_v[1] * rel_v[1]);
+                    if (std::isfinite(speed) && speed >= cfg.god_swat_speed &&
+                        flat > 0.5f * sqrtf(dot3(rel_v, rel_v)))
+                    {
+                        g_swat.pending = true;
+                        g_swat.dir[0] = rel_v[0] / flat;
+                        g_swat.dir[1] = rel_v[1] / flat;
+                        memcpy(g_swat.point, points[best_point],
+                               sizeof(g_swat.point));
+                        g_swat.speed = speed;
+                        g_swat.hand = h;
+                        g_swat.tick = tick ? tick : 1;
+                    }
+                }
                 if (inside && n_contacts < 2 && best.volume >= 0)
                 {
                     const int seg = body_push_segment_for_volume(
@@ -14685,7 +15421,8 @@ namespace trlvr
             float pivot[kPushSegments][3];
             for (int s = 0; s < kPushSegments; ++s)
                 memcpy(pivot[s], mats + pivot_bone[s] * 16 + 12, sizeof(pivot[s]));
-            body_push_step(p.state, bp, contacts, n_contacts, pivot,
+            body_push_step(p.state, bp, contacts,
+                           cfg.body_push ? n_contacts : 0, pivot,
                            p.vols.up, metre, dt);
             p.active = body_push_active(p.state);
         }
@@ -15305,7 +16042,7 @@ namespace trlvr
         // Called while Lara's first-person model is drawn.
         void pouch_items_draw(int a2, float a3, int a4, int a5)
         {
-            if (!config().immersive_controls || !g_draw_instance)
+            if (!config().gesture_controls || !g_draw_instance)
                 return;
             for (int item = 0; item < 2; ++item)
             {
@@ -15366,6 +16103,448 @@ namespace trlvr
             instance_cost_note(instance, ended.QuadPart - started.QuadPart);
         }
 
+        // Lara's wet-skin layer (after swimming): FUN_00463400 calls
+        // FUN_0044C2A0(instance, a2, a3, flags) for her while 0x0107F71F is
+        // non-zero (single call site 0x463E6E, cdecl, 4 stack args). It
+        // builds the wet model's blended joint matrices into the scratch
+        // buffer 0x0107F730 from inst+0x80 (FUN_0044C1F0) and then draws the
+        // wet model through DrawInstance; the skinning reads the real
+        // segments from inst+0x80 at draw time but those joints from the
+        // buffer. So the body edits her own draw gets (the carry while she
+        // is held, the push) go in here, before the game builds the buffer,
+        // and come back after: the layer follows the held, pushed body and
+        // does not stretch. Notes: WET_LAYER.md. The wet model's own
+        // vertices (the rear soft body edits her body model's) are not
+        // edited; see the comment in the body below.
+        typedef void(__cdecl* PFN_WetLayer)(void*, int, int, unsigned);
+        PFN_WetLayer g_wet_layer = nullptr;
+
+        // The rear jiggle for the wet layer. The wet model (0x0107F724) is a
+        // separate model whose source vertices (wetModel+0x24, count +0x20,
+        // 0x10 stride, segment short at +10) the body's rear edit never
+        // touches, so over her rear the layer sat still while the skin under
+        // it moved: see-through patches. It is NOT a copy of her body mesh
+        // (2042 vertices against 7353: matching shorts found none), so the
+        // body's per-vertex displacement cannot be borrowed. But that
+        // displacement is a pure function of the vertex's pelvis-local bind
+        // position (the segment's bind origin plus raw / 256), the shape
+        // fitted to her body and this frame's spring state (offsets, cleft,
+        // dents). So each wet vertex gets its own bind position and weights
+        // ONCE per (body fit, wet model, sliders), from the body's fitted
+        // shape (no second fit), and every frame the same fullness / deform /
+        // limit formula runs with g_rear's current state (the spring is
+        // stepped only by her body's draw: g_rear.frame == g_present_count
+        // is required, the wet pass runs after it). Assumes the wet model
+        // shares her skeleton (segment numbers, bind joints); its own
+        // virtual (blended) segments take their index bone's joint, as the
+        // body's do.
+        struct WetVert
+        {
+            int index = 0;
+            short orig[3] = {};
+            float bind[3] = {};
+            rear::RearWeights w;
+        };
+
+        struct WetRear
+        {
+            void* body = nullptr;
+            void* wet = nullptr;
+            unsigned char* vertices = nullptr;
+            int vertex_count = 0;
+            int rear_vertices = 0;                  // g_rear.verts.size()
+            rear::RearAdjust adj;
+            float adj_metre = 0.0f;
+            bool weights_valid = false;
+            std::vector<WetVert> verts;
+            float raw = kRearRawPerUnit;            // its own, as the body's
+            bool disabled = false;
+            int reported = 0;                       // once-logs written
+            int calls = 0;
+            // Build counts: not in her skeleton / blended unmapped / built.
+            int n_outside = 0, n_blend_unmapped = 0, n_blend_built = 0;
+            // Put back after the wet draw.
+            std::vector<int> saved_index;
+            std::vector<short> saved_xyz;           // 3 per saved vertex
+        };
+        WetRear g_wet_rear;
+
+        // Bind positions of every wet vertex the body's skeleton covers.
+        // One compact diagnostic line (sample vertices, model scales).
+        void wet_rear_build(const RearSoft& r, void* body, void* wet,
+                            unsigned char* vertices, int vertex_count)
+        {
+            WetRear& w = g_wet_rear;
+            w.body = body;
+            w.wet = wet;
+            w.vertices = vertices;
+            w.vertex_count = vertex_count;
+            w.rear_vertices = (int)r.verts.size();
+            w.weights_valid = false;
+            w.verts.clear();
+            w.reported = 0;
+            w.calls = 0;
+            w.n_outside = w.n_blend_unmapped = w.n_blend_built = 0;
+            const unsigned char* wm = static_cast<const unsigned char*>(wet);
+            const unsigned char* bm = static_cast<const unsigned char*>(body);
+            const int total = r.count + r.virtual_count;
+            const int wet_count = *reinterpret_cast<const int*>(
+                wm + kOffModelNumSegments);
+            const int wet_virtual = *reinterpret_cast<const int*>(
+                wm + kOffModelNumVirtSegments);
+            const ModelSegment* wet_segments =
+                *reinterpret_cast<ModelSegment* const*>(
+                    wm + kOffModelSegments);
+            const float wet_scale = *reinterpret_cast<const float*>(wm + 0x10);
+            const float body_scale = *reinterpret_cast<const float*>(bm + 0x10);
+            // The model_scale field (+0x10), when both read as sane floats
+            // that differ, sets the raw-to-unit ratio of the wet vertices.
+            float ratio = 1.0f;
+            if (std::isfinite(wet_scale) && std::isfinite(body_scale) &&
+                wet_scale > 0.001f && wet_scale < 1000.0f &&
+                body_scale > 0.001f && body_scale < 1000.0f &&
+                fabsf(wet_scale / body_scale - 1.0f) > 0.01f)
+                ratio = wet_scale / body_scale;
+            w.raw = model_raw_per_unit(wet);
+            const bool same_skeleton = wet_count == r.count &&
+                wet_segments && wet_virtual >= 0 &&
+                wet_count + wet_virtual <= total;
+            const ModelVirtualSegment* wet_virtuals = same_skeleton
+                ? reinterpret_cast<const ModelVirtualSegment*>(
+                    wet_segments + wet_count) : nullptr;
+            const float* pj = g_rear_joint[r.pelvis];
+            int sample_wet = 0, sample_body = 0;
+            char wet_sample[160] = "", body_sample[160] = "";
+            int off_wet = 0, off_body = 0;
+            for (int j = 0; j < vertex_count; ++j)
+            {
+                const unsigned char* p = vertices + j * 16;
+                const int seg = *reinterpret_cast<const short*>(p + 10);
+                const short* xyz = reinterpret_cast<const short*>(p);
+                if (sample_wet < 3 && seg == r.pelvis)
+                {
+                    off_wet += _snprintf(wet_sample + off_wet,
+                        sizeof(wet_sample) - off_wet - 1, " [%d: %d %d %d]",
+                        seg, xyz[0], xyz[1], xyz[2]);
+                    ++sample_wet;
+                }
+                if (seg < 0 || seg >= total)
+                {
+                    ++w.n_outside;
+                    continue;
+                }
+                float origin[3];
+                if (seg < r.count)
+                {
+                    // A real bone: her include flag and bind origin.
+                    if (!g_rear_include[seg])
+                    {
+                        ++w.n_outside;
+                        continue;
+                    }
+                    for (int k = 0; k < 3; ++k)
+                        origin[k] = g_rear_origin[seg][k];
+                }
+                else
+                {
+                    // A blended joint of the WET model's own table (its
+                    // numbering is not the body's): both bones decide the
+                    // include, the index bone's joint is the origin.
+                    const int v = seg - r.count;
+                    if (!wet_virtuals || v >= wet_virtual)
+                    {
+                        ++w.n_blend_unmapped;
+                        continue;
+                    }
+                    const int a = wet_virtuals[v].index;
+                    const int b = wet_virtuals[v].weight_index;
+                    if (a < 0 || a >= r.count || b < 0 || b >= r.count)
+                    {
+                        ++w.n_blend_unmapped;
+                        continue;
+                    }
+                    if (!g_rear_include[a] && !g_rear_include[b])
+                    {
+                        ++w.n_outside;
+                        continue;
+                    }
+                    for (int k = 0; k < 3; ++k)
+                        origin[k] = g_rear_joint[a][k];
+                    ++w.n_blend_built;
+                }
+                WetVert wv;
+                wv.index = j;
+                for (int k = 0; k < 3; ++k)
+                {
+                    wv.orig[k] = xyz[k];
+                    wv.bind[k] = xyz[k] / w.raw + origin[k] - pj[k];
+                }
+                w.verts.push_back(wv);
+            }
+            for (const RearVertex& v : r.verts)
+            {
+                if (sample_body >= 3)
+                    break;
+                if (v.seg != r.pelvis)
+                    continue;
+                off_body += _snprintf(body_sample + off_body,
+                    sizeof(body_sample) - off_body - 1, " [%d: %d %d %d]",
+                    v.seg, v.orig[0], v.orig[1], v.orig[2]);
+                ++sample_body;
+            }
+            log("wet layer: rear diag -- wet model %p %d bones + %d blended "
+                "(body %d + %d), scale %.4f (body %.4f, ratio %.3f), %d of "
+                "%d vertices in the body's skeleton; pelvis (seg: raw xyz) "
+                "wet%s | body%s", wet, wet_count, wet_virtual, r.count,
+                r.virtual_count, wet_scale, body_scale, ratio,
+                (int)w.verts.size(), vertex_count, wet_sample, body_sample);
+            log("wet layer: rear build -- %d not in her skeleton, %d blended "
+                "unmapped, %d blended built, %d built in all",
+                w.n_outside, w.n_blend_unmapped, w.n_blend_built,
+                (int)w.verts.size());
+        }
+
+        // Before the wet draw: moves the wet vertices the way the body's
+        // formula would (rear_frame's per-vertex step, same state).
+        void wet_rear_apply(void* body)
+        {
+            WetRear& w = g_wet_rear;
+            RearSoft& r = g_rear;
+            w.saved_index.clear();
+            w.saved_xyz.clear();
+            if (w.disabled || r.disabled || !r.usable || r.model != body ||
+                r.frame != g_present_count || r.changed.empty() ||
+                !r.weights_valid)
+                return;
+            __try
+            {
+                unsigned char* m = *reinterpret_cast<unsigned char**>(
+                    kWetModel);
+                if (!m)
+                    return;
+                const int count = *reinterpret_cast<int*>(
+                    m + kOffModelNumVertices);
+                unsigned char* vertices = *reinterpret_cast<unsigned char**>(
+                    m + kOffModelVertices);
+                if (!vertices || count <= 0 || count > 65535)
+                    return;
+                if (w.body != body || w.wet != m || w.vertices != vertices ||
+                    w.vertex_count != count ||
+                    w.rear_vertices != (int)r.verts.size())
+                    wet_rear_build(r, body, m, vertices, count);
+                const Config& cfg = config();
+                const float metre = cfg.world_scale;
+                if (!w.weights_valid || w.adj_metre != metre ||
+                    !rear_adjust_same(w.adj, r.adj))
+                {
+                    w.adj = r.adj;
+                    w.adj_metre = metre;
+                    int weighted = 0, best = -1;
+                    float best_w = 0.0f;
+                    for (int i = 0; i < (int)w.verts.size(); ++i)
+                    {
+                        WetVert& v = w.verts[i];
+                        v.w = rear::rear_weights(r.shape, v.bind);
+                        const float m3 = fmaxf(v.w.cheek[0],
+                            fmaxf(v.w.cheek[1], v.w.cleft));
+                        weighted += m3 > 0.0f ? 1 : 0;
+                        if (m3 > best_w)
+                        {
+                            best_w = m3;
+                            best = i;
+                        }
+                    }
+                    w.weights_valid = true;
+                    const float cm = metre * 0.01f;
+                    const rear::RearFit& f = r.fit;
+                    log("wet layer: rear weights -- %d of %d built vertices "
+                        "have weight; fitted centres (%.1f %.1f %.1f) / (%.1f "
+                        "%.1f %.1f) cm; best bind (%.1f %.1f %.1f) cm weight "
+                        "%.2f; first binds cm: (%.1f %.1f %.1f) (%.1f %.1f "
+                        "%.1f)", weighted, (int)w.verts.size(),
+                        f.centre[0][0] / cm, f.centre[0][1] / cm,
+                        f.centre[0][2] / cm, f.centre[1][0] / cm,
+                        f.centre[1][1] / cm, f.centre[1][2] / cm,
+                        best >= 0 ? w.verts[best].bind[0] / cm : 0.0f,
+                        best >= 0 ? w.verts[best].bind[1] / cm : 0.0f,
+                        best >= 0 ? w.verts[best].bind[2] / cm : 0.0f, best_w,
+                        w.verts.empty() ? 0.0f : w.verts[0].bind[0] / cm,
+                        w.verts.empty() ? 0.0f : w.verts[0].bind[1] / cm,
+                        w.verts.empty() ? 0.0f : w.verts[0].bind[2] / cm,
+                        w.verts.size() < 2 ? 0.0f : w.verts[1].bind[0] / cm,
+                        w.verts.size() < 2 ? 0.0f : w.verts[1].bind[1] / cm,
+                        w.verts.size() < 2 ? 0.0f : w.verts[1].bind[2] / cm);
+                }
+                const bool dents = r.dent[0].on || r.dent[1].on;
+                int moved_count = 0, zero_weight = 0, unchanged = 0,
+                    stale = 0;
+                for (const WetVert& v : w.verts)
+                {
+                    float shifted[3] = { v.bind[0], v.bind[1], v.bind[2] };
+                    rear_baseline_at(r.shape, v.w, v.bind, shifted);
+                    if (!dents && v.w.cheek[0] == 0.0f &&
+                        v.w.cheek[1] == 0.0f && v.w.cleft == 0.0f &&
+                        shifted[0] == v.bind[0] && shifted[1] == v.bind[1] &&
+                        shifted[2] == v.bind[2])
+                    {
+                        ++zero_weight;
+                        continue;
+                    }
+                    float moved[3];
+                    rear::rear_deform(shifted, v.w, r.offset, r.cleft, r.dent,
+                                      2, moved);
+                    float dynamic[3] = { moved[0] - shifted[0],
+                                         moved[1] - shifted[1],
+                                         moved[2] - shifted[2] };
+                    rear::soft_limit_vector(dynamic,
+                        cfg.body_rear_limit_cm * metre * 0.01f);
+                    short out[3];
+                    bool differs = false;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        out[k] = rear::round_short((float)v.orig[k] +
+                            (shifted[k] + dynamic[k] - v.bind[k]) *
+                            w.raw);
+                        differs = differs || out[k] != v.orig[k];
+                    }
+                    if (!differs)
+                    {
+                        ++unchanged;
+                        continue;
+                    }
+                    short* xyz = reinterpret_cast<short*>(
+                        vertices + v.index * 16);
+                    // Only what is still the shorts measured (the model's own).
+                    if (xyz[0] != v.orig[0] || xyz[1] != v.orig[1] ||
+                        xyz[2] != v.orig[2])
+                    {
+                        ++stale;
+                        continue;
+                    }
+                    w.saved_index.push_back(v.index);
+                    w.saved_xyz.push_back(xyz[0]);
+                    w.saved_xyz.push_back(xyz[1]);
+                    w.saved_xyz.push_back(xyz[2]);
+                    xyz[0] = out[0];
+                    xyz[1] = out[1];
+                    xyz[2] = out[2];
+                    ++moved_count;
+                }
+                // Logged on the first frame and again after a few hundred
+                // (the first can be a spring at rest).
+                ++w.calls;
+                if ((w.reported == 0 && moved_count > 0) ||
+                    (w.reported == 1 && w.calls >= 300))
+                {
+                    ++w.reported;
+                    log("wet layer: rear jiggle on %d of %d wet vertices "
+                        "(fit from the body); %d zero weight, %d unchanged, "
+                        "%d stale shorts, %d built", moved_count, count,
+                        zero_weight, unchanged, stale, (int)w.verts.size());
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                w.disabled = true;
+                log("wet layer: faulted moving the wet vertices; rear "
+                    "jiggle off for the layer");
+            }
+        }
+
+        // After the wet draw: the wet model's own shorts back.
+        void wet_rear_restore()
+        {
+            WetRear& w = g_wet_rear;
+            if (w.saved_index.empty())
+                return;
+            __try
+            {
+                for (size_t n = 0; n < w.saved_index.size(); ++n)
+                {
+                    short* xyz = reinterpret_cast<short*>(
+                        w.vertices + w.saved_index[n] * 16);
+                    xyz[0] = w.saved_xyz[n * 3];
+                    xyz[1] = w.saved_xyz[n * 3 + 1];
+                    xyz[2] = w.saved_xyz[n * 3 + 2];
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                w.disabled = true;
+            }
+            w.saved_index.clear();
+            w.saved_xyz.clear();
+        }
+
+        void __cdecl detour_wet_layer(void* instance, int a2, int a3,
+                                      unsigned flags)
+        {
+            if (!g_wet_layer)
+                return;
+            void* body = nullptr;
+            CarrySave& carry = g_draw_carry;
+            bool carried = false;
+            PushSave* pushed = nullptr;
+            // Her body model, as her own draw resolves it (model 0: the
+            // render model of her object's list), so the carry and push
+            // size their edit by the body's segment counts.
+            if (!g_first_person_active && !carry.matrices)
+            {
+                __try
+                {
+                    if (!lara_is_drawn_lara(instance, nullptr, &body))
+                        body = nullptr;
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    body = nullptr;
+                }
+            }
+            if (body)
+            {
+                carried = carry_apply(instance, body, &carry);
+                if (!carried)
+                    pushed = push_apply(instance, body);
+                static bool logged = false;
+                if ((carried || pushed) && !logged)
+                {
+                    logged = true;
+                    log("wet layer: drawn with the held / pushed pose");
+                }
+            }
+            // Rear jiggle on the wet model's matched vertices (WetRear): the
+            // body's displacement of this frame, put back after the draw.
+            // Needs her body model even when the carry/push above did not.
+            bool wet_moved = false;
+            if (config().body_rear && !g_rear.disabled)
+            {
+                void* rear_body = body;
+                if (!rear_body)
+                {
+                    __try
+                    {
+                        if (!lara_is_drawn_lara(instance, nullptr, &rear_body))
+                            rear_body = nullptr;
+                    }
+                    __except(EXCEPTION_EXECUTE_HANDLER)
+                    {
+                        rear_body = nullptr;
+                    }
+                }
+                if (rear_body)
+                {
+                    wet_rear_apply(rear_body);
+                    wet_moved = true;
+                }
+            }
+            g_wet_layer(instance, a2, a3, flags);
+            if (wet_moved)
+                wet_rear_restore();
+            push_restore(pushed);
+            if (carried)
+                carry_restore(&carry);
+        }
+
         void __cdecl detour_draw_instance_body(void* instance, int a2, float a3,
                                            int a4, int a5, void* model,
                                            float a7, void* colour,
@@ -15387,17 +16566,25 @@ namespace trlvr
                 }
                 // One save, in use (non-null matrices) from carry_apply to
                 // carry_restore: a draw nested inside this one is not
-                // carried rather than overwrite it.
-                static CarrySave carry;
-                const bool carried = !carry.matrices &&
+                // carried rather than overwrite it. The wet-skin pass
+                // (model = the wet model, transform = the game's scratch
+                // matrices at 0x0107F730) is never carried or pushed here:
+                // detour_wet_layer posed her body for it, and carry_apply
+                // would size its edit by the wet model's segment counts.
+                CarrySave& carry = g_draw_carry;
+                const bool wet_pass = model &&
+                    model == *reinterpret_cast<void**>(kWetModel) &&
+                    transform &&
+                    transform == *reinterpret_cast<void**>(kWetMatrices);
+                const bool carried = !wet_pass && !carry.matrices &&
                                      carry_apply(instance, model, &carry);
                 if (!carried)
                     wall_touch_frame(instance, model);
                 // The whole-body push (free, board god hands), on the pose
                 // wall touch left; the soft parts and the rear then ride on
                 // the pushed bones.
-                PushSave* pushed = carried ? nullptr
-                                           : push_apply(instance, model);
+                PushSave* pushed = carried || wet_pass
+                    ? nullptr : push_apply(instance, model);
                 // After wall touch, into whose kept pose it writes itself.
                 if (!g_first_person_active)
                     third_person_soft_frame(instance, model);
@@ -15434,7 +16621,7 @@ namespace trlvr
             // 2026-10-12: hands / body did not show): her own animated
             // hands and body are drawn (first_person_hand_delta is the
             // identity), and lost controller tracking does not hide them.
-            const bool animated_hands = !config().immersive_controls;
+            const bool animated_hands = !config().hands_on_controllers;
             Mat4 controllers[2];
             if (animated_hands)
             {
@@ -15631,7 +16818,7 @@ namespace trlvr
             const Mat4 right_wrist = matrix_from_floats(
                 matrices + g_first_person_wrist_segment[1] * 16);
             HandholdBox box{};
-            box.valid = config().immersive_controls && scale > 0.0f &&
+            box.valid = config().gesture_controls && scale > 0.0f &&
                 (g_first_person_ledge_hanging ||
                  g_first_person_bar_hanging ||
                  g_first_person_vine_climbing);
@@ -16323,7 +17510,7 @@ namespace trlvr
             if (!g_hpole_desired_direction)
                 return;
             g_hpole_desired_direction(pole);
-            if (!config().immersive_controls || !g_first_person_active ||
+            if (!config().gesture_controls || !g_first_person_active ||
                 !g_first_person_bar_hanging ||
                 !g_first_person_bar_axis_valid ||
                 !(g_ledge_hand_grip[0].held || g_ledge_hand_grip[1].held))
@@ -16433,7 +17620,7 @@ namespace trlvr
                                                        void* message)
         {
             void* result = g_wall_vert_pole_message(self, player, message);
-            if (!config().immersive_controls || !g_first_person_active)
+            if (!config().gesture_controls || !g_first_person_active)
                 return result;
             __try
             {
@@ -16540,7 +17727,7 @@ namespace trlvr
         float __cdecl detour_calc_jump_facing()
         {
             const float native = g_calc_jump_facing();
-            if (!config().immersive_controls || !g_first_person_active)
+            if (!config().gesture_controls || !g_first_person_active)
                 return native;
             __try
             {
@@ -17087,6 +18274,10 @@ namespace trlvr
         }
 
         float g_view_prescale[2] = { 1.0f, 1.0f };
+        // The head transform last composed onto the main camera's view
+        // (head pose and any recentre glide), for camera_head_view_applied.
+        Mat4 g_applied_head_view = Mat4::identity();
+        bool g_applied_head_view_valid = false;
 
         // Hardcore first person (a user's request, 2026-10-10): the view
         // turns with Lara's body -- back flips, side flips, spins -- not
@@ -17356,6 +18547,195 @@ namespace trlvr
             }
         }
 
+        // Recentre glide (user 2026-11-11, as Underworld): a recentre or
+        // reset view moves the main camera in one step; instead the view
+        // drawn eases from where it was to the new one. K, a camera-space
+        // transform with drawn = new * K, starts at the jump and goes to
+        // identity (rotation slerped, translation scaled) on a smoothstep
+        // over [vr] recenter_transition_seconds. The first frames after the
+        // recentre only hold the old view: the recentred head pose reaches
+        // the view a frame later than the recentre itself.
+        struct RecentreGlide
+        {
+            unsigned seen = 0;
+            bool seen_valid = false;
+            Mat4 last = Mat4::identity();   // main view as last drawn
+            bool last_valid = false;
+            Mat4 held = Mat4::identity();   // the view at the recentre
+            int hold_frames = 0;
+            bool active = false;
+            float q[4] = { 1.0f, 0.0f, 0.0f, 0.0f };   // K's rotation
+            float t[3] = { 0.0f, 0.0f, 0.0f };          // K's translation
+            LARGE_INTEGER start{};
+            float seconds = 0.0f;   // this glide's length, picked at its start
+        };
+        RecentreGlide g_glide;
+        bool g_glide_snap_next = false;
+
+        void mat3_to_quat(const Mat4& m, float q[4])
+        {
+            const float tr = m.m[0][0] + m.m[1][1] + m.m[2][2];
+            if (tr > 0.0f)
+            {
+                const float s = sqrtf(tr + 1.0f) * 2.0f;
+                q[0] = 0.25f * s;
+                q[1] = (m.m[2][1] - m.m[1][2]) / s;
+                q[2] = (m.m[0][2] - m.m[2][0]) / s;
+                q[3] = (m.m[1][0] - m.m[0][1]) / s;
+            }
+            else if (m.m[0][0] > m.m[1][1] && m.m[0][0] > m.m[2][2])
+            {
+                const float s = sqrtf(1.0f + m.m[0][0] - m.m[1][1] -
+                                      m.m[2][2]) * 2.0f;
+                q[0] = (m.m[2][1] - m.m[1][2]) / s;
+                q[1] = 0.25f * s;
+                q[2] = (m.m[0][1] + m.m[1][0]) / s;
+                q[3] = (m.m[0][2] + m.m[2][0]) / s;
+            }
+            else if (m.m[1][1] > m.m[2][2])
+            {
+                const float s = sqrtf(1.0f + m.m[1][1] - m.m[0][0] -
+                                      m.m[2][2]) * 2.0f;
+                q[0] = (m.m[0][2] - m.m[2][0]) / s;
+                q[1] = (m.m[0][1] + m.m[1][0]) / s;
+                q[2] = 0.25f * s;
+                q[3] = (m.m[1][2] + m.m[2][1]) / s;
+            }
+            else
+            {
+                const float s = sqrtf(1.0f + m.m[2][2] - m.m[0][0] -
+                                      m.m[1][1]) * 2.0f;
+                q[0] = (m.m[1][0] - m.m[0][1]) / s;
+                q[1] = (m.m[0][2] + m.m[2][0]) / s;
+                q[2] = (m.m[1][2] + m.m[2][1]) / s;
+                q[3] = 0.25f * s;
+            }
+            const float n = sqrtf(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] +
+                                  q[3] * q[3]);
+            for (int i = 0; i < 4; ++i)
+                q[i] = n > 1e-6f ? q[i] / n : (i == 0 ? 1.0f : 0.0f);
+        }
+
+        Mat4 quat_to_mat(const float q[4])
+        {
+            const float w = q[0], x = q[1], y = q[2], z = q[3];
+            Mat4 m = Mat4::identity();
+            m.m[0][0] = 1 - 2 * (y * y + z * z);
+            m.m[0][1] = 2 * (x * y - w * z);
+            m.m[0][2] = 2 * (x * z + w * y);
+            m.m[1][0] = 2 * (x * y + w * z);
+            m.m[1][1] = 1 - 2 * (x * x + z * z);
+            m.m[1][2] = 2 * (y * z - w * x);
+            m.m[2][0] = 2 * (x * z - w * y);
+            m.m[2][1] = 2 * (y * z + w * x);
+            m.m[2][2] = 1 - 2 * (x * x + y * y);
+            return m;
+        }
+
+        // K at amount a (1 = the whole jump, 0 = none): q slerped toward
+        // identity, translation scaled.
+        Mat4 glide_transform(float a)
+        {
+            float q[4] = { g_glide.q[0], g_glide.q[1], g_glide.q[2],
+                           g_glide.q[3] };
+            if (q[0] < 0.0f)
+                for (float& v : q)
+                    v = -v;
+            const float angle = acosf(fminf(1.0f, q[0]));
+            const float s = sinf(angle);
+            float r[4];
+            if (s < 1e-5f)
+            {
+                for (int i = 0; i < 4; ++i)
+                    r[i] = (i == 0 ? 1.0f - a : 0.0f) + q[i] * a;
+            }
+            else
+            {
+                const float wi = sinf((1.0f - a) * angle) / s;
+                const float wq = sinf(a * angle) / s;
+                for (int i = 0; i < 4; ++i)
+                    r[i] = (i == 0 ? wi : 0.0f) + q[i] * wq;
+            }
+            Mat4 k = quat_to_mat(r);
+            for (int i = 0; i < 3; ++i)
+                k.m[3][i] = g_glide.t[i] * a;
+            return k;
+        }
+
+        // Called once per main-camera build with the new main view (before
+        // it is stored). Returns the K to apply to every matrix this build.
+        bool view_tween_starting();     // below, with the view tween
+
+        bool recentre_glide(const Mat4& fresh, Mat4* k)
+        {
+            const unsigned generation = vr_recenter_generation();
+            if (!g_glide.seen_valid)
+            {
+                g_glide.seen = generation;
+                g_glide.seen_valid = true;
+            }
+            if (generation != g_glide.seen)
+            {
+                g_glide.seen = generation;
+                const bool snap = g_glide_snap_next;
+                g_glide_snap_next = false;
+                // Not in the middle of a view switch's flight, except the
+                // switch's own recentre at its very start: then the glide
+                // runs alongside the flight (2026-11-13). A recentre in
+                // the same view has its own, shorter glide (2026-11-24).
+                const float seconds = view_tween_starting()
+                    ? config().recenter_transition_seconds
+                    : config().recenter_same_view_seconds;
+                g_glide.seconds = seconds;
+                if (!snap && seconds > 0.01f && g_glide.last_valid &&
+                    (!camera_view_tween_active() || view_tween_starting()))
+                {
+                    g_glide.held = g_glide.last;
+                    g_glide.hold_frames = 2;
+                    g_glide.active = true;
+                }
+                else
+                    g_glide.active = false;
+            }
+            if (!g_glide.active)
+                return false;
+
+            if (g_glide.hold_frames > 0)
+            {
+                // drawn = held: K = fresh^-1 * held, kept whole.
+                Mat4 inv{};
+                if (!invert(fresh, &inv))
+                {
+                    g_glide.active = false;
+                    return false;
+                }
+                const Mat4 k0 = inv * g_glide.held;
+                mat3_to_quat(k0, g_glide.q);
+                for (int i = 0; i < 3; ++i)
+                    g_glide.t[i] = k0.m[3][i];
+                if (--g_glide.hold_frames == 0)
+                    QueryPerformanceCounter(&g_glide.start);
+                *k = glide_transform(1.0f);
+                return true;
+            }
+            LARGE_INTEGER now, freq;
+            QueryPerformanceCounter(&now);
+            QueryPerformanceFrequency(&freq);
+            const float elapsed = (float)(now.QuadPart -
+                                          g_glide.start.QuadPart) /
+                                  (float)freq.QuadPart;
+            const float seconds = g_glide.seconds;
+            const float p = seconds > 0.01f ? elapsed / seconds : 1.0f;
+            if (!(p < 1.0f))
+            {
+                g_glide.active = false;
+                return false;
+            }
+            const float s = p * p * (3.0f - 2.0f * p);
+            *k = glide_transform(1.0f - s);
+            return true;
+        }
+
         void apply_head_pose(void* cam, const float* camera_position)
         {
             // Hardcore first person: her body's turn, about the eye.
@@ -17377,6 +18757,8 @@ namespace trlvr
             // read different ones. Leaving any behind would put the picture and
             // the culling in different places.
             const unsigned targets[3] = { kOffWcTransform, kOffWcNoShake, kOffWcTransform2 };
+            Mat4 glide_k = Mat4::identity();
+            bool glide = false;
             for (int t = 0; t < 3; ++t)
             {
                 Mat4 m = load_matrix(cam, targets[t]);
@@ -17407,6 +18789,21 @@ namespace trlvr
                 if (hardcore)
                     m = body_turn * m;
                 m = m * head_view;
+                if (cam == kMainCamera)
+                {
+                    if (t == 0)
+                        glide = recentre_glide(m, &glide_k);
+                    if (glide)
+                        m = m * glide_k;
+                    if (t == 0)
+                    {
+                        g_glide.last = m;
+                        g_glide.last_valid = true;
+                        g_applied_head_view =
+                            glide ? head_view * glide_k : head_view;
+                        g_applied_head_view_valid = true;
+                    }
+                }
                 store_matrix(cam, targets[t], m);
             }
 
@@ -17439,6 +18836,8 @@ namespace trlvr
             // the view swings the anchor round Lara) and the recentre seen.
             float heading = 0.0f;
             unsigned recentre = 0;
+            // The view heading the smoothed position was last turned to.
+            float follow_heading = 0.0f;
             int mode = -1;
             LARGE_INTEGER last{};
         };
@@ -17475,6 +18874,13 @@ namespace trlvr
                 ? (float)((double)(now.QuadPart -
                                    g_view_tween.start.QuadPart) /
                           (double)frequency.QuadPart) : 1.0e6f;
+        }
+
+        // A view switch's flight that has only just begun (the recentre
+        // that comes with the switch lands in its first frames).
+        bool view_tween_starting()
+        {
+            return g_view_tween.active && view_tween_elapsed() < 0.1f;
         }
 
         // Where the first-person eye would be: her head joint and the eye
@@ -17523,6 +18929,11 @@ namespace trlvr
         // the third palm slider (user 2026-10-28). Shoulder starts at
         // shoulder_side, classic and board centred.
         float g_tp_side[3] = { 0.0f, 0.35f, 0.0f };
+        // Live seat height, metres (shoulder: above her; board: table
+        // metres up), [vr] third_person_height_<preset>. shoulder_height /
+        // board_height are the defaults reset view returns to (user
+        // 2026-11-23: the stick used to overwrite them). Classic unused.
+        float g_tp_height[3] = { 0.0f, 0.0f, 0.35f };
         const float kTpSideMax = 1.0f;
         bool g_tp_view_loaded = false;
         const wchar_t* kTpPresetNames[3] = { L"classic", L"shoulder",
@@ -17533,6 +18944,33 @@ namespace trlvr
             const float board = 175.0f / config().board_lara_height_cm;
             return mode == 2 && std::isfinite(board) && board > 0.5f
                 ? fminf(25.0f, board) : 1.0f;
+        }
+
+        float tp_default_zoom(int mode)
+        {
+            const Config& c = config();
+            const float z = mode == 0 ? c.classic_zoom
+                          : mode == 1 ? c.shoulder_zoom : c.board_zoom;
+            return std::isfinite(z) ? fminf(1.5f, fmaxf(0.3f, z)) : 1.0f;
+        }
+
+        float tp_default_side(int mode)
+        {
+            return mode == 1 ? fminf(kTpSideMax, fmaxf(-kTpSideMax,
+                                     config().shoulder_side))
+                             : 0.0f;
+        }
+
+        float tp_default_height(int mode)
+        {
+            return mode == 2 ? config().board_height
+                 : mode == 1 ? config().shoulder_height : 0.0f;
+        }
+
+        float tp_clamp_height(int mode, float h)
+        {
+            return mode == 2 ? fmaxf(0.0f, fminf(3.0f, h))
+                             : fmaxf(-1.0f, fminf(2.0f, h));
         }
 
         void tp_view_load()
@@ -17554,16 +18992,22 @@ namespace trlvr
                     ? v : defaults[m];
                 swprintf_s(key, L"third_person_zoom_%s", kTpPresetNames[m]);
                 GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
-                v = text[0] ? (float)_wtof(text) : 1.0f;
+                const float zoom_default = tp_default_zoom(m);
+                v = text[0] ? (float)_wtof(text) : zoom_default;
                 g_tp_zoom[m] = std::isfinite(v) && v >= 0.3f && v <= 3.5f
-                    ? v : 1.0f;
-                const float side_default = m == 1 ? config().shoulder_side
-                                                  : 0.0f;
+                    ? v : zoom_default;
+                const float side_default = tp_default_side(m);
                 swprintf_s(key, L"third_person_side_%s", kTpPresetNames[m]);
                 GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
                 v = text[0] ? (float)_wtof(text) : side_default;
                 g_tp_side[m] = std::isfinite(v) && fabsf(v) <= kTpSideMax
                     ? v : side_default;
+                const float height_default = tp_default_height(m);
+                swprintf_s(key, L"third_person_height_%s", kTpPresetNames[m]);
+                GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
+                v = text[0] ? (float)_wtof(text) : height_default;
+                g_tp_height[m] = std::isfinite(v)
+                    ? tp_clamp_height(m, v) : height_default;
             }
         }
 
@@ -17585,10 +19029,18 @@ namespace trlvr
             swprintf_s(key, L"third_person_side_%s", kTpPresetNames[mode]);
             swprintf_s(text, L"%.3f", g_tp_side[mode]);
             WritePrivateProfileStringW(L"vr", key, text, path);
+            if (mode != 0)
+            {
+                swprintf_s(key, L"third_person_height_%s",
+                           kTpPresetNames[mode]);
+                swprintf_s(text, L"%.3f", g_tp_height[mode]);
+                WritePrivateProfileStringW(L"vr", key, text, path);
+            }
             WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
             log("view: %S preset -- scale x%.2f (Lara %.0f cm), zoom x%.2f, "
-                "side %+.2f m; saved", kTpPresetNames[mode], scale,
-                175.0f / scale, g_tp_zoom[mode], g_tp_side[mode]);
+                "side %+.2f m, height %.2f; saved", kTpPresetNames[mode], scale,
+                175.0f / scale, g_tp_zoom[mode], g_tp_side[mode],
+                g_tp_height[mode]);
         }
         // How far the third-person camera stands from the retail one.
         float g_tp_retail_distance = 0.0f;
@@ -17709,12 +19161,13 @@ namespace trlvr
                 target[0] = focus[0] + away[0] * back + right[0] * side;
                 target[1] = focus[1] + away[1] * back + right[1] * side;
                 target[2] = focus[2] + away[2] * back +
-                            config().shoulder_height * metre * zoom;
+                            g_tp_height[1] * metre * zoom;
             }
             else if (mode == 2)
             {
                 const float table = metre * camera_world_scale_factor();
                 const float heading = atan2f(forward[1], forward[0]);
+                const float leash = config().board_leash * table;
                 // Coming back from another view, a recentre, or a jump of
                 // 3 table-metres (a load or a teleport) puts the anchor
                 // back on her.
@@ -17730,10 +19183,29 @@ namespace trlvr
                     g_tp_camera.heading = heading;
                     g_tp_camera.recentre = vr_recenter_generation();
                 }
+                // Free roam (Underworld's leash): Lara runs free within
+                // board_leash of the anchor before it follows, and within
+                // board_leash_height up or down. Turning the view turns the
+                // anchor round her, so she keeps her place in the view
+                // instead of the board swinging round its own centre.
+                if (leash > 0.0f)
+                {
+                    float turn = heading - g_tp_camera.heading;
+                    if (turn > 3.14159265f) turn -= 6.28318531f;
+                    if (turn < -3.14159265f) turn += 6.28318531f;
+                    const float c = cosf(turn), s = sinf(turn);
+                    const float ax = g_tp_camera.anchor[0] - focus[0];
+                    const float ay = g_tp_camera.anchor[1] - focus[1];
+                    g_tp_camera.anchor[0] = focus[0] + ax * c - ay * s;
+                    g_tp_camera.anchor[1] = focus[1] + ax * s + ay * c;
+                }
                 g_tp_camera.heading = heading;
-                // Lara may wander 12 table-cm from the anchor before it
-                // follows (1.0.0); height follows at once.
-                board_leash(g_tp_camera.anchor, focus, 0.12f * table, 0.0f);
+                // board_leash 0: the old 12 table-cm leash, height at once.
+                board_leash(g_tp_camera.anchor, focus,
+                            leash > 0.0f ? leash : 0.12f * table,
+                            leash > 0.0f
+                                ? config().board_leash_height * table
+                                : 0.0f);
                 // The diorama's handle moves the board in the room (metres:
                 // right, up, forward): the seat moves the opposite way.
                 float moved[3];
@@ -17745,7 +19217,7 @@ namespace trlvr
                 target[1] = g_tp_camera.anchor[1] -
                     forward[1] * back * table + right[1] * across * table;
                 target[2] = g_tp_camera.anchor[2] +
-                    (config().board_height * zoom - moved[1]) * table;
+                    (g_tp_height[2] * zoom - moved[1]) * table;
                 // Collision (user, 2026-10-03): turning the view must not
                 // swing the board camera into rock. Probe from just above
                 // Lara to the seat; on a hit, sit 0.3 m (her scale) short
@@ -17756,41 +19228,158 @@ namespace trlvr
             if (mode == 2 || zoom > 1.0f)
             {
                 const float table = metre * camera_world_scale_factor();
-                const float from[3] = { focus[0], focus[1],
-                                        focus[2] + 0.3f * metre };
-                float ray[3] = { target[0] - from[0], target[1] - from[1],
-                                 target[2] - from[2] };
-                const float reach = sqrtf(ray[0] * ray[0] + ray[1] * ray[1] +
-                                          ray[2] * ray[2]);
-                if (reach > 1.0f && config().camera_collision)
+                // Geometry between the seat and Lara must not pull the seat
+                // in (a pillar in the view: user, 2026-11-12). The sweep
+                // starts at the seat's last collision-free position, so it
+                // only stops the seat moving INTO floor, wall or ceiling.
+                // Without a usable last position (first frame, a view
+                // change, a jump), or when the sweep would hold the seat
+                // more than 2 table-m short of where it wants to be (stuck
+                // behind a corner), it starts above Lara as before.
+                static float s_free[3]{};
+                static bool s_free_valid = false;
+                static int s_free_mode = -1;
+                static DWORD s_free_tick = 0;
+                const DWORD tick_now = GetTickCount();
+                const float lara_from[3] = { focus[0], focus[1],
+                                             focus[2] + 0.3f * metre };
+                float want[3] = { target[0], target[1], target[2] };
+                // Sweep from `from` to `want`; returns true on a hit and the
+                // point 0.3 m (her scale) short of it in `out`.
+                auto sweep = [&](const float from[3], float out[3],
+                                 float* reach_out) -> bool
                 {
+                    float ray[3] = { want[0] - from[0], want[1] - from[1],
+                                     want[2] - from[2] };
+                    const float reach = sqrtf(ray[0] * ray[0] +
+                                              ray[1] * ray[1] +
+                                              ray[2] * ray[2]);
+                    *reach_out = reach;
+                    if (!(reach > 1.0f))
+                        return false;
                     for (float& r : ray)
                         r /= reach;
                     float hit[3]{};
-                    if (aim_probe(from, ray, reach, hit, nullptr))
+                    if (!aim_probe(from, ray, reach, hit, nullptr))
+                        return false;
+                    const float hx = hit[0] - from[0];
+                    const float hy = hit[1] - from[1];
+                    const float hz = hit[2] - from[2];
+                    const float keep = fmaxf(0.0f,
+                        sqrtf(hx * hx + hy * hy + hz * hz) - 0.3f * metre);
+                    for (int k = 0; k < 3; ++k)
+                        out[k] = from[k] + ray[k] * keep;
+                    return true;
+                };
+                // The fallback from above Lara. Something between her and
+                // the seat holds the seat only if the seat is in rock: seen
+                // back from the seat, the obstacle must have a far side at
+                // least 5 cm (her scale) past its near side and 0.3 m from
+                // the seat (a pillar in the open), else it is clamped.
+                auto sweep_from_lara = [&](float out[3], float* reach_out)
+                    -> bool
+                {
+                    if (!sweep(lara_from, out, reach_out))
+                        return false;
+                    const float reach = *reach_out;
+                    float back[3] = { lara_from[0] - want[0],
+                                      lara_from[1] - want[1],
+                                      lara_from[2] - want[2] };
+                    for (float& b : back)
+                        b /= reach;
+                    float hit[3]{};
+                    if (!aim_probe(want, back, reach, hit, nullptr))
+                        return true;    // nothing seen from the seat: in rock
+                    const float bx = hit[0] - want[0];
+                    const float by = hit[1] - want[1];
+                    const float bz = hit[2] - want[2];
+                    const float from_seat = sqrtf(bx * bx + by * by + bz * bz);
+                    const float ox = out[0] - lara_from[0];
+                    const float oy = out[1] - lara_from[1];
+                    const float oz = out[2] - lara_from[2];
+                    const float near_side = sqrtf(ox * ox + oy * oy + oz * oz) +
+                                            0.3f * metre;
+                    const float far_side = reach - from_seat;
+                    if (from_seat > 0.3f * metre &&
+                        far_side > near_side + 0.05f * metre)
                     {
-                        const float hx = hit[0] - from[0];
-                        const float hy = hit[1] - from[1];
-                        const float hz = hit[2] - from[2];
-                        const float keep = fmaxf(0.0f,
-                            sqrtf(hx * hx + hy * hy + hz * hz) - 0.3f * metre);
-                        for (int k = 0; k < 3; ++k)
-                            target[k] = from[k] + ray[k] * keep;
-                        static DWORD last_report = 0;
-                        if (GetTickCount() - last_report > 3000)
+                        static DWORD last_open = 0;
+                        if (GetTickCount() - last_open > 3000)
                         {
-                            last_report = GetTickCount();
-                            log("board: camera pulled in by geometry to "
-                                "%.2f of its %.2f table-m", keep / table,
-                                reach / table);
+                            last_open = GetTickCount();
+                            log("camera collision: something between Lara "
+                                "and the seat (%.2f m thick); the seat is in "
+                                "the open, left alone",
+                                (far_side - near_side) / metre);
+                        }
+                        return false;
+                    }
+                    return true;
+                };
+                if (config().camera_collision &&
+                    (mode != 2 || config().board_camera_collision))
+                {
+                    const float jx2 = want[0] - s_free[0];
+                    const float jy2 = want[1] - s_free[1];
+                    const float jz2 = want[2] - s_free[2];
+                    const bool usable = s_free_valid && s_free_mode == mode &&
+                        tick_now - s_free_tick < 500 &&
+                        jx2 * jx2 + jy2 * jy2 + jz2 * jz2 <
+                            16.0f * table * table;
+                    float held[3]{};
+                    float reach = 0.0f;
+                    bool hit = false;
+                    if (usable)
+                    {
+                        // A hit on the way from the last free seat goes
+                        // straight to the pull-in towards Lara (user
+                        // 2026-11-13: orbiting into a wall held the seat at
+                        // the wall and the view turned in place for a
+                        // second or two, until the wanted seat was 2
+                        // table-m past it). The pull-in keeps the pillar
+                        // test, so a pillar in the open still leaves the
+                        // seat alone.
+                        hit = sweep(s_free, held, &reach);
+                        if (hit)
+                            hit = sweep_from_lara(held, &reach);
+                    }
+                    else
+                    {
+                        hit = sweep_from_lara(held, &reach);
+                    }
+                    if (hit)
+                    {
+                        for (int k = 0; k < 3; ++k)
+                            target[k] = held[k];
+                        static DWORD last_report = 0;
+                        if (tick_now - last_report > 3000)
+                        {
+                            last_report = tick_now;
+                            const float dx2 = want[0] - held[0];
+                            const float dy2 = want[1] - held[1];
+                            const float dz2 = want[2] - held[2];
+                            log("camera collision: board seat held out of "
+                                "geometry, moved %.2f of %.2f table-m",
+                                sqrtf(dx2 * dx2 + dy2 * dy2 + dz2 * dz2) /
+                                    table, reach / table);
                         }
                     }
+                    for (int k = 0; k < 3; ++k)
+                        s_free[k] = target[k];
+                    s_free_valid = true;
+                    s_free_mode = mode;
+                    s_free_tick = tick_now;
+                }
+                else
+                {
+                    s_free_valid = false;
                 }
             }
 
             LARGE_INTEGER now{}, frequency{};
             QueryPerformanceCounter(&now);
             QueryPerformanceFrequency(&frequency);
+            const float view_heading = atan2f(forward[1], forward[0]);
 
             // A view switch in flight: from where the camera was to this
             // preset's seat (or her eye), eased in and out. The goal is
@@ -17817,6 +19406,7 @@ namespace trlvr
                 g_tp_camera.valid = true;
                 g_tp_camera.mode = mode;
                 g_tp_camera.last = now;
+                g_tp_camera.follow_heading = view_heading;
                 if (!have_goal || u >= 1.0f)
                 {
                     tw.active = false;
@@ -17835,6 +19425,29 @@ namespace trlvr
                 ? (double)(now.QuadPart - g_tp_camera.last.QuadPart) /
                   (double)frequency.QuadPart : 1.0;
             g_tp_camera.last = now;
+            // Orbiting (user 2026-11-11: the board orbit drifted, as if
+            // round an octagon): the view turns at once with the game
+            // camera, but the smoothing below pulled the seat towards its
+            // new spot in a straight line -- cutting the corner of every
+            // step of the turn and lagging the view, so Lara slid off
+            // centre and floated back. The smoothed seat is turned round
+            // her by the same heading change first, so a turn is a true
+            // circle and only her own moves (and zoom, height) are smoothed.
+            if (g_tp_camera.valid && g_tp_camera.mode == mode)
+            {
+                float turn = view_heading - g_tp_camera.follow_heading;
+                if (turn > 3.14159265f) turn -= 6.28318531f;
+                if (turn < -3.14159265f) turn += 6.28318531f;
+                if (std::isfinite(turn) && turn != 0.0f)
+                {
+                    const float c = cosf(turn), s = sinf(turn);
+                    const float px = g_tp_camera.position[0] - focus[0];
+                    const float py = g_tp_camera.position[1] - focus[1];
+                    g_tp_camera.position[0] = focus[0] + px * c - py * s;
+                    g_tp_camera.position[1] = focus[1] + px * s + py * c;
+                }
+            }
+            g_tp_camera.follow_heading = view_heading;
             float jump = 0.0f;
             if (g_tp_camera.valid)
                 for (int k = 0; k < 3; ++k)
@@ -18755,6 +20368,166 @@ namespace trlvr
                     "scene x%.2f kept", g_theatre_scale);
         }
 
+        // Reset view in classic third person also swings the retail follow
+        // camera's orbit back behind Lara, so camera-relative movement keeps
+        // matching the view. GenericCameraProcess (0x004827E0) keeps the
+        // orbit as Euler angles in radians, x = tilt (negative = camera
+        // above the focus), z = yaw:
+        //   +0x500/+0x508  current tilt / yaw; 0x00480940 copies them into
+        //                  Rotation (+0x270) and places the camera at
+        //                  focus + R * (0, -distance, 0) (0x0048D8B0)
+        //   +0x600/+0x608  target tilt / yaw; +0x600 is the camera's base
+        //                  tilt (CAMERA_SetTilt 0x0047C9D0; engine init
+        //                  0x40C644F8 = -5 deg, 0x0047C422)
+        //   +0x610/+0x628  the goals +0x500 / +0x508 spring toward
+        //                  (0x00480EB0 / 0x00480FA0), spring state in
+        //                  +0x590/+0x5A0 and +0x598/+0x5A8
+        //   +0x324 automatic tilt, +0x1158 tilt offset (decays to zero);
+        //   the tilt goal is +0x600 + +0x324 + +0x1158 (0x00481EA6..)
+        //   word +0x1190  a rotation in progress: blocks auto-centre until
+        //                 yaw reaches its target (0x00482FB6, 0x0048107A)
+        // Retail's own "behind the focus instance" (0x00486977, again at
+        // 0x0048767F for the aim camera) is yaw = instance+0x38 + pi,
+        // normalised by 0x0048CD30 to [0, 2pi). Snapped (a glide would be
+        // a view turn the player did not make), on the main camera's next
+        // build, in follow mode only.
+        bool g_classic_orbit_reset_pending = false;
+        // A recentre with recenter_behind_lara in the board view with its
+        // own heading: the board turns so the camera is behind her
+        // (2026-11-24), taken at the recentre's generation change.
+        bool g_board_behind_pending = false;
+
+        // Retail's "behind Lara" yaw (camera Euler / orbit convention).
+        bool lara_behind_yaw(float* yaw)
+        {
+            __try
+            {
+                const unsigned char* lara =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerInstance);
+                if (!lara)
+                    return false;
+                const float heading = *reinterpret_cast<const float*>(
+                    lara + kOffInstanceHeading);
+                if (!std::isfinite(heading))
+                    return false;
+                const float kTwoPi = 6.28318531f;
+                float y = fmodf(heading + 3.14159265f, kTwoPi);
+                if (y < 0.0f)
+                    y += kTwoPi;
+                *yaw = y;
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        // Board view with its own heading (board_follow_lara off, user
+        // 2026-11-12, as Underworld): the drawn board is built at
+        // g_board.heading (camera Euler, Rotation +0x278), which only the
+        // right stick and a recentre change -- never Lara or the game's
+        // auto-centre. The game's camera heading, which retail movement is
+        // relative to, is then set to the headset's facing (as first person
+        // does), in the Euler and the follow orbit (yaw +0x508 current,
+        // +0x608 target, +0x628 goal; springs +0x598/+0x5A8; word +0x1190
+        // holds auto-centre off -- see classic_orbit_reset_apply).
+        struct BoardHeading
+        {
+            bool owned = false;         // this frame
+            bool valid = false;
+            float heading = 0.0f;
+            float stick = 0.0f;         // vr_input_first_person_turn last frame
+            unsigned recentre = 0;
+            bool sign_ready = false;
+            float sign = 1.0f;          // Euler change per viewing-yaw change
+        };
+        BoardHeading g_board;
+
+        void board_write_game_heading(void* cam, float heading)
+        {
+            __try
+            {
+                float* f = reinterpret_cast<float*>(cam);
+                f[0x278 / 4] = heading;
+                f[0x508 / 4] = heading;
+                f[0x608 / 4] = heading;
+                f[0x628 / 4] = heading;
+                f[0x598 / 4] = 0.0f;
+                f[0x5A8 / 4] = 0.0f;
+                *reinterpret_cast<short*>(
+                    static_cast<unsigned char*>(cam) + 0x1190) = 1;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+            }
+        }
+
+        void classic_orbit_reset_apply(void* cam)
+        {
+            g_classic_orbit_reset_pending = false;
+            // Classic always; shoulder and board (which follow the same
+            // orbit) with recenter_behind_lara.
+            const int tp = camera_third_person_mode();
+            if (camera_first_person_active() || tp < 0 || tp > 2 ||
+                (tp != 0 && !config().recenter_behind_lara))
+                return;
+            const float kTwoPi = 6.28318531f;
+            float yaw = 0.0f, tilt = 0.0f;
+            short mode = -1;
+            bool focus_lara = false;
+            __try
+            {
+                unsigned char* c = static_cast<unsigned char*>(cam);
+                const unsigned char* lara =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerInstance);
+                mode = *reinterpret_cast<const short*>(c + kOffMode);
+                focus_lara = lara &&
+                    *reinterpret_cast<const void* const*>(
+                        c + kOffFocusInstance) == lara;
+                if (mode == 0 && focus_lara)
+                {
+                    const float heading = *reinterpret_cast<const float*>(
+                        lara + kOffInstanceHeading);
+                    const float base_tilt =
+                        *reinterpret_cast<const float*>(c + 0x600) +
+                        *reinterpret_cast<const float*>(c + 0x324);
+                    if (!std::isfinite(heading) || !std::isfinite(base_tilt))
+                        return;
+                    yaw = fmodf(heading + 3.14159265f, kTwoPi);
+                    if (yaw < 0.0f) yaw += kTwoPi;
+                    tilt = fmodf(base_tilt, kTwoPi);
+                    if (tilt < 0.0f) tilt += kTwoPi;
+                    float* f = reinterpret_cast<float*>(c);
+                    f[0x508 / 4] = yaw;
+                    f[0x608 / 4] = yaw;
+                    f[0x628 / 4] = yaw;
+                    f[0x598 / 4] = 0.0f;
+                    f[0x5A8 / 4] = 0.0f;
+                    f[0x1158 / 4] = 0.0f;
+                    f[0x610 / 4] = tilt;
+                    f[0x500 / 4] = tilt;
+                    f[0x590 / 4] = 0.0f;
+                    f[0x5A0 / 4] = 0.0f;
+                    *reinterpret_cast<short*>(c + 0x1190) = 1;
+                }
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return;
+            }
+            if (mode != 0 || !focus_lara)
+            {
+                log("view: reset -- classic orbit left alone (camera mode "
+                    "%d, %s)", (int)mode,
+                    focus_lara ? "following Lara" : "not following Lara");
+                return;
+            }
+            const float pitch_up = tilt > 3.14159265f ? kTwoPi - tilt : -tilt;
+            log("view: reset -- classic orbit behind Lara, yaw %.1f pitch "
+                "%.1f deg", yaw * 57.2957795f, pitch_up * 57.2957795f);
+        }
+
         void __cdecl detour_body(void* cam);
         void __cdecl detour(void* cam)
         {
@@ -18799,6 +20572,10 @@ namespace trlvr
             const bool main_camera = cam == kMainCamera;
             if (main_camera)
             {
+                // After this frame's GenericCameraProcess: the next one
+                // starts from the new orbit.
+                if (g_classic_orbit_reset_pending)
+                    classic_orbit_reset_apply(cam);
                 core_position_restore(cam);
                 const float* core = reinterpret_cast<const float*>(
                     static_cast<const unsigned char*>(cam) + kOffPosition);
@@ -18813,7 +20590,21 @@ namespace trlvr
             if (main_camera)
             {
                 g_accurate_aim_active = mode == 13;
-                if (!g_accurate_aim_active && !camera_first_person_active())
+                bool lock_aim = false;
+                if (!g_accurate_aim_active && config().hmd_aim &&
+                    config().gaze_target && !camera_first_person_active() &&
+                    vr_input_lock_on_key_held())
+                {
+                    float unused[3];
+                    lock_aim = !combat_target_position(unused);
+                }
+                if (lock_aim != g_lock_aim_active)
+                    log("aim: lock-on free aim %s", lock_aim
+                        ? "follows the headset (lock-on held, no target)"
+                        : "off");
+                g_lock_aim_active = lock_aim;
+                if (!g_accurate_aim_active && !g_lock_aim_active &&
+                    !camera_first_person_active())
                     g_head_aim_target_valid = false;
             }
 
@@ -18847,6 +20638,44 @@ namespace trlvr
                     first_person_leave();
             }
 
+            // Board view with its own heading: gameplay follow camera only.
+            if (main_camera)
+            {
+                bool focus_lara = false;
+                __try
+                {
+                    const void* lara =
+                        *reinterpret_cast<void* const*>(kPlayerInstance);
+                    focus_lara = lara && *reinterpret_cast<const void* const*>(
+                        static_cast<const unsigned char*>(cam) +
+                        kOffFocusInstance) == lara;
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    focus_lara = false;
+                }
+                const bool owned = drive && !first_person && !flat_screen &&
+                    !theatre && !config().board_follow_lara &&
+                    !camera_view_first_person() &&
+                    camera_third_person_mode() == 2 &&
+                    // Game camera mode 2 is what retail switches to on a
+                    // rope or pole (log 2026-11-22: 0 -> 2 at the grab);
+                    // without it the board turned with her there.
+                    (mode == 0 ||
+                     (mode == 2 && !config().board_rope_turn)) &&
+                    focus_lara && std::isfinite(saved[2]) &&
+                    !camera_cinematic_playing() &&
+                    !(ui_menu_active() && !ui_pause_menu_active());
+                if (owned != g_board.owned)
+                    log("board: heading %s", owned
+                        ? "is the board's own (right stick / recentre); "
+                          "movement follows the headset"
+                        : "follows the game's camera");
+                if (!owned)
+                    g_board.valid = false;
+                g_board.owned = owned;
+            }
+
             Mat4 base_camera = Mat4::identity();
             if (!first_person)
             {
@@ -18856,6 +20685,56 @@ namespace trlvr
                     rot[1] = 0.0f;
                 }
 
+                const bool board_owned = main_camera && g_board.owned;
+                if (board_owned)
+                {
+                    const float stick = vr_input_first_person_turn();
+                    if (!g_board.sign_ready)
+                    {
+                        // Which way an Euler change turns the view, from
+                        // the engine's own builder (as first person).
+                        const float epsilon = 0.01f;
+                        rot[2] = wrap_heading(saved[2] + epsilon);
+                        g_original(cam);
+                        const Mat4 plus = load_matrix(cam, kOffWcTransform);
+                        rot[2] = saved[2];
+                        g_original(cam);
+                        const Mat4 at = load_matrix(cam, kOffWcTransform);
+                        g_board.sign = rotation_error(plus,
+                                at * yaw_rotation(epsilon)) <=
+                            rotation_error(plus, at * yaw_rotation(-epsilon))
+                            ? 1.0f : -1.0f;
+                        g_board.sign_ready = true;
+                        log("board: camera Euler heading turns the view with "
+                            "sign %+.0f", g_board.sign);
+                    }
+                    // Entering the board, or a recentre: the board looks
+                    // where the game's camera looks now (the headset's
+                    // facing), so nothing jumps.
+                    if (!g_board.valid ||
+                        g_board.recentre != vr_recenter_generation())
+                    {
+                        g_board.heading = saved[2];
+                        // Reset view with recenter_behind_lara: the board
+                        // turns so you look along her facing instead.
+                        if (g_board.recentre != vr_recenter_generation())
+                        {
+                            float behind = 0.0f;
+                            if (g_board_behind_pending &&
+                                lara_behind_yaw(&behind))
+                                g_board.heading = wrap_heading(behind);
+                            g_board_behind_pending = false;
+                        }
+                        g_board.stick = stick;
+                        g_board.recentre = vr_recenter_generation();
+                        g_board.valid = true;
+                    }
+                    g_board.heading = wrap_heading(g_board.heading +
+                        g_board.sign * (stick - g_board.stick));
+                    g_board.stick = stick;
+                    rot[2] = g_board.heading;
+                }
+
                 g_original(cam);
 
                 base_camera = load_matrix(cam, kOffWcTransform);
@@ -18863,6 +20742,16 @@ namespace trlvr
                 rot[0] = saved[0];
                 rot[1] = saved[1];
                 rot[2] = saved[2];
+                if (board_owned)
+                {
+                    // The game's heading = the headset's facing on the
+                    // board (one copy of head yaw: the view gets it from
+                    // apply_head_pose, gameplay from here).
+                    const float wanted = wrap_heading(g_board.heading -
+                        g_board.sign * first_person_hmd_heading());
+                    rot[2] = wanted;
+                    board_write_game_heading(cam, wanted);
+                }
             }
 
             if (first_person)
@@ -18930,6 +20819,8 @@ namespace trlvr
             // crouching); the scene there stays rigid.
             if (tp_override && drive && !flat_screen &&
                 config().camera_collision && !theatre &&
+                (camera_third_person_mode() != 2 ||
+                 config().board_camera_collision) &&
                 !g_view_tween.active)
                 third_person_eye_collision(base_camera, tp_position);
 
@@ -19473,6 +21364,11 @@ namespace trlvr
         return g_accurate_aim_active;
     }
 
+    bool camera_board_owns_heading()
+    {
+        return g_board.owned;
+    }
+
     void camera_view_prescale(float* x, float* y)
     {
         if (x) *x = g_view_prescale[0];
@@ -19530,6 +21426,14 @@ namespace trlvr
         return g_marker_depth;
     }
 
+    bool camera_head_view_applied(Mat4* out)
+    {
+        if (!out || !g_applied_head_view_valid)
+            return false;
+        *out = g_applied_head_view;
+        return true;
+    }
+
     float camera_world_scale_factor()
     {
         if (!g_tp_board_scale || g_first_person_active)
@@ -19579,11 +21483,36 @@ namespace trlvr
         if (scale)
             *scale = tp_default_scale(mode);
         if (zoom)
-            *zoom = 1.0f;
+            *zoom = tp_default_zoom(mode);
         if (side)
-            *side = mode == 1 ? fminf(kTpSideMax, fmaxf(-kTpSideMax,
-                                      config().shoulder_side))
-                              : 0.0f;
+            *side = tp_default_side(mode);
+    }
+
+    float camera_tp_height(int mode)
+    {
+        tp_view_load();
+        return mode >= 0 && mode < 3 ? g_tp_height[mode]
+                                     : tp_default_height(mode);
+    }
+
+    void camera_tp_apply_default(int mode, int what, bool save)
+    {
+        // A default changed in the menu: that view takes it now (the
+        // other live adjustments stay). what: 0 zoom, 1 height, 2 side,
+        // 3 scale.
+        tp_view_load();
+        if (mode < 0 || mode > 2)
+            return;
+        if (what == 0)
+            g_tp_zoom[mode] = tp_default_zoom(mode);
+        else if (what == 1)
+            g_tp_height[mode] = tp_clamp_height(mode, tp_default_height(mode));
+        else if (what == 2)
+            g_tp_side[mode] = tp_default_side(mode);
+        else if (what == 3)
+            g_tp_scale[mode] = tp_default_scale(mode);
+        if (save)
+            tp_view_save(mode);
     }
 
     float camera_tp_side()
@@ -19607,6 +21536,39 @@ namespace trlvr
             tp_view_save(mode);
     }
 
+    bool camera_reset_view_adjust()
+    {
+        // The live third-person preset only: zoom, sideways offset, seat
+        // height and scale back to the defaults set in the menu (user
+        // 2026-11-23; the scale used to stay). First person has nothing here
+        // beyond the recentre.
+        if (camera_view_first_person())
+            return false;
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        if (mode < 0 || mode > 2)
+            return false;
+        const bool board = mode == 2;
+        for (int what = 0; what < 4; ++what)
+            camera_tp_apply_default(mode, what, false);
+        tp_view_save(mode);
+        log("view: reset -- %S preset to its defaults: zoom x%.2f, side "
+            "%+.2f, height %.2f, scale x%.2f", kTpPresetNames[mode],
+            g_tp_zoom[mode], g_tp_side[mode], g_tp_height[mode],
+            g_tp_scale[mode]);
+        // Classic keeps the retail camera's heading: swing its orbit back
+        // behind Lara too (applied on the main camera's next build). With
+        // recenter_behind_lara, shoulder and board too: the shoulder seat
+        // and a following board ride that orbit; a board with its own
+        // heading turns at the recentre (g_board_behind_pending).
+        const bool behind = config().recenter_behind_lara;
+        if (mode == 0 || behind)
+            g_classic_orbit_reset_pending = true;
+        if (board && behind)
+            g_board_behind_pending = true;
+        return board;
+    }
+
 
     bool camera_hand_index_tip_head(bool left, float out[3])
     {
@@ -19620,6 +21582,63 @@ namespace trlvr
                 return false;
         }
         return true;
+    }
+
+    void camera_view_stick(float height_in, float zoom_in, float scale_in,
+                           float dt)
+    {
+        // Palm sliders only: the stick leaves scale and zoom alone.
+        if (config().tp_scale_control == 2)
+            zoom_in = scale_in = 0.0f;
+        // Board: up/down zooms to Lara, the click-drag scales the world.
+        // Shoulder: up/down zooms, the click-drag is the seat height.
+        // Classic: the click-drag zooms. Live; saved once the stick is back
+        // at the centre (like the palm sliders on release). Lara stays
+        // 7 .. 175 cm (scale 1 .. 25).
+        static int view_dirty = -1;     // the preset whose zoom/scale moved
+        tp_view_load();
+        const int mode = camera_third_person_mode();
+        const bool moving = height_in != 0.0f || zoom_in != 0.0f ||
+                            scale_in != 0.0f;
+        if (moving && mode >= 0 && mode <= 2)
+        {
+            if (scale_in != 0.0f || zoom_in != 0.0f)
+            {
+                // Only the board scales; the others' zoom is their own.
+                if (mode != 2)
+                    scale_in = 0.0f;
+                float zoom = g_tp_zoom[mode], scale = g_tp_scale[mode];
+                const float zoom_speed = mode == 0
+                    ? config().classic_zoom_speed : config().board_zoom_speed;
+                if (board_stick_step(&zoom, &scale, zoom_in, scale_in,
+                                     zoom_speed * config().camera_speed,
+                                     config().board_scale_speed *
+                                         config().camera_speed, dt, 0.3f,
+                                     3.5f, 1.0f, 25.0f))
+                {
+                    g_tp_zoom[mode] = zoom;
+                    g_tp_scale[mode] = scale;
+                    view_dirty = mode;
+                }
+            }
+            if (height_in != 0.0f && mode != 0)
+            {
+                // The live seat height; the menu's default stays.
+                const float step = height_in * config().stick_height_speed *
+                                   config().camera_speed * dt;
+                g_tp_height[mode] = tp_clamp_height(mode,
+                                                    g_tp_height[mode] + step);
+                view_dirty = mode;
+            }
+        }
+        else if (!moving)
+        {
+            if (view_dirty >= 0)
+            {
+                tp_view_save(view_dirty);
+                view_dirty = -1;
+            }
+        }
     }
 
     float camera_palm_up(int hand)
@@ -19718,7 +21737,7 @@ namespace trlvr
         // point, the first floor down; a drop point below it goes onto it.
         // Over no floor she is not moved (Legend never drops into a void).
         bool god_put_down(void* lara, const float feet[3], float* floor_z,
-                          bool* has_floor)
+                          bool* has_floor, float min_air = 0.0f)
         {
             const float metre = config().world_scale;
             const float from[3] = { feet[0], feet[1], feet[2] + 0.5f * metre };
@@ -19728,6 +21747,23 @@ namespace trlvr
             {
                 const float top = *floor_z + config().god_drop_height * metre;
                 place[2] = fminf(fmaxf(place[2], *floor_z), top);
+                // A drop is always a fall (god_drop_min): at least min_air
+                // above the floor, so even a light let-go is the game's own
+                // fall. SetPositionFindGround snaps her onto the ground
+                // within ~96 units (0.33 m), which would make a lesser
+                // height no fall at all: so the least is just past that,
+                // and less where a ceiling is lower. The ~96 is an estimate
+                // from the code, not measured in play.
+                if (min_air > 0.0f)
+                {
+                    float air = fmaxf(min_air, 100.0f);
+                    const float up[3] = { 0.0f, 0.0f, 1.0f };
+                    float ceil_at[3];
+                    if (body_probe(place, up, air + 1.75f * metre, ceil_at))
+                        air = fminf(air, fmaxf(0.0f, ceil_at[2] - place[2] -
+                                                     1.75f * metre));
+                    place[2] = fmaxf(place[2], *floor_z + air);
+                }
             }
             const float above[3] = { place[0], place[1],
                 fmaxf(g_pluck.root[2], place[2]) + metre };
@@ -19813,6 +21849,37 @@ namespace trlvr
                     }
                     in.arm_pivot[c][2] += reach;
                 }
+                // Her facing (the heading vector, (sin yaw, -cos yaw)) and
+                // her right: the side of limbs 1 / 3 (arm chain 1), from the
+                // shoulders, so the legs spread outward whichever way the
+                // chains are named.
+                {
+                    const float yaw = *reinterpret_cast<const float*>(
+                        static_cast<unsigned char*>(lara) + kOffInstanceHeading);
+                    const float* s0 = mats + arm[0][0] * 16 + 12;
+                    const float* s1 = mats + arm[1][0] * 16 + 12;
+                    const float rx = s1[0] - s0[0], ry = s1[1] - s0[1];
+                    const float rn = sqrtf(rx * rx + ry * ry);
+                    if (std::isfinite(yaw) && rn > 1e-3f)
+                    {
+                        in.facing[0] = sinf(yaw);
+                        in.facing[1] = -cosf(yaw);
+                        in.right[0] = rx / rn;
+                        in.right[1] = ry / rn;
+                        // Right should be (fy, -fx).
+                        static bool told_side = false;
+                        if (!told_side && in.facing[1] * in.right[0] -
+                                          in.facing[0] * in.right[1] < 0.5f)
+                        {
+                            told_side = true;
+                            log("board: her heading and shoulder line "
+                                "disagree (facing %.2f %.2f, right %.2f "
+                                "%.2f); knees may bend the wrong way",
+                                in.facing[0], in.facing[1], in.right[0],
+                                in.right[1]);
+                        }
+                    }
+                }
                 return in.head_valid;
             }
             __except(EXCEPTION_EXECUTE_HANDLER)
@@ -19821,105 +21888,320 @@ namespace trlvr
             }
         }
 
-        // A thrown Lara (god flying), once per frame after pluck_step: her
-        // feet's path this frame against the level, a line just above her
-        // feet and one at her chest (1 m up at her size), as Underworld's
-        // god_flight.
-        //  - The feet line hits while she falls: she lands there (put down).
-        //  - Otherwise a hit is a wall (or, rising, a ceiling): she is moved
-        //    0.3 m back along her path and bounces off at a quarter of her
-        //    speed; the 5th hit puts her down there.
-        //  - Below where she was picked up (0.5 m) over no floor, or at the
-        //    end of the flight (`over`): put down there (over no floor she
-        //    stays where she was).
+        // The level against a segment a -> b (Lara herself passed through):
+        // the first hit. The probe skips its first 4 units, so it starts a
+        // little behind a.
+        bool god_segment_hit(const float a[3], const float b[3], float at[3])
+        {
+            float d[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+            const float len = sqrtf(dot3(d, d));
+            if (!(len > 1e-3f))
+                return false;
+            for (float& x : d)
+                x /= len;
+            const float from[3] = { a[0] - d[0] * 6.0f, a[1] - d[1] * 6.0f,
+                                    a[2] - d[2] * 6.0f };
+            return body_probe(from, d, len + 6.0f, at);
+        }
+
+        // The surface normal at a hit of the ray from -> to at `at`. Legend's
+        // probe gives no hit record's normal (its PCollideInfo may hold one,
+        // as Underworld's does; not looked into), so two parallel rays a tenth of
+        // a metre (her size) to the sides give a plane (throw_plane_normal);
+        // last resort: straight back along the ray. *src names the source.
+        void flight_normal(const float from[3], const float to[3],
+                           const float at[3], float metre, float n[3],
+                           const char** src)
+        {
+            float dir[3] = { to[0] - from[0], to[1] - from[1],
+                             to[2] - from[2] };
+            const float len = sqrtf(dot3(dir, dir));
+            for (float& x : dir)
+                x = len > 0.0f ? x / len : 0.0f;
+            // Two directions across the ray.
+            const bool flat = fabsf(dir[2]) < 0.9f;
+            const float ref[3] = { flat ? 0.0f : 1.0f, 0.0f,
+                                   flat ? 1.0f : 0.0f };
+            float u[3] = { dir[1] * ref[2] - dir[2] * ref[1],
+                           dir[2] * ref[0] - dir[0] * ref[2],
+                           dir[0] * ref[1] - dir[1] * ref[0] };
+            const float ul = sqrtf(dot3(u, u));
+            for (float& x : u)
+                x = ul > 0.0f ? x / ul : 0.0f;
+            const float v[3] = { dir[1] * u[2] - dir[2] * u[1],
+                                 dir[2] * u[0] - dir[0] * u[2],
+                                 dir[0] * u[1] - dir[1] * u[0] };
+            const float side = 0.1f * metre, more = 0.5f * metre;
+            float pts[2][3];
+            bool side_ok = true;
+            for (int i = 0; i < 2 && side_ok; ++i)
+            {
+                const float* o = i ? v : u;
+                float a[3], b[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    a[k] = from[k] + o[k] * side;
+                    b[k] = to[k] + o[k] * side + dir[k] * more;
+                }
+                side_ok = god_segment_hit(a, b, pts[i]);
+            }
+            float est[3];
+            if (side_ok && throw_plane_normal(at, pts[0], pts[1], dir, est))
+            {
+                for (int k = 0; k < 3; ++k)
+                    n[k] = est[k];
+                *src = "the side probes";
+                return;
+            }
+            for (int k = 0; k < 3; ++k)
+                n[k] = -dir[k];
+            *src = "straight back along her path (no normal)";
+        }
+
+        // A thrown Lara, once per frame after pluck_step: her centre is a
+        // ball of fly.radius (god_throw), swept prev -> pos, the line
+        // extended by the radius along her motion (as Underworld's
+        // flight_probe).
+        //  - A hit whose normal points up (z > 0.6) while she descends: she
+        //    lands, her feet on the floor under her centre.
+        //  - Any other hit (a wall, a ceiling, a slope on the way up): her
+        //    centre goes back to the radius short of the hit and she
+        //    bounces about the normal (god_throw_bounce / god_throw_friction);
+        //    after 4 bounces she is put down there.
+        //  - No hit, descending: a probe down by the radius from her centre
+        //    finds a floor under her (she lands), or a steep slope (bounce).
+        //  - After a bounce, slower than 0.5 m/s (her size) over a floor
+        //    within twice the radius: she lands.
+        //  - Below where she was picked up (0.5 m) over no floor: put down
+        //    there (over no floor she stays where she was). So does the end
+        //    of the flight (`over`).
+        struct FlightProbe
+        {
+            int result = 0;             // 0 flying on, 1 bounce at `at`, 2 lands at `at`
+            float at[3] = {};
+            float normal[3] = {};
+            const char* surface = "a wall";
+            const char* why = nullptr;
+            bool on_level = false;      // landed on the level (not the time limit)
+        };
+
+        FlightProbe flight_probe(const ThrowBody& b, float pick_z, float metre,
+                                 bool over)
+        {
+            FlightProbe r;
+            const float* c0 = b.prev;
+            const float* c1 = b.pos;
+            const float rad = b.radius;
+            const float move[3] = { c1[0] - c0[0], c1[1] - c0[1],
+                                    c1[2] - c0[2] };
+            const float len = sqrtf(dot3(move, move));
+            // Default landing spot: her feet under the centre.
+            r.at[0] = c1[0];
+            r.at[1] = c1[1];
+            r.at[2] = c1[2] - rad;
+            auto feet_under = [&](const float c[3], float* out) {
+                const float top[3] = { c[0], c[1], c[2] + 0.1f * metre };
+                float fz;
+                out[0] = c[0];
+                out[1] = c[1];
+                out[2] = god_floor(top, 60.0f * metre, &fz) &&
+                         fz > c[2] - 3.0f * rad
+                             ? fz + 0.02f * metre : c[2] - rad;
+            };
+            auto log_normal = [&](const char* src, const float n[3]) {
+                if (g_pluck.throw_normal_logged)
+                    return;
+                g_pluck.throw_normal_logged = true;
+                log("board: throw: surface normal %.2f %.2f %.2f from %s",
+                    n[0], n[1], n[2], src);
+            };
+            // The sweep.
+            if (len > 1e-3f)
+            {
+                float dir[3];
+                for (int k = 0; k < 3; ++k)
+                    dir[k] = move[k] / len;
+                const float to[3] = { c1[0] + dir[0] * rad,
+                                      c1[1] + dir[1] * rad,
+                                      c1[2] + dir[2] * rad };
+                float at[3];
+                if (god_segment_hit(c0, to, at))
+                {
+                    const float d = sqrtf((at[0] - c0[0]) * (at[0] - c0[0]) +
+                                          (at[1] - c0[1]) * (at[1] - c0[1]) +
+                                          (at[2] - c0[2]) * (at[2] - c0[2]));
+                    const float keep = d - rad > 0.0f ? d - rad : 0.0f;
+                    float contact[3];
+                    for (int k = 0; k < 3; ++k)
+                        contact[k] = c0[k] + dir[k] * keep;
+                    const char* src = "";
+                    flight_normal(c0, to, at, metre, r.normal, &src);
+                    log_normal(src, r.normal);
+                    const int kind = throw_surface(r.normal, b.vel[2]);
+                    if (kind == kThrowFloor)
+                    {
+                        feet_under(contact, r.at);
+                        r.result = 2;
+                        r.why = "on the level";
+                        r.on_level = true;
+                        return r;
+                    }
+                    r.surface = kind == kThrowCeiling ? "a ceiling" : "a wall";
+                    if (++g_pluck.bounces > 4)
+                    {
+                        feet_under(contact, r.at);
+                        r.result = 2;
+                        r.why = "against a wall (bounced 4 times)";
+                        r.on_level = true;
+                        return r;
+                    }
+                    for (int k = 0; k < 3; ++k)
+                        r.at[k] = contact[k];
+                    r.result = 1;
+                    return r;
+                }
+            }
+            // Floor contact under her centre while descending.
+            if (b.vel[2] <= 0.0f)
+            {
+                const float down[3] = { c1[0], c1[1], c1[2] - rad };
+                float at[3];
+                if (god_segment_hit(c1, down, at))
+                {
+                    const char* src = "";
+                    flight_normal(c1, down, at, metre, r.normal, &src);
+                    log_normal(src, r.normal);
+                    if (r.normal[2] > 0.6f || ++g_pluck.bounces > 4)
+                    {
+                        r.at[0] = c1[0];
+                        r.at[1] = c1[1];
+                        r.at[2] = at[2] + 0.02f * metre;
+                        r.result = 2;
+                        r.why = r.normal[2] > 0.6f
+                            ? "on the level"
+                            : "on a steep slope (bounced 4 times)";
+                        r.on_level = true;
+                        return r;
+                    }
+                    // A steep slope under her: back to where she was, off it.
+                    r.surface = "a steep slope";
+                    for (int k = 0; k < 3; ++k)
+                        r.at[k] = c0[k];
+                    r.result = 1;
+                    return r;
+                }
+            }
+            // Slow after a bounce, near a floor: she lands.
+            if (g_pluck.bounces > 0 && sqrtf(dot3(b.vel, b.vel)) < 0.5f * metre)
+            {
+                float fz;
+                if (god_floor(c1, 2.0f * rad, &fz))
+                {
+                    r.at[0] = c1[0];
+                    r.at[1] = c1[1];
+                    r.at[2] = fz + 0.02f * metre;
+                    r.result = 2;
+                    r.why = "on the level (slowed after a bounce)";
+                    r.on_level = true;
+                    return r;
+                }
+            }
+            const char* why = nullptr;
+            if (c1[2] - rad < pick_z - 0.5f * metre)
+            {
+                float fz;
+                if (!god_floor(c1, 60.0f * metre, &fz))
+                    why = "over no floor";
+            }
+            if (!why && over)
+            {
+                why = "at the end of the flight";
+                feet_under(c1, r.at);
+            }
+            if (!why)
+                return r;
+            r.result = 2;
+            r.why = why;
+            return r;
+        }
+
+        // While she is held, once per frame: her drawn centre `c`. The last
+        // point it reached along a clear line is kept (throw_free); `real`
+        // (her real centre) starts it. flight_start moves a new throw's start
+        // back to it when the line from there to the release is blocked
+        // (thrown from behind or inside a wall).
+        void throw_free_track(const float c[3], const float real[3])
+        {
+            if (!g_pluck.throw_free_ok)
+            {
+                for (int k = 0; k < 3; ++k)
+                    g_pluck.throw_free[k] = real[k];
+                g_pluck.throw_free_ok = true;
+            }
+            float at[3];
+            if (!god_segment_hit(g_pluck.throw_free, c, at))
+                for (int k = 0; k < 3; ++k)
+                    g_pluck.throw_free[k] = c[k];
+        }
+
+        // A throw just started from `b.pos`: false = the line from the last
+        // free held point is clear; true = blocked, *start = the last free
+        // point along it (the radius short of the hit).
+        bool flight_start(const ThrowBody& b, float start[3])
+        {
+            g_pluck.throw_normal_logged = false;
+            if (!g_pluck.throw_free_ok)
+                return false;
+            const float* f = g_pluck.throw_free;
+            float at[3];
+            if (!god_segment_hit(f, b.pos, at))
+                return false;
+            float dir[3] = { b.pos[0] - f[0], b.pos[1] - f[1],
+                             b.pos[2] - f[2] };
+            const float len = sqrtf(dot3(dir, dir));
+            const float d = sqrtf((at[0] - f[0]) * (at[0] - f[0]) +
+                                  (at[1] - f[1]) * (at[1] - f[1]) +
+                                  (at[2] - f[2]) * (at[2] - f[2]));
+            const float keep = d - b.radius > 0.0f ? d - b.radius : 0.0f;
+            for (int k = 0; k < 3; ++k)
+                start[k] = f[k] + (len > 0.0f ? dir[k] / len * keep : 0.0f);
+            return true;
+        }
+
         void pluck_flight(void* lara, bool over)
         {
             PluckState& s = g_pluck.god;
             const float metre = config().world_scale;
-            const float* a = s.fly_prev;
-            const float* e = s.target;
-            const float path[3] = { e[0] - a[0], e[1] - a[1], e[2] - a[2] };
-            const float path_len = sqrtf(dot3(path, path));
-            const float flat = sqrtf(path[0] * path[0] + path[1] * path[1]);
-            float land[3] = { e[0], e[1], e[2] };
-            const char* why = nullptr;
-            bool on_level = false;
-            for (int pass = 0; pass < 2 && !why && path_len > 1e-3f; ++pass)
+            const FlightProbe r = flight_probe(s.fly, s.root[2], metre, over);
+            if (r.result == 1)
             {
-                const float up = pass ? metre : 0.05f * metre;
-                const float start[3] = { a[0], a[1], a[2] + up };
-                const float dir[3] = { path[0] / path_len, path[1] / path_len,
-                                       path[2] / path_len };
-                // From a little behind: the probe skips its first 4 units.
-                const float from[3] = { start[0] - dir[0] * 6.0f,
-                                        start[1] - dir[1] * 6.0f,
-                                        start[2] - dir[2] * 6.0f };
-                float at[3];
-                if (!body_probe(from, dir, path_len + 6.0f, at))
-                    continue;
-                const bool falling = s.fly_vel[2] <= 0.0f;
-                if (pass == 0 && falling)
-                {
-                    // On the ground: a little back along her path (not into
-                    // the step she hit), on the surface.
-                    land[0] = at[0] - (flat > 1e-3f
-                        ? path[0] / flat * 0.1f * metre : 0.0f);
-                    land[1] = at[1] - (flat > 1e-3f
-                        ? path[1] / flat * 0.1f * metre : 0.0f);
-                    land[2] = at[2] + 0.02f * metre;
-                    why = "on the level";
-                    on_level = true;
-                    break;
-                }
-                float d[3];
-                for (int k = 0; k < 3; ++k)
-                    d[k] = at[k] - start[k];
-                const float keep = sqrtf(dot3(d, d)) - 0.3f * metre;
-                float back[3];
-                for (int k = 0; k < 3; ++k)
-                    back[k] = keep > 0.0f ? a[k] + dir[k] * keep : a[k];
-                // A ceiling only when rising more steeply than she moves
-                // across: a step or wall face hit on the way up is a wall,
-                // or she was sent on into it.
-                const bool ceiling = !falling &&
-                    s.fly_vel[2] > sqrtf(s.fly_vel[0] * s.fly_vel[0] +
-                                         s.fly_vel[1] * s.fly_vel[1]);
-                if (++g_pluck.bounces > 4)
-                {
-                    for (int k = 0; k < 3; ++k)
-                        land[k] = back[k];
-                    why = "against a wall (bounced 4 times)";
-                    break;
-                }
-                pluck_bounce(s, back, 0.25f, ceiling);
-                log("board: the throw hits %s %.2f s in; she bounces off",
-                    ceiling ? "a ceiling" : "a wall", s.fly_time);
+                const float v_in = sqrtf(dot3(s.fly.vel, s.fly.vel));
+                pluck_bounce(s, r.at, r.normal, config().god_throw_bounce,
+                             config().god_throw_friction);
+                log("board: the throw hits %s %.2f s in (normal %.2f %.2f "
+                    "%.2f); she bounces off at %.2f of her speed, velocity "
+                    "now %.0f %.0f %.0f", r.surface, s.fly_time, r.normal[0],
+                    r.normal[1], r.normal[2],
+                    v_in > 0.0f ? sqrtf(dot3(s.fly.vel, s.fly.vel)) / v_in
+                                : 0.0f,
+                    s.fly.vel[0], s.fly.vel[1], s.fly.vel[2]);
                 return;
             }
-            if (!why && e[2] < s.root[2] - 0.5f * metre)
-            {
-                const float from[3] = { e[0], e[1], e[2] + 0.5f * metre };
-                float fz;
-                if (!god_floor(from, 60.0f * metre, &fz))
-                    why = "over no floor";
-            }
-            if (!why && over)
-                why = "at the end of the flight";
-            if (!why)
+            if (r.result != 2)
                 return;
             float floor_z = 0.0f;
             bool has_floor = false;
             const float time = s.fly_time;
-            const bool moved = god_put_down(lara, land, &floor_z, &has_floor);
+            const bool moved = god_put_down(lara, r.at, &floor_z, &has_floor);
             log("board: the throw lands %s after %.2f s, %.2f m (her size) "
-                "from where she was picked up%s", why, time,
-                sqrtf((land[0] - s.root[0]) * (land[0] - s.root[0]) +
-                      (land[1] - s.root[1]) * (land[1] - s.root[1])) / metre,
+                "from where she was picked up%s", r.why, time,
+                sqrtf((r.at[0] - s.root[0]) * (r.at[0] - s.root[0]) +
+                      (r.at[1] - s.root[1]) * (r.at[1] - s.root[1])) / metre,
                 moved ? "" : "; she could not be moved (she stays where "
                              "she was)");
             // On the level: the landing animation (god_land_anim) once the
             // teleport has settled.
-            if (moved && on_level && config().god_land_anim >= 0)
+            if (moved && r.on_level && config().god_land_anim >= 0)
                 g_pluck.land_anim_due = (GetTickCount() + 100) | 1;
             if (g_pluck.throw_hand >= 0)
                 vr_input_weapon_haptic(g_pluck.throw_hand == 0, 0.25f);
@@ -19927,6 +22209,279 @@ namespace trlvr
             g_pluck.bounces = 0;
             g_pluck.throw_hand = -1;
             dangle_restore(lara);
+        }
+
+        // Her pose for the torso grab (TorsoInput), from her animated
+        // matrices (the last draw's, put back after it): the torso axis from
+        // the hips' middle to the shoulders' middle, her arms (shoulder ->
+        // wrist), legs (hip -> foot) and head (its joint -> 20 cm above, as
+        // the pick-up's head top). Her reference frame is her feet with the
+        // world axes (rigid; any rigid frame does, god_torso.h). in.root is
+        // set by the caller. leg_left[c]: hip c is her left leg.
+        bool torso_read_bones(void* lara, TorsoInput& in, bool leg_left[2])
+        {
+            const float metre = config().world_scale;
+            __try
+            {
+                void* model = nullptr;
+                if (!lara_is_drawn_lara(lara, nullptr, &model) || !model)
+                    return false;
+                unsigned char* m = static_cast<unsigned char*>(model);
+                const int count = *reinterpret_cast<const int*>(
+                    m + kOffModelNumSegments);
+                const ModelSegment* segments =
+                    *reinterpret_cast<ModelSegment* const*>(
+                        m + kOffModelSegments);
+                const float* mats = *reinterpret_cast<float* const*>(
+                    static_cast<unsigned char*>(lara) + kOffInstanceMatrices);
+                const unsigned char* prop =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerProp);
+                int arm[2][3];
+                if (!mats || !prop || !segments || count <= 0 ||
+                    count > kMaxSegments || !lara_arm_segments(count, arm))
+                    return false;
+                const int head = *reinterpret_cast<const int*>(
+                    prop + kOffPlayerPropHeadSegment);
+                if (head < 0 || head >= count)
+                    return false;
+                if (g_hip_model != model)
+                {
+                    g_hip_model = model;
+                    find_hips(segments, count,
+                              reinterpret_cast<const float (*)[16]>(mats));
+                }
+                if (g_hip[0] < 0 || g_hip[1] < 0 || g_hip[0] >= count ||
+                    g_hip[1] >= count)
+                    return false;
+                const float* hip[2] = { mats + g_hip[0] * 16 + 12,
+                                        mats + g_hip[1] * 16 + 12 };
+                const float* sh[2] = { mats + arm[0][0] * 16 + 12,
+                                       mats + arm[1][0] * 16 + 12 };
+                const float* wr[2] = { mats + arm[0][2] * 16 + 12,
+                                       mats + arm[1][2] * 16 + 12 };
+                const float* hj = mats + head * 16 + 12;
+                // Her left leg: the hip on the same side as her left shoulder.
+                const float side[3] = { hip[0][0] - hip[1][0],
+                                        hip[0][1] - hip[1][1],
+                                        hip[0][2] - hip[1][2] };
+                const float left[3] = { sh[0][0] - sh[1][0],
+                                        sh[0][1] - sh[1][1],
+                                        sh[0][2] - sh[1][2] };
+                leg_left[0] = dot3(side, left) >= 0.0f;
+                leg_left[1] = !leg_left[0];
+                const float yaw = *reinterpret_cast<const float*>(
+                    static_cast<unsigned char*>(lara) + kOffInstanceHeading);
+                if (!std::isfinite(yaw))
+                    return false;
+                in.body_valid = true;
+                in.body = translation(in.root[0], in.root[1], in.root[2]);
+                in.forward[0] = sinf(yaw);
+                in.forward[1] = -cosf(yaw);
+                in.up[2] = 1.0f;
+                for (int k = 0; k < 3; ++k)
+                {
+                    in.torso_a[k] = 0.5f * (hip[0][k] + hip[1][k]);
+                    in.torso_b[k] = 0.5f * (sh[0][k] + sh[1][k]);
+                }
+                for (int c = 0; c < 2; ++c)
+                {
+                    const int a = kTorsoArm0 + c;
+                    const int l = leg_left[c] ? kTorsoLeg0 : kTorsoLeg1;
+                    const int foot = g_foot[c] >= 0 && g_foot[c] < count
+                        ? g_foot[c] : -1;
+                    in.limb_valid[a] = in.limb_valid[l] = true;
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        in.limb_joint[a][k] = sh[c][k];
+                        in.limb_end[a][k] = wr[c][k];
+                        in.limb_joint[l][k] = hip[c][k];
+                        in.limb_end[l][k] = foot >= 0
+                            ? mats[foot * 16 + 12 + k]
+                            : hip[c][k] - (k == 2 ? 0.9f * metre : 0.0f);
+                    }
+                }
+                in.limb_valid[kTorsoHead] = true;
+                for (int k = 0; k < 3; ++k)
+                {
+                    in.limb_joint[kTorsoHead][k] = hj[k];
+                    in.limb_end[kTorsoHead][k] =
+                        hj[k] + (k == 2 ? 0.20f * metre : 0.0f);
+                }
+                for (int l = 0; l < kTorsoLimbs; ++l)
+                    for (int k = 0; k < 3; ++k)
+                        if (!std::isfinite(in.limb_joint[l][k]) ||
+                            !std::isfinite(in.limb_end[l][k]))
+                            return false;
+                return std::isfinite(in.torso_a[0]) &&
+                       std::isfinite(in.torso_b[0]) &&
+                       std::isfinite(in.torso_a[2]) &&
+                       std::isfinite(in.torso_b[2]);
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
+
+        // The torso toss (TorsoState::flying), once per frame after
+        // torso_step: as pluck_flight, her drawn centre swept against the
+        // level, her feet under the drawn pose.
+        void torso_flight(void* lara, bool over)
+        {
+            TorsoState& s = g_torso.god;
+            const float metre = config().world_scale;
+            const FlightProbe r = flight_probe(s.fly, g_torso.in.root[2],
+                                               metre, over);
+            if (r.result == 1)
+            {
+                const float v_in = sqrtf(dot3(s.fly.vel, s.fly.vel));
+                torso_bounce(s, r.at, r.normal, config().god_throw_bounce,
+                             config().god_throw_friction);
+                log("board: torso toss hits %s %.2f s in (normal %.2f %.2f "
+                    "%.2f); she bounces off at %.2f of her speed, velocity "
+                    "now %.0f %.0f %.0f", r.surface, s.fly_time, r.normal[0],
+                    r.normal[1], r.normal[2],
+                    v_in > 0.0f ? sqrtf(dot3(s.fly.vel, s.fly.vel)) / v_in
+                                : 0.0f,
+                    s.fly.vel[0], s.fly.vel[1], s.fly.vel[2]);
+                return;
+            }
+            if (r.result != 2)
+                return;
+            float floor_z = 0.0f;
+            bool has_floor = false;
+            const float time = s.fly_time;
+            const bool moved = god_put_down(lara, r.at, &floor_z, &has_floor);
+            log("board: torso toss lands %s after %.2f s%s", r.why, time,
+                moved ? "" : "; she could not be moved (she stays where she "
+                             "was)");
+            if (moved && r.on_level && config().god_land_anim >= 0)
+                g_pluck.land_anim_due = (GetTickCount() + 100) | 1;
+            if (g_pluck.throw_hand >= 0)
+                vr_input_weapon_haptic(g_pluck.throw_hand == 0, 0.25f);
+            torso_land(s);
+            g_pluck.bounces = 0;
+            g_pluck.throw_hand = -1;
+        }
+
+        // Is this hand's pose a fist (index and the other fingers curled),
+        // with hysteresis: closing past 0.6 / 0.5, opening below 0.45 / 0.35.
+        // False without finger data.
+        bool hand_is_fist(int hand, bool was)
+        {
+            float curl[5], splay[4];
+            if (!vr_input_finger_pose(hand == 0, curl, splay))
+                return false;
+            const float others = (curl[2] + curl[3] + curl[4]) / 3.0f;
+            return curl[1] > (was ? 0.45f : 0.6f) &&
+                   others > (was ? 0.35f : 0.5f);
+        }
+
+        // god_zone_debug: the grab zones as world-space line segments, filled
+        // each pick-up update and drawn in the headset by the same path as the
+        // rear soft body's wireframes (camera_zone_debug_lines ->
+        // vr_submit's draw_rear_debug). Colours are 0xAARRGGBB.
+        constexpr unsigned kZoneTorso = 0xFF00FF00u, kZoneHead = 0xFFFF00FFu,
+                           kZoneHand = 0xFFFF8000u, kZonePoint = 0xFFFFFFFFu;
+        struct ZoneDebug
+        {
+            static constexpr int kMax = 640;
+            float seg[kMax][6];
+            unsigned colour[kMax];
+            int count = 0;
+            unsigned frame = 0xFFFFFFFFu;
+        };
+        ZoneDebug g_zone_debug;
+
+        void zone_line(const float a[3], const float b[3], unsigned colour)
+        {
+            ZoneDebug& z = g_zone_debug;
+            if (z.count >= ZoneDebug::kMax)
+                return;
+            memcpy(&z.seg[z.count][0], a, sizeof(float) * 3);
+            memcpy(&z.seg[z.count][3], b, sizeof(float) * 3);
+            z.colour[z.count++] = colour;
+        }
+
+        // A ring round c in the plane of u and w (vectors with the radius).
+        void zone_ring(const float c[3], const float u[3], const float w[3],
+                       unsigned colour)
+        {
+            const int kSteps = 16;
+            float prev[3];
+            for (int i = 0; i <= kSteps; ++i)
+            {
+                const float a = 6.2831853f * i / kSteps;
+                float p[3];
+                for (int k = 0; k < 3; ++k)
+                    p[k] = c[k] + u[k] * cosf(a) + w[k] * sinf(a);
+                if (i)
+                    zone_line(prev, p, colour);
+                memcpy(prev, p, sizeof(prev));
+            }
+        }
+
+        // A ball: three rings.
+        void zone_ball(const float c[3], float r, unsigned colour)
+        {
+            const float x[3] = { r, 0.0f, 0.0f }, y[3] = { 0.0f, r, 0.0f },
+                        z[3] = { 0.0f, 0.0f, r };
+            zone_ring(c, x, y, colour);
+            zone_ring(c, y, z, colour);
+            zone_ring(c, x, z, colour);
+        }
+
+        // A capsule a-b of radius r: a ring at each end and four side lines
+        // (a == b is a ball).
+        void zone_capsule(const float a[3], const float b[3], float r,
+                          unsigned colour)
+        {
+            float axis[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+            if (normalise3(axis) < 1e-4f)
+            {
+                zone_ball(a, r, colour);
+                return;
+            }
+            const float helper[3] = { fabsf(axis[2]) < 0.9f ? 0.0f : 1.0f, 0.0f,
+                                      fabsf(axis[2]) < 0.9f ? 1.0f : 0.0f };
+            float u[3] = { axis[1] * helper[2] - axis[2] * helper[1],
+                           axis[2] * helper[0] - axis[0] * helper[2],
+                           axis[0] * helper[1] - axis[1] * helper[0] };
+            normalise3(u);
+            float w[3] = { axis[1] * u[2] - axis[2] * u[1],
+                           axis[2] * u[0] - axis[0] * u[2],
+                           axis[0] * u[1] - axis[1] * u[0] };
+            for (int k = 0; k < 3; ++k)
+            {
+                u[k] *= r;
+                w[k] *= r;
+            }
+            zone_ring(a, u, w, colour);
+            zone_ring(b, u, w, colour);
+            for (int i = 0; i < 4; ++i)
+            {
+                const float cs = i == 0 ? 1.0f : i == 2 ? -1.0f : 0.0f;
+                const float sn = i == 1 ? 1.0f : i == 3 ? -1.0f : 0.0f;
+                float p[3], q[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    p[k] = a[k] + u[k] * cs + w[k] * sn;
+                    q[k] = b[k] + u[k] * cs + w[k] * sn;
+                }
+                zone_line(p, q, colour);
+            }
+        }
+
+        // A small three-axis cross at p, `arm` long each way.
+        void zone_cross(const float p[3], float arm, unsigned colour)
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                float a[3] = { p[0], p[1], p[2] }, b[3] = { p[0], p[1], p[2] };
+                a[k] -= arm;
+                b[k] += arm;
+                zone_line(a, b, colour);
+            }
         }
     }
 
@@ -19946,7 +22501,7 @@ namespace trlvr
     bool god_hand_scale()
     {
         return camera_third_person_mode() == 2 &&
-               camera_world_scale_factor() >= 1.25f;
+               camera_world_scale_factor() >= 1.0f;
     }
 
     // Which hands' grips and triggers are the mod's in god mode (as
@@ -19985,9 +22540,9 @@ namespace trlvr
         claimed[0] = claimed[1] = false;
         const float factor = camera_world_scale_factor();
         void* lara = nullptr;
-        bool ok = active && factor > 1.001f && god_hand_scale() &&
+        bool ok = active && factor >= 1.0f && god_hand_scale() &&
                   !g_first_person_active &&
-                  config().immersive_controls && config().board_god_hand;
+                  config().hands_on_controllers && config().board_god_hand;
         __try
         {
             lara = *reinterpret_cast<void**>(kPlayerInstance);
@@ -20015,6 +22570,17 @@ namespace trlvr
             g_pluck.palm = -1;
             g_pluck.hand = -1;
             g_pluck.hover = false;
+            if (torso_drawn(g_torso.god))
+                log("board: torso grab dropped (left board gameplay); Lara "
+                    "stays where she was");
+            torso_reset(g_torso.god);
+            for (int h = 0; h < 2; ++h)
+            {
+                g_torso.mask[h] = g_torso.aim[h] = g_torso.fist[h] = false;
+                g_torso.fist_block[h] = false;
+                g_torso.touch_ok[h] = false;
+            }
+            g_zone_debug.count = 0;
             // Cleared, the grips remembered (one held now is no press).
             PluckParams off;
             off.enabled = false;
@@ -20038,7 +22604,7 @@ namespace trlvr
             // Board view without the pick-up (board_god_hand off): a hand
             // near or on her still keeps its grip and trigger from the game.
             bool board = active && lara && god_hand_scale() &&
-                !g_first_person_active && config().immersive_controls;
+                !g_first_person_active && config().hands_on_controllers;
             for (int k = 0; k < 3; ++k)
                 board = board && std::isfinite(g_pluck.root[k]);
             if (board)
@@ -20144,6 +22710,7 @@ namespace trlvr
         // Onto the palm unaided: an upturned palm she walks onto (its top
         // within a step of her feet), or lands on from above.
         if (g_pluck.palm < 0 && g_pluck.hand < 0 && !g_pluck.god.flying &&
+            !torso_drawn(g_torso.god) &&
             GetTickCount() - g_pluck.palm_left_at > 1000)
         {
             const bool airborne = lara_airborne(lara);
@@ -20213,19 +22780,45 @@ namespace trlvr
         pp.metre = metre;
         pp.table = table;
         pp.head_only = true;
-        pp.head_radius = config().god_head_zone;
+        // god_zone_scale multiplies every grab zone (and its wireframe).
+        pp.head_radius = config().god_head_zone * config().god_zone_scale;
         // Drag by hand is experimental (god_drag_hand): off, no arm zones
         // and the head grab hangs on Legend's dangle animation.
-        pp.arm_radius = config().god_drag_hand ? config().god_arm_zone : 0.0f;
-        // Off a palm she is lifted at once (the lead draws her arm on her
-        // real pose, not on the palm).
-        pp.arm_lead = config().god_arm_lead && g_pluck.palm < 0;
+        pp.arm_radius = config().god_drag_hand
+            ? config().god_arm_zone * config().god_zone_scale : 0.0f;
+        // The arm lead (back on, user 2026-11-03): the arm reaches for the
+        // hand and she is lifted only once it is pulled past her reach, as
+        // Underworld; lifted at once she hung from the grab height, feet in
+        // the floor.
+        pp.arm_lead = config().god_arm_lead;
         pp.settle_seconds = 0.15f;      // fingers closing into the pinch pose
         pp.throw_enabled = config().god_throw;
         pp.throw_scale = config().god_throw_strength;
+        pp.throw_max_speed = config().god_throw_max_speed;
         pp.throw_gravity = config().god_throw_gravity;
+        pp.throw_velocity = config().god_throw_velocity ? 1 : 0;
+        pp.throw_radius = config().god_throw_radius;
+        // Ragdoll limbs, knees (degrees in the ini), the throw's tumble, and
+        // a second hand on her other arm; the held draw is carry_apply.
+        pp.ragdoll = config().god_ragdoll;
+        pp.knee_bend = config().god_knee_bend * 0.017453293f;
+        pp.throw_spin = config().god_throw_spin;
+        pp.two_hands = config().god_two_hands;
         PluckInput in;
         in.dt = dt;
+        // Two hands: her arms as drawn last frame (the other arm is the
+        // second grab's zone); chain c is limb c (0 left, 1 right).
+        for (int c = 0; c < 2; ++c)
+        {
+            in.arm_limb[c] = c;
+            in.drawn_arm_valid[c] = g_pluck.drawn_ok && pluck_drawn(g_pluck.god);
+            for (int k = 0; k < 3; ++k)
+            {
+                in.drawn_shoulder[c][k] = g_pluck.drawn_shoulder[c][k];
+                in.drawn_end[c][k] = g_pluck.drawn_end[c][k];
+                in.drawn_wrist[c][k] = g_pluck.drawn_wrist[c][k];
+            }
+        }
         for (int k = 0; k < 3; ++k)
             in.root[k] = g_pluck.root[k];
         float head_top[3] = { g_pluck.root[0], g_pluck.root[1],
@@ -20271,9 +22864,16 @@ namespace trlvr
         {
             const bool left = h == 0;
             in.grip[h] = grip[h];
+            in.real_speed[h] = -1.0f;
             Mat4 to_head;
             if (!vr_controller_head_pose(left, &to_head))
+            {
+                g_pluck.real[h].have = false;
                 continue;
+            }
+            // The real controller's speed, to cap the throw / swing
+            // velocities (-1 unknown, or a repeat frame with dt 0).
+            in.real_speed[h] = hand_real_speed(h, g_pluck.real[h], dt);
             const Mat4 world = to_head * camera_to_world;
             // The posed hand's pinch (midway between thumb and index tips,
             // as Underworld) while it is fresh; else the drawn index
@@ -20306,6 +22906,224 @@ namespace trlvr
             in.part_held[h] = g_tp_part_time[h] &&
                 GetTickCount() - g_tp_part_time[h] < 150;
         }
+        // Torso fist grab (god_torso, ported back from Underworld's torso_step
+        // glue): before the pluck, which does not see a hand whose fist
+        // closed aimed at her torso (mask) nor any grab while she is held or
+        // tossed by it. A hand on a soft part (part_held) or a Lara the pluck
+        // has (held, flying, on a palm) is no torso grab.
+        TorsoParams tp;
+        TorsoEvents tev;
+        {
+            const Config& cfg = config();
+            g_zone_debug.count = 0;
+            g_zone_debug.frame = g_present_count;
+            tp.metre = metre;
+            tp.table = table;
+            tp.enabled = cfg.god_torso;
+            tp.max_height = cfg.god_torso_max_height;
+            tp.facing_dot = cfg.god_torso_facing;
+            tp.torso_radius = cfg.god_torso_radius * cfg.god_zone_scale;
+            tp.hand_margin = cfg.god_torso_margin;
+            tp.zone_lower = cfg.god_torso_lower;
+            tp.grace_seconds = cfg.god_torso_grace;
+            tp.knee_bend = cfg.god_knee_bend * 0.017453293f;
+            tp.throw_enabled = cfg.god_throw && cfg.god_torso_throw_scale > 0.0f;
+            tp.throw_scale = cfg.god_torso_throw_scale;
+            tp.throw_max_speed = cfg.god_throw_max_speed;
+            tp.throw_gravity = cfg.god_throw_gravity;
+            tp.throw_velocity = cfg.god_throw_velocity ? 1 : 0;
+            tp.throw_radius = cfg.god_throw_radius;
+            tp.spin_scale = cfg.god_torso_spin;
+            TorsoInput& ti = g_torso.in;
+            ti = TorsoInput();
+            ti.dt = dt;
+            for (int k = 0; k < 3; ++k)
+                ti.root[k] = g_pluck.root[k];
+            const bool bones = torso_read_bones(lara, ti, g_torso.leg_left);
+            ti.body_valid = bones;
+            g_torso.apparent = factor > 0.0f ? 1.75f / factor : 0.0f;
+            ti.apparent_height = g_torso.apparent;
+            if (!bones)
+            {
+                static bool told = false;
+                if (!told)
+                {
+                    told = true;
+                    log("board: her bones are unreadable for the torso "
+                        "grab; none until they are");
+                }
+            }
+            const bool pluck_taken = s.hand >= 0 || s.flying || g_pluck.palm >= 0;
+            float za[3], zb[3], zr = 0.0f;
+            if (!torso_zone(tp, ti, za, zb, &zr))
+                for (int k = 0; k < 3; ++k)
+                {
+                    za[k] = ti.torso_a[k];
+                    zb[k] = ti.torso_b[k];
+                }
+            const DWORD tick = GetTickCount();
+            for (int h = 0; h < 2; ++h)
+            {
+                TorsoHand& th = ti.hand[h];
+                g_torso.fist[h] = hand_is_fist(h, g_torso.fist[h]);
+                Mat4 to_head;
+                const bool seen = hand_seen_fresh(h) && g_palm_seen[h].time &&
+                    tick - g_palm_seen[h].time < 250 &&
+                    vr_controller_head_pose(h == 0, &to_head);
+                th.valid = seen;
+                th.fist = seen && g_torso.fist[h];
+                th.real_speed = seen ? in.real_speed[h] : -1.0f;
+                if (seen)
+                {
+                    // The hand's frame: the controller's turn, at the palm
+                    // as drawn (the board's apparent place).
+                    const Mat4 world = to_head * camera_to_world;
+                    Mat4 pose = Mat4::identity();
+                    for (int r = 0; r < 3; ++r)
+                    {
+                        float a[3] = { world.m[r][0], world.m[r][1],
+                                       world.m[r][2] };
+                        normalise3(a);
+                        for (int k = 0; k < 3; ++k)
+                            pose.m[r][k] = a[k];
+                    }
+                    for (int k = 0; k < 3; ++k)
+                        pose.m[3][k] = g_palm_seen[h].point[k];
+                    th.pose = pose;
+                    // The zone test takes whichever of the hand's points is
+                    // nearest her spine (a fist's palm centre is often a
+                    // hand's width off it); the facing still uses the
+                    // palm's normal.
+                    const HandSeen& hs = g_hand_seen[h];
+                    const float* cand[4] = { g_palm_seen[h].point, hs.pinch,
+                                             hs.index_tip, hs.thumb_tip };
+                    const float* near_pt = cand[0];
+                    float near_d = 1e30f;
+                    for (const float* c : cand)
+                    {
+                        const float d = pluck_segment_distance(za, zb, c);
+                        if (d < near_d)
+                        {
+                            near_d = d;
+                            near_pt = c;
+                        }
+                    }
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        th.palm_centre[k] = near_pt[k];
+                        th.palm_normal[k] = g_palm_seen[h].normal[k];
+                    }
+                }
+                th.part_held = in.part_held[h];
+                th.other_grab = pluck_taken || s.hand2 == h;
+            }
+            torso_step(g_torso.god, tp, ti, &tev);
+            TorsoState& ts = g_torso.god;
+            for (int h = 0; h < 2; ++h)
+            {
+                g_torso.aim[h] = tev.aim[h];
+                if (tev.wants[h] || ts.hand == h)
+                    g_torso.mask[h] = true;
+                else if (!ti.hand[h].valid || !grip[h])
+                    g_torso.mask[h] = false;
+                // A squeezed fist is the torso grab's, not a soft-part
+                // pinch, while she is small enough to be grabbed by the
+                // torso: only a pinch holds a part.
+                g_torso.fist_block[h] = cfg.god_torso_fist_first &&
+                    cfg.god_torso && g_torso.fist[h] &&
+                    g_torso.apparent <= cfg.god_fist_block_height;
+                if (tev.hover_enter[h])
+                    vr_input_handhold_haptic(h == 0);
+            }
+            if (tev.grabbed)
+            {
+                vr_input_weapon_haptic(tev.hand == 0, 0.5f);
+                g_pluck.bounces = 0;
+                g_pluck.land_anim_due = 0;
+                log("board: torso grab by the %s hand (she looks %.2f m "
+                    "tall to you)", tev.hand ? "right" : "left",
+                    g_torso.apparent);
+            }
+            if (tev.thrown)
+            {
+                vr_input_weapon_haptic(tev.hand == 0, 0.4f);
+                g_pluck.bounces = 0;
+                g_pluck.throw_hand = tev.hand;
+                const ThrowBody& fb = ts.fly;
+                log("board: torso toss by the %s hand at %.2f m/s (your "
+                    "size, %s), velocity %.0f %.0f %.0f units/s, centre %.0f "
+                    "%.0f %.0f, radius %.0f", tev.hand ? "right" : "left",
+                    tev.throw_speed,
+                    cfg.god_throw_velocity ? "averaged" : "peak",
+                    fb.vel[0], fb.vel[1], fb.vel[2], fb.pos[0], fb.pos[1],
+                    fb.pos[2], fb.radius);
+                // Released behind a wall: she starts at the last free point.
+                float start[3];
+                if (flight_start(fb, start))
+                {
+                    log("board: torso toss: the release point is behind the "
+                        "level; she starts at the last free point");
+                    torso_fly_move(ts, start);
+                }
+            }
+            else if (tev.put_down)
+            {
+                vr_input_weapon_haptic(tev.hand == 0, 0.3f);
+                float floor_z = 0.0f;
+                bool has_floor = false;
+                if (god_put_down(lara, tev.feet, &floor_z, &has_floor,
+                                 cfg.god_drop_min * metre))
+                    log("board: torso released by the %s hand: put down "
+                        "%.2f m (her size) above the floor, %.2f table-m "
+                        "from where she was picked up",
+                        tev.hand ? "right" : "left",
+                        (tev.feet[2] - floor_z) / metre,
+                        sqrtf((tev.feet[0] - g_pluck.root[0]) *
+                              (tev.feet[0] - g_pluck.root[0]) +
+                              (tev.feet[1] - g_pluck.root[1]) *
+                              (tev.feet[1] - g_pluck.root[1])) / table);
+                else
+                    log("board: torso released by the %s hand; Lara stays "
+                        "where she was%s", tev.hand ? "right" : "left",
+                        has_floor ? "" : " (over no floor)");
+            }
+            if (ts.flying && !tev.thrown)
+                torso_flight(lara, tev.flight_over);
+            // Held: where a throw may start from (throw_free_track).
+            if (ts.hand >= 0 && cfg.god_throw)
+            {
+                const float real_c[3] = {
+                    0.5f * (ti.torso_a[0] + ti.torso_b[0]),
+                    0.5f * (ti.torso_a[1] + ti.torso_b[1]),
+                    0.5f * (ti.torso_a[2] + ti.torso_b[2]) };
+                throw_free_track(ts.centre, real_c);
+            }
+            // The torso zone and the hand's own points, as wireframes (the
+            // head and arm zones are added after the pick-up step).
+            if (cfg.god_zone_debug)
+            {
+                float dza[3], dzb[3], dzr = 0.0f;
+                if (torso_zone(tp, ti, dza, dzb, &dzr))
+                    zone_capsule(dza, dzb, dzr, kZoneTorso);
+                for (int h = 0; h < 2; ++h)
+                    if (hand_seen_fresh(h))
+                    {
+                        const HandSeen& hs = g_hand_seen[h];
+                        if (g_palm_seen[h].time &&
+                            tick - g_palm_seen[h].time < 250)
+                            zone_cross(g_palm_seen[h].point, 0.01f * table,
+                                       kZonePoint);
+                        zone_cross(hs.pinch, 0.006f * table, kZonePoint);
+                        zone_cross(hs.index_tip, 0.004f * table, kZonePoint);
+                        zone_cross(hs.thumb_tip, 0.004f * table, kZonePoint);
+                    }
+            }
+        }
+        // The pluck does not see a fist the torso grab took, nor anything
+        // while she is held by her torso.
+        for (int h = 0; h < 2; ++h)
+            in.grip[h] = grip[h] && !g_torso.mask[h] &&
+                         !torso_drawn(g_torso.god);
         // The floor under the held Lara: straight down from a little
         // above her feet (she may be pushed slightly into a surface).
         if (s.hand >= 0)
@@ -20321,6 +23139,8 @@ namespace trlvr
         PluckEvents ev;
         pluck_step(s, pp, in, &ev);
         g_pluck.god_in = in;
+        if (!pluck_drawn(s))
+            g_pluck.drawn_ok = false;
         const bool by_arm = ev.part == kPluckArm0 || ev.part == kPluckArm1;
         if (ev.picked_up)
         {
@@ -20356,6 +23176,20 @@ namespace trlvr
         {
             vr_input_weapon_haptic(ev.hand == 0, 0.5f);
             log("board: lifted off her feet by her arm");
+        }
+        if (ev.second_grab)
+        {
+            vr_input_weapon_haptic(ev.hand == 0, 0.5f);
+            log("board: the %s hand takes her other arm (chain %d): she "
+                "hangs from both hands", ev.hand == 0 ? "left" : "right",
+                ev.part - kPluckArm0);
+        }
+        if (ev.second_release)
+        {
+            vr_input_weapon_haptic(ev.hand == 0, 0.2f);
+            log("board: the %s hand lets go of her arm (chain %d); she "
+                "hangs by the %s hand", ev.hand == 0 ? "left" : "right",
+                ev.part - kPluckArm0, s.hand == 0 ? "left" : "right");
         }
         for (int h = 0; h < 2; ++h)
             if (ev.hover_enter[h])
@@ -20443,19 +23277,40 @@ namespace trlvr
                 {
                     g_pluck.throw_hand = h;
                     g_pluck.bounces = 0;
+                    g_pluck.fly_in = in;
                     vr_input_weapon_haptic(left, 0.4f);
                     log("board: thrown by the %s hand at %.2f m/s (your "
-                        "size), velocity %.0f %.0f %.0f units/s, from %.0f "
-                        "%.0f %.0f", left ? "left" : "right", ev.throw_speed,
-                        s.fly_vel[0], s.fly_vel[1], s.fly_vel[2],
-                        ev.target[0], ev.target[1], ev.target[2]);
+                        "size, %s), velocity %.0f %.0f %.0f units/s, centre "
+                        "%.0f %.0f %.0f, radius %.0f, feet held at %.0f %.0f "
+                        "%.0f", left ? "left" : "right", ev.throw_speed,
+                        config().god_throw_velocity ? "averaged" : "peak",
+                        s.fly.vel[0], s.fly.vel[1], s.fly.vel[2],
+                        s.fly.pos[0], s.fly.pos[1], s.fly.pos[2],
+                        s.fly.radius, ev.target[0], ev.target[1],
+                        ev.target[2]);
+                    // Released behind a wall: she starts at the last free
+                    // point of the held path.
+                    float start[3];
+                    if (flight_start(s.fly, start))
+                    {
+                        log("board: throw: the release point is behind the "
+                            "level; she starts %.2f m back, at the last free "
+                            "point", sqrtf((start[0] - s.fly.pos[0]) *
+                                           (start[0] - s.fly.pos[0]) +
+                                           (start[1] - s.fly.pos[1]) *
+                                           (start[1] - s.fly.pos[1]) +
+                                           (start[2] - s.fly.pos[2]) *
+                                           (start[2] - s.fly.pos[2])) / metre);
+                        pluck_fly_move(s, start);
+                    }
                 }
             }
             else if (!on_other)
             {
                 // Dropped from her feet as drawn, no higher than
                 // god_drop_height above the floor.
-                if (god_put_down(lara, ev.target, &floor_z, &has_floor))
+                if (god_put_down(lara, ev.target, &floor_z, &has_floor,
+                                 config().god_drop_min * metre))
                     log("board: Lara dropped from %.2f m (her size) above "
                         "the floor, %.2f table-m from where she was picked "
                         "up", (ev.target[2] - floor_z) / metre,
@@ -20472,6 +23327,18 @@ namespace trlvr
         // In flight: what she hits, where she lands.
         if (s.flying && !ev.thrown)
             pluck_flight(lara, ev.flight_over);
+        // Held and lifted: where a throw may start from (throw_free_track);
+        // nothing held or flying: forgotten.
+        if (s.hand >= 0 && s.lifted && config().god_throw)
+        {
+            float c[3];
+            pluck_centre(s, in, c);
+            const float real_c[3] = { g_pluck.root[0], g_pluck.root[1],
+                                      g_pluck.root[2] + 0.9f * metre };
+            throw_free_track(c, real_c);
+        }
+        else if (s.hand < 0 && !s.flying && !torso_drawn(g_torso.god))
+            g_pluck.throw_free_ok = false;
         // Legend's dangle animation while she is held (or thrown) by her
         // head -- always without god_drag_hand, else with god_hang_arm; her
         // own animation otherwise.
@@ -20507,9 +23374,192 @@ namespace trlvr
         // as Underworld): holding her, in a pick-up zone, touching her, on
         // a soft part, or the pinch / index tip within god_claim_zone of her
         // body (feet to the top of her head).
-        board_claims(pp, feet, head_top, point_ok, point, tip, s.hand,
-                     s.inside, claimed);
+        // The torso fist counts too: holding her, aiming at her torso, or a
+        // fist it took (mask) keeps its grip and trigger from the game.
+        const int holding = s.hand >= 0 ? s.hand : g_torso.god.hand;
+        bool inside[2];
+        for (int h = 0; h < 2; ++h)
+            inside[h] = s.inside[h] || g_torso.aim[h] || g_torso.mask[h];
+        board_claims(pp, feet, head_top, point_ok, point, tip, holding,
+                     inside, claimed);
+        // The second hand of a two-hand hold keeps its grip too.
+        if (s.hand2 >= 0)
+            claimed[s.hand2] = true;
+
+        // A free hand touching her while she is drawn (held or flying): its
+        // speed knocks her limbs / swing; the soft parts and the rear see
+        // her as drawn already (touch_root, the carried matrices).
+        if (config().hand_body_collision &&
+            (torso_drawn(g_torso.god) || pluck_drawn(s)))
+        {
+            const bool torso = torso_drawn(g_torso.god);
+            for (int h = 0; h < 2; ++h)
+            {
+                float pts[4][3];
+                const int n = hand_contact_points(h, pts, true);
+                if (n == 0 || hand_holds_her(h) || dt <= 0.0f)
+                {
+                    g_torso.touch_ok[h] = false;
+                    if (n > 0)
+                        memcpy(g_torso.touch_last[h], pts[0], sizeof(pts[0]));
+                    continue;
+                }
+                float v[3] = {};
+                const float real_speed =
+                    hand_real_speed(h, g_torso.touch_real[h], dt);
+                if (g_torso.touch_ok[h])
+                {
+                    for (int k = 0; k < 3; ++k)
+                        v[k] = (pts[0][k] - g_torso.touch_last[h][k]) / dt;
+                    cap_hand_speed(v, real_speed, table);
+                }
+                memcpy(g_torso.touch_last[h], pts[0], sizeof(pts[0]));
+                g_torso.touch_ok[h] = true;
+                if (torso)
+                {
+                    for (int q = 0; q < n; ++q)
+                        if (torso_nudge(g_torso.god, tp, g_torso.in, pts[q], v,
+                                        0.03f * table, 0.6f, dt))
+                            break;
+                }
+                else
+                {
+                    float c[3];
+                    pluck_centre(s, in, c);
+                    const float reach = 0.55f * metre + 0.03f * table;
+                    for (int q = 0; q < n; ++q)
+                    {
+                        const float d[3] = { pts[q][0] - c[0], pts[q][1] - c[1],
+                                             pts[q][2] - c[2] };
+                        if (dot3(d, d) <= reach * reach)
+                        {
+                            pluck_nudge(s, v, 0.6f, dt);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        else
+            g_torso.touch_ok[0] = g_torso.touch_ok[1] = false;
+
+        // The head ball and arm zones of the pick-up, as wireframes (the
+        // torso zone and the hand points were added above).
+        if (config().god_zone_debug && !pluck_drawn(s) &&
+            !torso_drawn(g_torso.god))
+        {
+            if (in.head_valid)
+                zone_ball(in.head, pluck_head_radius(pp), kZoneHead);
+            if (pp.arm_radius > 0.0f)
+                for (int c = 0; c < 2; ++c)
+                    if (in.arm_valid[c])
+                        zone_capsule(in.arm_wrist[c], in.arm_end[c],
+                                     pp.arm_radius * pp.metre +
+                                         0.01f * pp.metre, kZoneHand);
+        }
+
     }
+
+    // Knocks her down along the horizontal unit `dir` (the flick's and the
+    // swat's shared ending): shoved and dropped, or her knockdown animation
+    // (front or back by `dir` against her facing), played once.
+    static void board_knock(void* lara, float feet[3], const float dir[2],
+                            const char* what, LARGE_INTEGER now,
+                            LARGE_INTEGER frequency)
+    {
+        const float metre = config().world_scale;
+        // Knocked 1.5 m (her scale) along it, short of any wall, and
+        // lifted 0.4 m so she drops (no lift with a chosen animation).
+        // Front or back: the flick against or along her facing (heading
+        // vector (sin yaw, -cos yaw)).
+        int anim = g_flick_anim_front;
+        bool from_behind = false;
+        __try
+        {
+            const float yaw = *reinterpret_cast<const float*>(
+                static_cast<unsigned char*>(lara) + kOffInstanceHeading);
+            if (std::isfinite(yaw))
+                // Confirmed in the headset (2026-10-03, after one swap
+                // each way).
+                from_behind = dir[0] * sinf(yaw) - dir[1] * cosf(yaw) > 0.0f;
+        }
+        __except(EXCEPTION_EXECUTE_HANDLER)
+        {
+        }
+        if (from_behind)
+            anim = g_flick_anim_back;
+        const bool animated = anim >= 0;
+        // The knockdown clips carry their own travel (user: they moved her
+        // a lot on top of the shove), so with one she is not shoved.
+        float push = animated ? 0.0f : 1.5f * metre;
+        if (push > 0.0f)
+        {
+            const float from[3] = { feet[0], feet[1], feet[2] + 0.5f * metre };
+            const float ray[3] = { dir[0], dir[1], 0.0f };
+            float wall[3]{};
+            if (aim_probe(from, ray, push + 0.3f * metre, wall, nullptr))
+            {
+                const float wx = wall[0] - from[0], wy = wall[1] - from[1];
+                push = fmaxf(0.0f, sqrtf(wx * wx + wy * wy) - 0.3f * metre);
+            }
+        }
+        const float to[3] = { feet[0] + dir[0] * push,
+                              feet[1] + dir[1] * push,
+                              feet[2] + (animated ? 0.0f : 0.4f * metre) };
+        if (g_pluck.palm >= 0)
+        {
+            g_pluck.palm = -1;
+            for (float& c : g_pluck.carry)
+                c = 0.0f;
+        }
+        const bool moved = !animated || push > 0.0f
+            ? board_put_down(lara, to) : true;
+        if (animated && moved)
+        {
+            const int previous =
+                lara_anim_index_of(lara, lara_current_keylist(lara));
+            void* keylist = lara_keylist(lara, anim);
+            // Played once (G2 emulation mode 1 = no looping; 2 loops, 0
+            // pauses), holding its last frame; her previous animation
+            // returns after 0.65 s (the user's tuning, 2026-10-03).
+            const float length = 0.65f;
+            const bool played = lara_play_animation(lara, anim, false);
+            if (played)
+            {
+                __try
+                {
+                    const unsigned char* data =
+                        *reinterpret_cast<unsigned char* const*>(
+                            static_cast<unsigned char*>(lara) + 0xF4);
+                    const unsigned char* processor = data
+                        ? *reinterpret_cast<unsigned char* const*>(data + 4)
+                        : nullptr;
+                    const int sections = processor ? processor[0x150] : 0;
+                    for (int s = 0; s < sections && s < 8; ++s)
+                        reinterpret_cast<PFN_SetMode>(0x004DED90)(lara, s, 1);
+                }
+                __except(EXCEPTION_EXECUTE_HANDLER)
+                {
+                }
+            }
+            if (played && keylist && previous >= 0 && previous != anim)
+            {
+                g_flick.knock_active = true;
+                g_flick.knock_keylist = keylist;
+                g_flick.knock_restore = previous;
+                g_flick.knock_until.QuadPart = now.QuadPart +
+                    (LONGLONG)(length * (double)frequency.QuadPart);
+            }
+            log("board: knockdown %d once (no loop), animation %d back "
+                "after %.1f s", anim, previous, length);
+        }
+        vr_input_weapon_haptic(true, 0.7f);
+        log("board: %s hit Lara from %s -- knocked %.2f m (her scale), "
+            "animation %d %s", what, from_behind ? "behind" : "the front",
+            push / metre, anim,
+            animated ? (moved ? "played" : "skipped") : "none");
+    }
+
 
     // Board mode finger flick (left hand, Y long press held = loaded,
     // released = snap). A snap whose index tip sweeps through mini Lara
@@ -20569,13 +23619,44 @@ namespace trlvr
             }
         }
         const bool board = active && god_hand_scale() &&
-            !g_first_person_active && config().immersive_controls &&
-            config().board_god_hand && g_pluck.hand != 0;
+            !g_first_person_active && config().hands_on_controllers &&
+            config().board_god_hand && g_pluck.hand != 0 &&
+            g_torso.god.hand != 0;
         if (!board)
         {
             g_flick.phase = 0;
             g_flick.amount = g_flick.fist = 0.0f;
+            g_swat.pending = false;
             return;
+        }
+        if (g_swat.pending)
+        {
+            g_swat.pending = false;
+            void* lara = nullptr;
+            float feet[3]{};
+            __try
+            {
+                lara = *reinterpret_cast<void**>(kPlayerInstance);
+                if (lara)
+                    memcpy(feet, static_cast<unsigned char*>(lara) + 0x10,
+                           sizeof(feet));
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                lara = nullptr;
+            }
+            if (lara && GetTickCount() - g_swat.tick < 250 &&
+                !g_flick.knock_active && g_flick.phase != 2)
+            {
+                if (g_pluck.palm >= 0)
+                    for (int k = 0; k < 3; ++k)
+                        feet[k] += g_pluck.carry[k];
+                g_swat.last = GetTickCount();
+                char what[64];
+                sprintf_s(what, "%s-hand swat at %.1f m/s",
+                          g_swat.hand ? "right" : "left", g_swat.speed);
+                board_knock(lara, feet, g_swat.dir, what, now, frequency);
+            }
         }
         if (g_flick.phase == 0 && held)
         {
@@ -20722,97 +23803,10 @@ namespace trlvr
         }
         dir[0] /= len;
         dir[1] /= len;
-        // Knocked 1.5 m (her scale) along it, short of any wall, and
-        // lifted 0.4 m so she drops (no lift with a chosen animation).
-        // Front or back: the flick against or along her facing (heading
-        // vector (sin yaw, -cos yaw)).
-        int anim = g_flick_anim_front;
-        bool from_behind = false;
-        __try
-        {
-            const float yaw = *reinterpret_cast<const float*>(
-                static_cast<unsigned char*>(lara) + kOffInstanceHeading);
-            if (std::isfinite(yaw))
-                // Confirmed in the headset (2026-10-03, after one swap
-                // each way).
-                from_behind = dir[0] * sinf(yaw) - dir[1] * cosf(yaw) > 0.0f;
-        }
-        __except(EXCEPTION_EXECUTE_HANDLER)
-        {
-        }
-        if (from_behind)
-            anim = g_flick_anim_back;
-        const bool animated = anim >= 0;
-        // The knockdown clips carry their own travel (user: they moved her
-        // a lot on top of the shove), so with one she is not shoved.
-        float push = animated ? 0.0f : 1.5f * metre;
-        if (push > 0.0f)
-        {
-            const float from[3] = { feet[0], feet[1], feet[2] + 0.5f * metre };
-            const float ray[3] = { dir[0], dir[1], 0.0f };
-            float wall[3]{};
-            if (aim_probe(from, ray, push + 0.3f * metre, wall, nullptr))
-            {
-                const float wx = wall[0] - from[0], wy = wall[1] - from[1];
-                push = fmaxf(0.0f, sqrtf(wx * wx + wy * wy) - 0.3f * metre);
-            }
-        }
-        const float to[3] = { feet[0] + dir[0] * push,
-                              feet[1] + dir[1] * push,
-                              feet[2] + (animated ? 0.0f : 0.4f * metre) };
-        if (g_pluck.palm >= 0)
-        {
-            g_pluck.palm = -1;
-            for (float& c : g_pluck.carry)
-                c = 0.0f;
-        }
-        const bool moved = !animated || push > 0.0f
-            ? board_put_down(lara, to) : true;
-        if (animated && moved)
-        {
-            const int previous =
-                lara_anim_index_of(lara, lara_current_keylist(lara));
-            void* keylist = lara_keylist(lara, anim);
-            // Played once (G2 emulation mode 1 = no looping; 2 loops, 0
-            // pauses), holding its last frame; her previous animation
-            // returns after 0.65 s (the user's tuning, 2026-10-03).
-            const float length = 0.65f;
-            const bool played = lara_play_animation(lara, anim, false);
-            if (played)
-            {
-                __try
-                {
-                    const unsigned char* data =
-                        *reinterpret_cast<unsigned char* const*>(
-                            static_cast<unsigned char*>(lara) + 0xF4);
-                    const unsigned char* processor = data
-                        ? *reinterpret_cast<unsigned char* const*>(data + 4)
-                        : nullptr;
-                    const int sections = processor ? processor[0x150] : 0;
-                    for (int s = 0; s < sections && s < 8; ++s)
-                        reinterpret_cast<PFN_SetMode>(0x004DED90)(lara, s, 1);
-                }
-                __except(EXCEPTION_EXECUTE_HANDLER)
-                {
-                }
-            }
-            if (played && keylist && previous >= 0 && previous != anim)
-            {
-                g_flick.knock_active = true;
-                g_flick.knock_keylist = keylist;
-                g_flick.knock_restore = previous;
-                g_flick.knock_until.QuadPart = now.QuadPart +
-                    (LONGLONG)(length * (double)frequency.QuadPart);
-            }
-            log("board: knockdown %d once (no loop), animation %d back "
-                "after %.1f s", anim, previous, length);
-        }
-        vr_input_weapon_haptic(true, 0.7f);
-        log("board: flick hit Lara from %s (tip %.2f table-m from her "
-            "axis) -- knocked %.2f m (her scale), animation %d %s",
-            from_behind ? "behind" : "the front", closest / table,
-            push / metre, anim,
-            animated ? (moved ? "played" : "skipped") : "none");
+        char what[64];
+        sprintf_s(what, "flick (tip %.2f table-m from her axis)",
+                  closest / table);
+        board_knock(lara, feet, dir, what, now, frequency);
     }
 
     void camera_set_hand_grips(bool left, bool right)
@@ -20829,12 +23823,14 @@ namespace trlvr
 
     bool camera_board_pluck_held()
     {
-        return g_pluck.hand >= 0 || g_pluck.palm >= 0;
+        return g_pluck.hand >= 0 || g_pluck.palm >= 0 ||
+               g_torso.god.hand >= 0;
     }
 
     bool camera_board_pluck_carried()
     {
-        return g_pluck.hand >= 0 || g_pluck.god.flying;
+        return g_pluck.hand >= 0 || g_pluck.god.flying ||
+               torso_drawn(g_torso.god);
     }
 
     void camera_pose_debug_key(int key)
@@ -21062,26 +24058,42 @@ namespace trlvr
                 }
             }
         };
+        // A region's true outline (the cheeks are teardrops: longer and
+        // bent toward her front above, sharp below), moved by `shift`.
+        auto region = [&](const rear::RearRegion& g, const float shift[3],
+                          float scale, unsigned colour)
+        {
+            const int kSteps = 24;
+            const int planes[3][2] = { { 0, 1 }, { 1, 2 }, { 0, 2 } };
+            for (const auto& pl : planes)
+            {
+                float prev[3];
+                for (int i = 0; i <= kSteps; ++i)
+                {
+                    float p[3];
+                    rear::region_outline(g, pl[0], pl[1],
+                                         6.2831853f * i / kSteps, scale, p);
+                    for (int k = 0; k < 3; ++k)
+                        p[k] += shift[k];
+                    if (i)
+                        line(prev, p, colour);
+                    memcpy(prev, p, sizeof(prev));
+                }
+            }
+        };
         const rear::RearAdjust adj = rear_adjust();
+        float zone_c[2][3], zone_s[2][3];
+        rear_touch_zones(r.fit, r.shape, adj, zone_c, zone_s);
         for (int c = 0; c < 2; ++c)
         {
             const rear::RearRegion& g = r.shape.cheek[c];
-            float centre[3];
-            for (int k = 0; k < 3; ++k)
-                centre[k] = g.centre[k] + r.offset[c][k];
-            ellipsoid(centre, g.radius, 0xFFFFD54Au);
-            const float core[3] = { g.radius[0] * g.core,
-                                    g.radius[1] * g.core,
-                                    g.radius[2] * g.core };
-            ellipsoid(centre, core, 0xFF5AFF66u);
-            float zc[3], zs[3];
-            rear::rear_touch_zone(r.fit, adj, c, cfg.world_scale,
-                                  cfg.body_rear_touch_cm +
-                                      fmaxf(cfg.body_rear_fullness_cm, 0.0f),
-                                  zc, zs);
-            ellipsoid(zc, zs, 0xFF4AD8FFu);
+            region(g, r.offset[c], 1.0f, 0xFFFFD54Au);
+            if (g.core > 0.0f)
+                region(g, r.offset[c], g.core, 0xFF5AFF66u);
+            ellipsoid(zone_c[c], zone_s[c], 0xFF4AD8FFu);
         }
-        ellipsoid(r.shape.cleft.centre, r.shape.cleft.radius, 0xFFFF55FFu);
+        const float still[3] = {};
+        region(r.shape.cleft, still, 1.0f, 0xFFFF55FFu);
         // The pelvis bind joint: a 4 cm cross.
         const float arm = 4.0f * cfg.world_scale * 0.01f;
         for (int k = 0; k < 3; ++k)
@@ -21090,6 +24102,37 @@ namespace trlvr
             a[k] = -arm;
             b[k] = arm;
             line(a, b, 0xFFFFFFFFu);
+        }
+        return n;
+    }
+
+    // god_zone_debug wireframes (camera_board_pluck_update): the grab zones
+    // as head-space segments with a colour each, appended to the rear's in
+    // vr_submit. Fresh for 2 frames.
+    int camera_zone_debug_lines(float (*seg)[6], unsigned* colours,
+                                int max_segments)
+    {
+        const ZoneDebug& z = g_zone_debug;
+        if (!seg || !colours || max_segments < 1 || !config().god_zone_debug ||
+            z.count <= 0 || g_present_count - z.frame > 2)
+            return 0;
+        Mat4 camera_to_world;
+        memcpy(&camera_to_world.m[0][0],
+               static_cast<const unsigned char*>(kMainCamera) +
+                   kOffCwTransform, sizeof(camera_to_world.m));
+        const Mat4 world_to_head = rigid_inverse(camera_to_world);
+        const int n = z.count < max_segments ? z.count : max_segments;
+        for (int i = 0; i < n; ++i)
+        {
+            for (int e = 0; e < 2; ++e)
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    float v = world_to_head.m[3][axis];
+                    for (int k = 0; k < 3; ++k)
+                        v += z.seg[i][e * 3 + k] * world_to_head.m[k][axis];
+                    seg[i][e * 3 + axis] = v;
+                }
+            colours[i] = z.colour[i];
         }
         return n;
     }
@@ -21174,6 +24217,11 @@ namespace trlvr
             log("view: arrived at her head -- first person");
         }
         return g_view_first_person != 0;
+    }
+
+    void camera_recentre_snap_next()
+    {
+        g_glide_snap_next = true;
     }
 
     bool camera_view_tween_active()
@@ -21519,7 +24567,7 @@ namespace trlvr
         const bool first_person = camera_first_person_active();
         // Retail combat state can outlive the holster (it only gates its
         // own reticle). With immersive holsters, the drawn guns decide.
-        if (first_person && config().immersive_controls &&
+        if (first_person && config().gesture_controls &&
             !vr_input_holster_combat_held())
             return false;
         const DWORD now = GetTickCount();
@@ -21604,7 +24652,7 @@ namespace trlvr
     bool camera_first_person_secure_grab_point(float centre[3])
     {
         if (!centre || !g_first_person_active ||
-            !config().immersive_controls || !g_first_person_grip_precarious ||
+            !config().gesture_controls || !g_first_person_grip_precarious ||
             !g_grab_zone_centre_valid ||
             g_ledge_hand_grip[0].held || g_ledge_hand_grip[1].held)
             return false;
@@ -21615,7 +24663,7 @@ namespace trlvr
     bool camera_first_person_grab_box(float corners[8][3], int* state)
     {
         if (!corners || !state || !g_first_person_active ||
-            !config().immersive_controls ||
+            !config().gesture_controls ||
             !(g_first_person_ledge_hanging || g_first_person_bar_hanging ||
               g_first_person_vine_climbing))
             return false;
@@ -22291,7 +25339,7 @@ namespace trlvr
 
         // Third-person immersive draws controller hands from this hook too.
         if (config().first_person_tracked_hands ||
-            config().immersive_controls)
+            config().immersive_any())
         {
             tramp = nullptr;
             if (hook_install((void*)kDrawInstance,
@@ -22301,7 +25349,22 @@ namespace trlvr
             {
                 g_draw_instance = (PFN_DrawInstance)tramp;
             }
-            if (config().immersive_controls)
+            if (g_draw_instance)
+            {
+                // FUN_0044C2A0: push ebx / push ebp / push esi /
+                // mov esi, [esp+0x10] (no relative branch in the first 7).
+                static const unsigned char kWetLayerSig[] = {
+                    0x53, 0x55, 0x56, 0x8B, 0x74, 0x24, 0x10 };
+                tramp = nullptr;
+                if (hook_install((void*)kWetLayer, (void*)&detour_wet_layer,
+                                 &tramp, kWetLayerSig, sizeof(kWetLayerSig),
+                                 "FUN_0044C2A0 (wet-skin layer)"))
+                {
+                    g_wet_layer = (PFN_WetLayer)tramp;
+                    log("wet layer: hook installed at 0x44C2A0");
+                }
+            }
+            if (config().hands_on_controllers)
             {
                 // Bike::Process: push ebp / mov ebp, esp / and esp, -16.
                 static const unsigned char kBikeProcessSig[] = {
@@ -22350,7 +25413,7 @@ namespace trlvr
                 g_process_movement =
                     reinterpret_cast<PFN_ProcessMovement>(tramp);
 
-            if (config().immersive_controls)
+            if (config().gesture_controls)
             {
                 tramp = nullptr;
                 if (hook_install((void*)kHPoleDesiredDirection,
@@ -22412,7 +25475,7 @@ namespace trlvr
                     reinterpret_cast<PFN_DrawCombatReticle>(tramp);
         }
 
-        if (config().immersive_controls)
+        if (config().gesture_controls)
         {
             tramp = nullptr;
             if (hook_install((void*)kPlayerInvEndCombatMode,
@@ -22423,7 +25486,7 @@ namespace trlvr
                 g_end_combat = reinterpret_cast<PFN_EndCombat>(tramp);
         }
 
-        if (config().immersive_controls)
+        if (config().gesture_controls)
         {
             tramp = nullptr;
             if (hook_install((void*)kUIFadeGroupTrigger,

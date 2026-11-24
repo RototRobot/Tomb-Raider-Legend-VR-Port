@@ -32,6 +32,143 @@ namespace trlvr
         typedef HRESULT(__stdcall* PFN_Direct3DCreateVR9)(IDirect3DDevice9*, IDirect3DVR9**);
 
         IDirect3DVR9* g_vr = nullptr;
+        IDirect3DVR9_1* g_vr_stereo = nullptr;     // stereo draws, if offered
+
+        // Frame end off the game's thread (config().xr_async_end,
+        // experimental, 2026-11-22). The hand-off used to drain DXVK's CS
+        // thread on the game's thread before xrEndFrame (about 2 ms a frame
+        // at the Bolivia waterfall, 13.6% of the game thread), so the CS
+        // thread and the game never overlapped. Now the game records the
+        // copy, flushes and goes on; this thread waits for DXVK to reach the
+        // copy, releases the image and ends the frame. The next frame's
+        // xrBeginFrame waits for it (oxr_frame_begin_deferred), and so does
+        // everything that takes the queue lock: end_join() first, always, or
+        // the end thread and the lock holder deadlock.
+        IDirect3DVR9_1* g_vr_async = nullptr;
+        HANDLE g_end_thread = nullptr;
+        HANDLE g_end_go = nullptr;     // auto-reset: a frame end to do
+        HANDLE g_end_done = nullptr;   // manual-reset: set while idle
+        UINT64 g_end_seq = 0;
+        bool g_end_pending = false;    // game's thread only
+        volatile LONG g_end_quit = 0;
+        double g_end_join_ms = 0.0;    // game's thread blocked in end_join
+        // Where the end thread is, for the log when a join takes too long.
+        const char* volatile g_end_stage = "idle";
+
+        DWORD WINAPI end_thread_main(void*)
+        {
+            for (;;)
+            {
+                WaitForSingleObject(g_end_go, INFINITE);
+                if (g_end_quit)
+                    return 0;
+                g_end_stage = "waiting for DXVK to reach the copy";
+                g_vr_async->LockSubmissionQueueAfter(g_end_seq);
+                g_end_stage = "xrReleaseSwapchainImage / xrEndFrame";
+                oxr_frame_end_pending();
+                g_vr->UnlockSubmissionQueue();
+                g_end_stage = "idle";
+                SetEvent(g_end_done);
+            }
+        }
+
+        void end_join()
+        {
+            if (!g_end_pending)
+                return;
+            LARGE_INTEGER frequency{}, before{}, after{};
+            QueryPerformanceFrequency(&frequency);
+            QueryPerformanceCounter(&before);
+            // The runtime may talk to a window this thread owns from inside
+            // xrEndFrame (the simulator builds its DXGI preview there, which
+            // sends the window messages; it hung on the first frame,
+            // 2026-11-22). Sent messages are handled while waiting; posted
+            // ones stay queued for the game.
+            static bool slow_reported = false;
+            for (;;)
+            {
+                const DWORD r = MsgWaitForMultipleObjects(1, &g_end_done, FALSE,
+                                                          1000, QS_SENDMESSAGE);
+                if (r == WAIT_OBJECT_0)
+                    break;
+                if (r == WAIT_OBJECT_0 + 1)
+                {
+                    MSG msg;
+                    PeekMessageW(&msg, nullptr, 0, 0,
+                                 PM_NOREMOVE | PM_QS_SENDMESSAGE);
+                    continue;
+                }
+                if (r == WAIT_TIMEOUT && !slow_reported)
+                {
+                    slow_reported = true;
+                    log("submit: the game's thread has waited over 1 s for the "
+                        "last frame's end; the end thread is at: %s",
+                        (const char*)g_end_stage);
+                }
+                if (r == WAIT_FAILED)
+                {
+                    WaitForSingleObject(g_end_done, INFINITE);
+                    break;
+                }
+            }
+            QueryPerformanceCounter(&after);
+            g_end_join_ms += double(after.QuadPart - before.QuadPart) *
+                             1000.0 / double(frequency.QuadPart);
+            g_end_pending = false;
+        }
+
+        void end_post(UINT64 sequence)
+        {
+            g_end_seq = sequence;
+            g_end_pending = true;
+            ResetEvent(g_end_done);
+            SetEvent(g_end_go);
+        }
+
+        void end_thread_close_handles()
+        {
+            if (g_end_thread)
+                CloseHandle(g_end_thread);
+            if (g_end_go)
+                CloseHandle(g_end_go);
+            if (g_end_done)
+                CloseHandle(g_end_done);
+            g_end_thread = g_end_go = g_end_done = nullptr;
+        }
+
+        void end_thread_start()
+        {
+            if (g_end_thread || !g_vr_async)
+                return;
+            g_end_quit = 0;
+            g_end_pending = false;
+            g_end_go = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+            g_end_done = CreateEventW(nullptr, TRUE, TRUE, nullptr);
+            if (g_end_go && g_end_done)
+                g_end_thread = CreateThread(nullptr, 0, end_thread_main,
+                                            nullptr, 0, nullptr);
+            if (!g_end_thread)
+            {
+                end_thread_close_handles();
+                log("submit: no end thread -- frames end on the game's thread");
+                return;
+            }
+            SetThreadPriority(g_end_thread, THREAD_PRIORITY_ABOVE_NORMAL);
+            oxr_set_end_join(end_join);
+            log("submit: async frame end on (xr_async_end = 1)");
+        }
+
+        void end_thread_stop()
+        {
+            if (!g_end_thread)
+                return;
+            end_join();
+            oxr_set_end_join(nullptr);
+            InterlockedExchange(&g_end_quit, 1);
+            SetEvent(g_end_go);
+            WaitForSingleObject(g_end_thread, 2000);
+            end_thread_close_handles();
+        }
         IDirect3DDevice9* g_device = nullptr;
 
         // One image per eye. In alternating mode only one is redrawn each
@@ -147,7 +284,7 @@ namespace trlvr
         void draw_holster_debug(IDirect3DSurface9* back)
         {
             const VrHolsterZone& zone = tune_holster_zone();
-            if (!zone.debug_draw || !config().immersive_controls ||
+            if (!zone.debug_draw || !config().gesture_controls ||
                 !camera_first_person_active() || !stereo_same_frame_active())
                 return;
             D3DSURFACE_DESC desc{};
@@ -352,7 +489,7 @@ namespace trlvr
         void draw_handhold_debug(IDirect3DSurface9* back)
         {
             if (!tune_ledge_grab_debug_draw() ||
-                !config().immersive_controls ||
+                !config().gesture_controls ||
                 !camera_first_person_active() || !stereo_same_frame_active())
                 return;
             D3DSURFACE_DESC desc{};
@@ -2554,11 +2691,17 @@ namespace trlvr
         // body_rear_debug: the rear soft body's regions as wireframes.
         void draw_rear_debug(IDirect3DSurface9* back)
         {
-            constexpr int kMax = 512;       // about 483 segments
+            constexpr int kMax = 1280;      // the rear's ~483 and the grab zones'
             static float seg[kMax][6];
             static unsigned colours[kMax];
-            const int count = stereo_same_frame_active()
-                ? camera_rear_debug_lines(seg, colours, kMax) : 0;
+            int count = 0;
+            if (stereo_same_frame_active())
+            {
+                count = camera_rear_debug_lines(seg, colours, kMax);
+                // god_zone_debug: the grab zones, drawn the same way.
+                count += camera_zone_debug_lines(seg + count, colours + count,
+                                                 kMax - count);
+            }
             if (count <= 0)
                 return;
             D3DSURFACE_DESC desc{};
@@ -2965,7 +3108,7 @@ namespace trlvr
             bool ray = false, hit = false;
             {
                 float pos[3], rot[9];
-                if (vr_controller_tracking_pose(main_left, pos, rot))
+                if (vr_pointer_tracking_pose(main_left, pos, rot))
                 {
                     const float d[3] = { -rot[2], -rot[5], -rot[8] };
                     const float* r = panel.pose.right;
@@ -4083,7 +4226,7 @@ namespace trlvr
             float hit_u = 0.0f, hit_v = 0.0f;
             float origin[3]{}, end[3]{};
             Mat4 ray;
-            if (vr_controller_head_pose(!off_left, &ray))
+            if (vr_pointer_head_pose(!off_left, &ray))
             {
                 float d[3] = { ray.m[2][0], ray.m[2][1], ray.m[2][2] };
                 for (int k = 0; k < 3; ++k)
@@ -4202,7 +4345,7 @@ namespace trlvr
         void draw_pouch_items(IDirect3DSurface9* back)
         {
             if (!stereo_same_frame_active() || !camera_first_person_active() ||
-                !config().immersive_controls)
+                !config().gesture_controls)
                 return;
             D3DSURFACE_DESC desc{};
             if (FAILED(back->GetDesc(&desc)) || desc.Width < 2 ||
@@ -4654,6 +4797,26 @@ namespace trlvr
             if (g_no_frame)
                 return false;
 
+            // Async frame end: the last frame's end first, then this frame's
+            // xrBeginFrame, which xr_frame_wait left until now.
+            const bool async_end = g_end_thread != nullptr;
+            if (async_end)
+            {
+                end_join();
+                // Under the queue lock: Virtual Desktop's xrBeginFrame submits
+                // GPU timer work on the game's VkQueue, and DXVK's submit
+                // thread is busy with this frame by now (unlocked, it lost
+                // the device on the headset, 2026-11-22). No drain needed.
+                g_vr_async->LockSubmissionQueueAfter(0);
+                const bool begun = oxr_frame_begin_deferred();
+                g_vr->UnlockSubmissionQueue();
+                if (!begun)
+                {
+                    g_no_frame = true;
+                    return false;
+                }
+            }
+
             UINT w = 0, h = 0;
             bool ok = surface_size(first, &w, &h) && xr_frame_should_render();
             const unsigned total_w = second ? w * 2 : w;
@@ -4674,7 +4837,12 @@ namespace trlvr
             bool acquired = false;
             if (ok)
             {
-                g_vr->LockSubmissionQueue();
+                // The acquire needs the queue to itself, not DXVK drained;
+                // with the async end the drain is skipped here too.
+                if (async_end)
+                    g_vr_async->LockSubmissionQueueAfter(0);
+                else
+                    g_vr->LockSubmissionQueue();
                 acquired = ok = xr_swapchain_acquire(&image);
                 g_vr->UnlockSubmissionQueue();
             }
@@ -4722,6 +4890,17 @@ namespace trlvr
                     const XrRect t = left;
                     left = right;
                     right = t;
+                }
+            }
+
+            if (async_end && ok && acquired)
+            {
+                UINT64 sequence = 0;
+                if (SUCCEEDED(g_vr_async->FlushForSubmit(&sequence)))
+                {
+                    const bool layer = oxr_frame_end_async(&left, &right, true);
+                    end_post(sequence);
+                    return layer;
                 }
             }
 
@@ -4918,10 +5097,34 @@ namespace trlvr
             return false;
         }
 
+        if (config().stereo_dxvk)
+        {
+            if (SUCCEEDED(created->QueryInterface(__uuidof(IDirect3DVR9_1),
+                                                  (void**)&g_vr_stereo)) &&
+                g_vr_stereo)
+                log("submit: stereo draws in DXVK on (stereo_dxvk = 1): "
+                    "each scene draw is handed over once, with both eyes");
+            else
+            {
+                g_vr_stereo = nullptr;
+                log("submit: stereo_dxvk = 1 but this d3d9_dxvk.dll has no "
+                    "stereo draws -- each eye is drawn the old way");
+            }
+        }
         g_device = real_device;
+        if (config().xr_async_end && vr_backend() == VrBackendOpenXr)
+        {
+            if (FAILED(created->QueryInterface(__uuidof(IDirect3DVR9_1),
+                                               (void**)&g_vr_async)))
+                g_vr_async = nullptr;
+            if (!g_vr_async)
+                log("submit: xr_async_end = 1 but this d3d9_dxvk.dll cannot "
+                    "end frames off the game's thread -- left off");
+        }
         g_vr = created;
         g_ready = true;
         log("submit: Vulkan interop and VR session up");
+        end_thread_start();
         return true;
     }
 
@@ -4932,6 +5135,7 @@ namespace trlvr
         if (!g_vr || real_device != g_device || !xr_session_exists())
             return;
         log("submit: the device is being released; ending the VR session");
+        end_thread_stop();
         g_vr->ReleaseExternalImages();
         g_vr->LockSubmissionQueue();
         xr_session_destroy();
@@ -4940,6 +5144,12 @@ namespace trlvr
 
     void vr_submit_shutdown()
     {
+        end_thread_stop();
+        if (g_vr_async)
+        {
+            g_vr_async->Release();
+            g_vr_async = nullptr;
+        }
         for (int i = 0; i < 2; ++i)
         {
             if (g_eye[i])
@@ -4947,6 +5157,11 @@ namespace trlvr
                 g_eye[i]->Release();
                 g_eye[i] = nullptr;
             }
+        }
+        if (g_vr_stereo)
+        {
+            g_vr_stereo->Release();
+            g_vr_stereo = nullptr;
         }
         if (g_vr)
         {
@@ -5008,6 +5223,11 @@ namespace trlvr
                     g_perf_wait_ms / n, g_perf_not_rendered,
                     g_perf_draw_total / n);
                 perf_cpu_report(g_perf_frames);
+                if (g_end_thread)
+                    log("perf async frame end: the game's thread waited "
+                        "%.2f ms/frame for the last frame's end",
+                        g_end_join_ms / n);
+                g_end_join_ms = 0.0;
                 camera_perf_instance_report(g_perf_frames);
                 g_perf_window = after;
                 g_perf_frames = g_perf_not_rendered = 0;
@@ -5096,6 +5316,7 @@ namespace trlvr
         // return) is ended empty before the next one is begun.
         if (xr_frame_begun())
         {
+            end_join();
             g_vr->LockSubmissionQueue();
             xr_frame_end(nullptr, nullptr);
             g_vr->UnlockSubmissionQueue();
@@ -5117,6 +5338,7 @@ namespace trlvr
         PerfCpuScope perf_scope(PerfSubmit);
         imgui_state_reset();
         hud_capture_frame();
+        ui_space_frame();
         camera_core_position_restore();
         if (!g_ready || !back_buffer)
             return;
@@ -5249,5 +5471,30 @@ namespace trlvr
         if ((g_frames % 900u) == 0u)
             log("submit: %u frames drawn for the left eye, %u for the right",
                 g_drawn_count[0], g_drawn_count[1]);
+    }
+
+    bool vr_submit_stereo_draw_ready()
+    {
+        return g_ready && g_vr_stereo != nullptr;
+    }
+
+    HRESULT vr_submit_draw_stereo(bool indexed, D3DPRIMITIVETYPE type,
+                                  INT base_vertex, UINT min_vertex,
+                                  UINT num_vertices, UINT start,
+                                  UINT primitives,
+                                  const D3DVIEWPORT9 viewport[2],
+                                  const float c0[2][16])
+    {
+        if (!g_vr_stereo)
+            return S_FALSE;
+        D3D9_VR_STEREO_DRAW stereo;
+        stereo.Viewport[0] = viewport[0];
+        stereo.Viewport[1] = viewport[1];
+        memcpy(stereo.VsC0, c0, sizeof(stereo.VsC0));
+        return indexed
+            ? g_vr_stereo->DrawIndexedPrimitiveStereo(type, base_vertex,
+                min_vertex, num_vertices, start, primitives, &stereo)
+            : g_vr_stereo->DrawPrimitiveStereo(type, start, primitives,
+                                               &stereo);
     }
 }

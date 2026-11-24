@@ -7,6 +7,8 @@
 
 namespace trlvr
 {
+    struct Mat4;
+
     void camera_head_init();
 
     // Optional positional stereo multiplier for accurate aim. It defaults to
@@ -52,6 +54,9 @@ namespace trlvr
     void camera_toggle_view(const char* why);
     // A view switch is still gliding (or about to become first person).
     bool camera_view_tween_active();
+    // The next recentre lands at once instead of gliding (the first
+    // gameplay frame's recentre: nothing to glide from).
+    void camera_recentre_snap_next();
     // Third person: that controller hand is on Lara's body right now (its
     // trigger and grip then belong to the touch, not the game).
     bool camera_hand_touching_lara(bool left);
@@ -68,6 +73,11 @@ namespace trlvr
     // 1 normally; the tabletop factor (Lara's real height / board height)
     // while the board-game third-person camera is in use.
     float camera_world_scale_factor();
+    // The head transform last composed onto the main camera's view
+    // (world-to-view = game view * this, row vectors, camera space): what
+    // turns the game's own camera into the headset's. False before the
+    // first camera update.
+    bool camera_head_view_applied(Mat4* out);
     // Third-person scale and zoom (palm sliders, 2026-10-10), for the
     // current preset: scale = the world factor (1 = life size), zoom = the
     // preset's camera-distance multiplier. Available in third-person
@@ -78,8 +88,24 @@ namespace trlvr
     // Sideways seat offset, metres at Lara's size (+ right, - left).
     float camera_tp_side();
     void camera_set_tp_view(float scale, float zoom, float side, bool save);
+    // The right stick's view controls (control_scheme = controller), each
+    // input -1..1, per frame; saved once they are all back at 0.
+    void camera_view_stick(float height_in, float zoom_in, float scale_in,
+                           float dt);
     // The current preset's defaults (the palm sliders' notches).
     void camera_tp_defaults(float* scale, float* zoom, float* side);
+    // A view's live seat height (0 classic, 1 shoulder, 2 board), metres;
+    // shoulder_height / board_height are only its reset defaults.
+    float camera_tp_height(int mode);
+    // A default changed in the menu: that view (0 classic, 1 shoulder,
+    // 2 board) takes it now. what: 0 zoom, 1 height, 2 side, 3 scale.
+    void camera_tp_apply_default(int mode, int what, bool save);
+    // Reset view: the live third-person preset's zoom, side, seat height
+    // and scale back to their defaults. True when that preset is the board.
+    bool camera_reset_view_adjust();
+    // Board view with its own heading (board_follow_lara off): the right
+    // stick turns the board instead of orbiting the game camera.
+    bool camera_board_owns_heading();
     // How much a drawn third-person hand's palm faces up (-2 unknown).
     float camera_palm_up(int hand);
     // A third-person hand's index fingertip as drawn (Lara's bone, or the
@@ -131,6 +157,10 @@ namespace trlvr
     // body_rear_debug wireframes: head-space segments (x0 y0 z0 x1 y1 z1)
     // and a colour each; returns the count (0 when off or stale).
     int camera_rear_debug_lines(float (*seg)[6], unsigned* colours,
+                                int max_segments);
+    // god_zone_debug wireframes: the grab zones (torso, head, arms, the
+    // hands' points) as head-space segments and a colour each.
+    int camera_zone_debug_lines(float (*seg)[6], unsigned* colours,
                                 int max_segments);
     // A cutscene is playing (retail cinematic or resident cinematic).
     bool camera_cinematic_playing();

@@ -50,6 +50,23 @@ for %%F in ("!ROOT!input\bindings_*.json") do copy /y "%%~F" "!MAIN!\%%~nxF" >nu
 copy /y "!ROOT!release\READ ME FIRST.txt"               "!DEST!\READ ME FIRST.txt" >nul
 copy /y "!ROOT!release\VR CONTROLLER BINDINGS.txt"      "!DEST!\VR CONTROLLER BINDINGS.txt" >nul
 
+rem Optional HD texture pack fix (extras\drm_mipgen): a folder of its own,
+rem it does not go into the game folder. Built here if missing.
+set "MIP=!ROOT!extras\drm_mipgen"
+if not exist "!MIP!\drm_mipgen.exe" (
+    call "!MIP!\build.bat"
+    if errorlevel 1 (
+        echo ERROR: building extras\drm_mipgen failed.
+        exit /b 1
+    )
+)
+set "OPT=!DEST!\Optional - HD texture pack fix"
+if not exist "!OPT!" mkdir "!OPT!"
+copy /y "!MIP!\drm_mipgen.exe"            "!OPT!\drm_mipgen.exe" >nul
+copy /y "!MIP!\origtex.txt"               "!OPT!\origtex.txt" >nul
+copy /y "!MIP!\Fix HD texture pack.bat"   "!OPT!\Fix HD texture pack.bat" >nul
+copy /y "!MIP!\README.txt"                "!OPT!\README.txt" >nul
+
 rem Licences: the mod's (Apache 2.0) and those of the binaries shipped with it
 rem (OpenVR's BSD licence asks for its notice beside the DLL).
 if not exist "!DEST!\Licences" mkdir "!DEST!\Licences"
