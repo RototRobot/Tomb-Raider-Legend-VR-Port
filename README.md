@@ -7,8 +7,7 @@ shoot and swing with your own hands.
 
 It runs as a Direct3D 9 proxy (`d3d9.dll`) beside a small fork of DXVK, with a
 launcher that makes the game large-address-aware. It talks to the headset
-through OpenXR, and falls back to OpenVR (SteamVR) when OpenXR is not
-available.
+through OpenXR (OpenVR / SteamVR is a setting).
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
@@ -54,18 +53,20 @@ her shoulder.
 - **Tomb Raider: Legend** for PC: the Steam or the GOG release
 - A PC VR headset with two tracked motion controllers
 - An **OpenXR runtime** that runs 32-bit games (SteamVR's does), or **SteamVR**
-  for the OpenVR fallback
+  for OpenVR
 - A GPU with Vulkan support (DXVK translates the game's Direct3D 9 to Vulkan)
 - Windows
 
-Developed and tested on an **HP Reverb G2**. Bindings ship for Oculus Touch,
+Developed and tested on an **HP Reverb G2**, and on a **Meta Quest 3** over
+Virtual Desktop (its OpenXR runtime, VDXR). Bindings ship for Oculus Touch,
 Valve Index, WMR and Reverb G2 controllers. Nothing is specific to one headset:
 field of view, IPD and render resolution are all read from the runtime at
 start-up.
 
-**OpenXR or OpenVR.** `vr_runtime = auto` (the default) uses OpenXR and falls
-back to OpenVR / SteamVR if OpenXR cannot start. Delete `openxr_loader.dll`, or
-set `vr_runtime = openvr`, to always use OpenVR. The hands sit in the same
+**OpenXR or OpenVR.** `vr_runtime = openxr` (the default) uses OpenXR with no
+silent fallback. Choose OpenVR / SteamVR in the settings panel (VR runtime
+section) or with `vr_runtime = openvr`, then restart the game;
+`vr_runtime = auto` tries OpenXR and falls back to OpenVR. The hands sit in the same
 place under both. The main menu shows the version and the runtime in use.
 
 ---
@@ -278,9 +279,9 @@ and starts that. The original `trl.exe` is never modified.
 
 ## Controls
 
-A fresh install starts in third person with **immersive controls** on (see
-below) and the radial gear menu. Every button below still works there except
-where a gesture replaces it. With `immersive_controls = 0` you get the
+A fresh install starts in third person with `control_scheme = controller`,
+hands on your controllers and the radial gear menu. With
+`hands_on_controllers = 0` and `gesture_controls = 0` you get the
 **classic layout**: the VR controllers send the game's own keyboard and mouse
 controls, so everything the game can do has a button. Defaults for Oculus
 Touch-style controllers (Reverb G2, Quest, Rift):
@@ -309,9 +310,16 @@ Index, WMR and per-controller details are in
 [`release/VR CONTROLLER BINDINGS.txt`](release/VR%20CONTROLLER%20BINDINGS.txt).
 The keyboard keeps working alongside the controllers, and **F1** recentres.
 
-### Underworld control scheme
+The default **controller** scheme changes some of these in third person: left
+stick double click recentres and holding it opens the gear menu; right stick
+click recentres, double click opens the PDA and a hold (0.4 s) switches the
+view; the right stick orbits and zooms; X is accurate aim. Settings > Controls
+> Button layout shows the live table for any view. `control_scheme =
+interaction` restores the click-for-weapon, long-press-for-view layout.
 
-`control_scheme = underworld` (Settings > Controls) matches the Underworld VR
+### Alternate control scheme
+
+`control_scheme = alternate` (Settings > Controls; formerly `underworld`) matches the Underworld VR
 mod. Differences from the table above:
 
 | Control | Action |
@@ -327,7 +335,7 @@ First-person gestures, when on, replace these as they do the other layouts.
 
 ### Immersive controls
 
-With `immersive_controls = 1` the grips become your hands. In first person:
+With `gesture_controls = 1` (the default) the grips become your hands. In first person:
 holsters at the hips and over the shoulders, gear on the belt, pouches on the
 chest, the light on a left-hand grip at the left chest, and climbing with your
 hands. The action trigger aims with a gun out and acts otherwise. X, the long
@@ -364,7 +372,7 @@ Settings live in **`trlvr.ini`** beside the game, written on first run. Every
 key is explained in the file itself. Missing settings are added on start-up;
 values you chose are never replaced. Edit the file with the game closed.
 
-**Third person with immersive controls is the default**, and the right-stick
+**Third person is the default**, and the right-stick
 long press steps through classic, shoulder, board and first person
 (`third_person_mode = all`). To start in first person:
 
@@ -372,13 +380,9 @@ long press steps through classic, shoulder, board and first person
 [vr]
 first_person = 1
 first_person_tracked_hands = 1
-
-[controls]
-immersive_controls = 1
 ```
 
-`first_person` only sets the view you start in. With immersive controls on,
-**long-press the right stick** (or press `\` on the keyboard) to switch between
+`first_person` only sets the view you start in. **Hold the right stick** (or press `\` on the keyboard) to switch between
 first and third person at any time in gameplay.
 
 ### The settings most worth knowing
@@ -387,12 +391,12 @@ first and third person at any time in gameplay.
 |---|---|---|
 | `first_person` | `0` | First-person view through Lara's eyes |
 | `first_person_tracked_hands` | `1` | Lara's hands follow your controllers (first person) |
-| `immersive_controls` | `1` | Hand gestures: holsters, belt gear, pouches, hand climbing, gear menu; `0` = the classic button layout |
-| `hands_on_controllers` / `gesture_controls` | `1` | These two override `immersive_controls` when present: Lara's hands follow your controllers (needed for god mode), and first-person body gestures |
-| `first_person_body` | `hands` | `full` draws Lara's whole body below the view |
+| `control_scheme` | `controller` | `controller`, `interaction` or `alternate` (see Controls) |
+| `hands_on_controllers` / `gesture_controls` | `1` | Lara's hands follow your controllers (needed for god mode), and first-person body gestures: holsters, belt gear, pouches, hand climbing. Both `0` = the classic button layout. (An INI with only the old `immersive_controls` sets both.) |
+| `first_person_body` | `full` | `full` draws Lara's whole body below the view; `hands` only her hands |
 | `third_person_mode` | `all` | `classic`, `shoulder` or `board`; `all` makes the right-stick long press cycle classic → shoulder → board → first person |
 | `left_handed` | `0` | Main hand on the left; swaps the triggers' roles |
-| `cutscene_mode` | `normal` | `theatre` shows cutscenes through a window fixed in the room |
+| `cutscene_mode` | `theatre` | `theatre` shows cutscenes through a window fixed in the room; `normal` plays them in the world |
 | `gameplay_theatre` | `0` | Third-person play through the same window (`board` excluded) |
 | `theatre_backdrop` | `000000` | Colour of the room round the window (a chroma-key colour suits passthrough) |
 | `board_diorama` | `0` | `board` camera: the world in an open box you can grab and move |
@@ -421,10 +425,10 @@ first and third person at any time in gameplay.
 | `wall_touch` | `1` | Third person: Lara runs her hand along walls she walks beside |
 | `gear_menu` | `radial` | Immersive third person: `radial` = click the left stick and push towards an item; `cross` = the 3D gear cross |
 | `first_person_arm_stretch` | `1.4` | Full-body first person: how much Lara's arms may lengthen to reach your controllers (1 = off) |
-| `ui_scale` | `0.6` | Size of menus, loading screens and movies |
-| `hud_scale` | `0.6` | Size of the gameplay HUD |
+| `ui_scale` | `0.48` | Size of menus, loading screens and movies |
+| `hud_scale` | `0.49` | Size of the gameplay HUD |
 | `binocular_scale` | `0.6` | Size of the binocular viewfinder |
-| `hud_follow_degrees` | `20` | The gameplay HUD stays put while you look within this many degrees of it, then glides back in front (0 = use `hud_follow`) |
+| `hud_follow_degrees` | `90` | The gameplay HUD stays put while you look within this many degrees of it, then glides back in front (0 = use `hud_follow`) |
 | `hud_follow` | `0.85` | With `hud_follow_degrees = 0`: how closely the HUD follows your head (1 = locked) |
 | `fsaa` | `on` | The game's anti-aliasing: `on`, `off` or `game` (the Setup dialog's choice) |
 | `msaa` | `4` | Anti-aliasing strength while FSAA is on: `0` (off), `2`, `4` or `8` |
@@ -523,14 +527,12 @@ build; report problems with it here, not upstream.
 
 - **Next Generation Content is not supported.** Its renderer gives a black
   scene. Keep it off.
-- **Water looks flatter than on a monitor.** The game's water reflection and
-  full-screen water effect only exist for one eye, so they are skipped.
 - **Graphics options can only be changed in the Setup dialog.** Changing them
   in game rebuilds the display, which VR does not survive, so during a level
   those entries are VR settings instead (see
   [Interface and comfort](#interface-and-comfort)).
-- **Cinematics play in third person.** Theatre mode shows them on a screen in
-  the room instead.
+- **Cinematics play in third person** with `cutscene_mode = normal`; the
+  default, theatre mode, shows them on a screen in the room instead.
 - **Some wet-rock decals flicker by view angle.** The flat game does the same.
 - **Performance dips in a few busy scenes**, for example animal attacks. The
   `perf:` lines in the log help pin these down.

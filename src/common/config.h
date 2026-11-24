@@ -30,7 +30,7 @@ namespace trlvr
         // OpenXR: convert the controllers' grip pose to the OpenVR grip pose
         // the hand tuning was made against (known for Reverb G2 and Touch).
         // Off by default: on Quest over Virtual Desktop the raw grip lines up.
-        bool xr_grip_match_openvr = false;
+        bool xr_grip_match_openvr = true;
         bool stereo = true;
         bool stereo_same_frame = true;
         // Each scene draw is handed to DXVK once with both eyes, and DXVK
@@ -64,17 +64,14 @@ namespace trlvr
         // wall_touch_max_speed metres per second (walking, not running).
         bool wall_touch = true;
         // Stereo water reflection (2026-10-11): the game's planar reflection
-        // drawn once per eye. Needs Reflections on in the Setup dialog.
-        // Experimental and off: no visible difference was confirmed, and it
-        // draws the reflection twice.
-        bool water_reflection = false;
+        // drawn once per eye. Needs Reflections on in the Setup dialog. Set
+        // up at start (System > Performance, restart to change).
+        bool water_reflection = true;
         // Water Effects (underwater / surface distortion) per eye: the
-        // screen copy it samples is split by eye. Needs Water Effects on in
-        // the Setup dialog. Experimental and off: user test 2026-10-11 still
-        // showed it in one eye, following the head (the full-screen
-        // distortion layer, FXDRAW_WaterFX 0x00446D90, is not understood
-        // well enough yet).
-        bool water_effects = false;
+        // screen copy it samples is split by eye, and with water_waves the
+        // waves stay on the surface (2026-11-12). Needs Water Effects on in
+        // the Setup dialog. Set up at start (System > Performance).
+        bool water_effects = true;
         // With water_effects (2026-11-12): the distortion's waves are worked
         // out per eye from where each eye looks at the water surface
         // (water_waves.cpp) instead of the game's, which are fixed to the
@@ -107,7 +104,7 @@ namespace trlvr
         // mostly up and down, and give under the hands; at most
         // body_soft_angle degrees.
         bool body_soft = true;
-        float body_soft_angle = 14.0f;
+        float body_soft_angle = 4.0f;
         // Undocumented: size of the soft parts (1 = as modelled).
         float body_soft_scale = 1.0f;
         // F1..F9 developer keys (0 frees them for other mods' menus).
@@ -118,13 +115,13 @@ namespace trlvr
         // -- their side-to-side frequency in Hz (lower swings wider and
         // slower; up and down stays at 2.2) -- and how quickly a swing
         // dies away (damping ratio; lower rings longer).
-        float body_soft_sway_hz = 3.0f;
-        float body_soft_damping = 0.53f;
+        float body_soft_sway_hz = 3.5f;
+        float body_soft_damping = 0.65f;
         // Soft parts' shape (2026-10-14): squash and stretch along the bone
         // (0 none .. 1 strong, volume kept) and how much of a lighter second
         // mass's overrun -- the ripple on top of the swing -- is shown.
-        float body_soft_stretch = 0.35f;
-        float body_soft_ripple = 0.3f;
+        float body_soft_stretch = 0.12f;
+        float body_soft_ripple = 0.12f;
         bool hmd_aim = true;
         // Third-person lock-on picks the target nearest the headset's gaze,
         // within gaze_target_degrees (else the game's own pick).
@@ -144,7 +141,7 @@ namespace trlvr
         bool first_person_tracked_hands = true;
         // First-person body: false = hands only, true = Lara's full body
         // (head removed) with her arms bent to reach the tracked hands.
-        bool first_person_full_body = false;
+        bool first_person_full_body = true;
         // Full body: how much her arms may lengthen to reach a controller
         // past her reach, with a small shoulder reach first. 1 = off, the
         // gap opens at the wrist. 1..2.
@@ -198,6 +195,13 @@ namespace trlvr
         float view_transition_seconds = 0.3f;
         // Seconds the view glides after a recentre / reset view; 0 snaps.
         float recenter_transition_seconds = 0.35f;
+        // ... the same, for a recentre that stays in the same view (faster,
+        // user 2026-11-24); recenter_transition_seconds is then only the
+        // glide alongside a view switch.
+        float recenter_same_view_seconds = 0.22f;
+        // A recentre also swings the shoulder and board cameras behind
+        // Lara (classic always does), with the view's defaults.
+        bool recenter_behind_lara = true;
         // Picture (2026-10-14): brightness (-0.5 .. 0.5, added) and contrast
         // (0.5 .. 2, about mid grey) on the frame sent to the headset, and
         // whether the game's own brightness / contrast sliders (its gamma
@@ -211,11 +215,22 @@ namespace trlvr
         // Live.
         bool movie_widen_4x3 = true;
         float shoulder_distance = 1.3f;         // metres behind the focus
-        float shoulder_height = 0.0f;           // metres above it
+        float shoulder_height = 0.45f;          // metres above it
         float shoulder_side = 0.35f;            // metres to the right
-        float board_lara_height_cm = 15.0f;     // Lara's apparent height
+        float board_lara_height_cm = 49.0f;     // Lara's apparent height
         float board_distance = 0.5f;            // table metres back
-        float board_height = 0.35f;             // table metres up
+        float board_height = 0.5f;              // table metres up
+        // These positions (and board_lara_height_cm, the board's scale) are
+        // the defaults reset view returns to; the stick and palm sliders
+        // move the live view (third_person_*_<preset> in the ini). The
+        // default zoom per view, camera distance multiples (0.3 .. 1.5).
+        float classic_zoom = 0.51f;
+        float shoulder_zoom = 0.74f;
+        float board_zoom = 0.56f;
+        // Classic view: hold the right stick in and push up/down to zoom
+        // (e-folds a second at full tilt; it shared board_zoom_speed and
+        // was slow, user 2026-11-23).
+        float classic_zoom_speed = 2.5f;
         float board_hand_back = 0.08f;          // metres, fingertips->palm
         // Board-mode god-hand cheats (pinch pick-up, palm platform, finger
         // flick). Only with third_person_mode = board, hands_on_controllers
@@ -243,12 +258,12 @@ namespace trlvr
         // letting go mid-swing throws her (speed x strength, own gravity);
         // god_land_anim plays that animation on landing (-1 none);
         // god_drop_height caps the fall when put down over a floor.
-        float god_head_zone = 0.3f;
+        float god_head_zone = 0.14f;
         float god_claim_zone = 0.6f;
-        float god_arm_zone = 0.25f;
+        float god_arm_zone = 0.12f;
         bool god_arm_lead = true;
         bool god_hang_arm = false;
-        bool god_arms_limp = false;
+        bool god_arms_limp = true;
         bool god_throw = true;
         float god_throw_strength = 1.0f;
         // A throw's launch speed is capped at this many real m/s of hand
@@ -302,10 +317,10 @@ namespace trlvr
         // god_zone_debug draws every grab zone as a wireframe; god_zone_scale
         // multiplies the grab zones (and the wireframes).
         bool god_torso = true;
-        float god_torso_max_height = 0.6f;      // 0.05..3
+        float god_torso_max_height = 1.39f;     // 0.05..3
         float god_torso_facing = 0.3f;          // 0..1
-        float god_torso_radius = 0.25f;         // 0.05..1
-        float god_torso_margin = 0.08f;         // 0..0.3
+        float god_torso_radius = 0.15f;         // 0.05..1
+        float god_torso_margin = 0.01f;         // 0..0.3
         float god_torso_lower = 0.0f;           // 0..0.5
         float god_torso_grace = 0.4f;           // 0..1
         bool god_torso_fist_first = true;
@@ -320,8 +335,9 @@ namespace trlvr
         bool god_grab_pose = true;
         // Right stick, control_scheme = controller (immersive third person):
         // a quick hold of its click (seconds) switches the view, a click
-        // recentres; up/down zooms (board_zoom_speed), click-drag scales
-        // the board (board_scale_speed) or moves the seat (stick_height_speed).
+        // recentres; up/down zooms (board_zoom_speed); click-drag up/down
+        // moves the seat (stick_height_speed), left/right scales the board
+        // (board_scale_speed), as the Alternate scheme.
         float view_switch_hold = 0.4f;
         float stick_height_speed = 0.4f;
         float board_zoom_speed = 1.0f;
@@ -344,7 +360,7 @@ namespace trlvr
         // m/s, the hand relative to her) knocks her down along its motion,
         // as the Y flick does.
         bool god_swat = true;
-        float god_swat_speed = 2.0f;
+        float god_swat_speed = 2.8f;
         float body_push_head_degrees = 6.0f;
         float body_push_chest_degrees = 4.0f;
         float body_push_waist_degrees = 3.0f;
@@ -360,35 +376,64 @@ namespace trlvr
         // region's size/shape/placement, the dent a fingertip makes, and two
         // tuning aids (debug lines, test push).
         bool body_rear = true;
-        float body_rear_hz = 4.0f;
-        float body_rear_damping = 0.47f;
-        float body_rear_gain = 0.55f;
-        float body_rear_max_cm = 3.7f;
-        float body_rear_side = 0.6f;
-        float body_rear_back = 1.0f;
-        float body_rear_up = 1.0f;
+        float body_rear_hz = 3.5f;
+        float body_rear_damping = 0.49f;
+        float body_rear_gain = 0.28f;
+        float body_rear_max_cm = 1.3f;
+        float body_rear_side = 0.45f;
+        float body_rear_back = 0.02f;
+        float body_rear_up = 0.93f;
         // Baseline fullness (cm at her size, negative = slimmer): how far
         // the cheeks stand out at rest, along the same falloff. The size,
         // width and height only change the region that moves.
-        float body_rear_fullness_cm = 1.25f;
+        float body_rear_fullness_cm = 0.5f;
         // The absolute most any point of the cheeks moves from rest, cm at
         // her size, whatever the gain or a hand's pull (limit x tanh(move /
         // limit): eased toward it all the way, never stopping dead at it).
-        float body_rear_limit_cm = 1.5f;
-        float body_rear_size = 0.8f;
-        float body_rear_width = 1.21f;
-        float body_rear_height = 0.8f;
-        float body_rear_spread_cm = 4.6f;
-        float body_rear_core = 0.36f;
-        float body_rear_lift_cm = -0.2f;
-        float body_rear_inward = 0.5f;
-        float body_rear_touch_cm = 0.0f;
-        float body_rear_cleft_cm = 0.0f;
+        float body_rear_limit_cm = 0.9f;
+        float body_rear_size = 1.21f;
+        float body_rear_width = 1.12f;
+        float body_rear_height = 1.01f;
+        float body_rear_spread_cm = 8.0f;
+        float body_rear_core = 0.14f;
+        float body_rear_lift_cm = -1.8f;
+        float body_rear_inward = 0.12f;
+        float body_rear_touch_cm = 2.0f;
+        float body_rear_cleft_cm = 0.15f;
         float body_rear_cleft_width_cm = 2.0f;
         float body_rear_seam_cm = 1.0f;
         bool body_rear_debug = false;
         float body_rear_test_cm = 0.0f;
-        float body_rear_dent = 0.5f;
+        float body_rear_dent = 0.62f;
+        // The springs on or off, apart from the shape (body_rear): off keeps
+        // the fullness, flare and cleft but nothing moves or dents.
+        bool body_rear_motion = true;
+        // Big motions (jumps, landings, being carried) ease the axis gains
+        // below 1 up toward 1 as a cheek's lag grows to this length (cm at
+        // her size, capped at 0.6 x max_cm). 0 = off (Underworld port).
+        float body_rear_event_cm = 2.0f;
+        // Hip flare (cm at her size, minus = in): a stretch away from her
+        // midline that grows with the distance from it, starting
+        // flare_start_cm out, so the outer cheeks fill toward the hips while
+        // the cleft keeps its width (Underworld's "flare keeps the cleft").
+        float body_rear_flare_cm = 0.2f;
+        float body_rear_flare_start_cm = 3.9f;
+        // Both cheeks moved toward her midline, closing the gap at the
+        // cleft (cm); fades out at the seam. 0 = as modelled.
+        float body_rear_cleft_close_cm = 0.1f;
+        // Moves each cheek's seam ramp out from her midline (cm): motion,
+        // fullness and flare fade out that much further from the middle.
+        float body_rear_seam_inset_cm = 0.0f;
+        // The spring along her up axis apart from the sideways and back-
+        // forth sway: its speed and damping as multiples of body_rear_hz /
+        // body_rear_damping (1 = one spring, as before). Firmer up-down
+        // with a soft sway is the modern jiggle-bone look.
+        float body_rear_up_speed = 1.73f;
+        float body_rear_up_damping = 1.41f;
+        // Stride bounce: each cheek's spring follows its thigh this much
+        // (0 = the pelvis only, as before; 1 = the thigh), so a walk or run
+        // lifts the cheeks in turn instead of together.
+        float body_rear_stride = 0.47f;
         // Third-person camera collision: the board seat and the head-moved
         // eye stop short of geometry (0 = allow clipping into it).
         bool camera_collision = true;
@@ -409,7 +454,7 @@ namespace trlvr
         // cutscene camera), true = theatre -- the cutscene is seen through
         // a window fixed in the room, in a black space, still 3D (leaning
         // looks round into the scene). [vr] cutscene_mode = normal/theatre.
-        bool cutscene_theatre = false;
+        bool cutscene_theatre = true;
         float cutscene_screen_width = 3.0f;      // metres
         // metres; 0 = 16:9 from the width. The corner handle sets both.
         float cutscene_screen_height = 0.0f;
@@ -452,19 +497,27 @@ namespace trlvr
         int tp_scale_control = 1;
         // Sizes, each on its own: menus (and movies, loading screens), the
         // gameplay HUD, and the binocular viewfinder.
-        float ui_scale = 0.6f;
-        float hud_scale = 0.6f;
+        float ui_scale = 0.48f;
+        float hud_scale = 0.49f;
         float binocular_scale = 0.6f;
         // The gameplay HUD stays put in the room while the gaze is within
         // this many degrees of it, then glides back in front (as Underworld's
         // [hud] follow_degrees). 0 = use hud_follow below. 0..90. The
         // binocular viewfinder is always rigidly head-locked.
-        float hud_follow_degrees = 20.0f;
+        float hud_follow_degrees = 90.0f;
         // Only with hud_follow_degrees = 0. 1 follows the headset exactly;
         // lower values leave part of the current head angle in the gameplay
         // HUD so edge elements move toward the centre of view. 0 is fully
         // world-relative. Menus have their own policies.
         float hud_follow = 0.85f;
+        // Lock height: the gameplay HUD turns left and right with the head
+        // but ignores looking up and down, staying at hud_height_degrees
+        // from level (look down at it like a dashboard).
+        bool hud_lock_height = true;
+        // The gameplay HUD's elevation, swung around the head as the pivot:
+        // degrees up from the gaze (or from level with hud_lock_height),
+        // negative = below. -60..60. The binocular viewfinder ignores it.
+        float hud_height_degrees = 10.0f;
 
         // The settings overlay in the headset: a square panel placed in the
         // room in front of the head when it opens (and at a recentre or a
@@ -478,6 +531,9 @@ namespace trlvr
         float overlay_vr_pitch_degrees = -10.0f;
         float overlay_vr_open_hold = 0.6f;
         bool overlay_show_advanced = false;    // the settings window shows every setting
+        // Advanced only: the Body / God mode tabs' fine-tuning sliders.
+        bool overlay_body_debug = false;
+        bool overlay_god_debug = false;
 
         // The safe production policy keeps portal/room culling bypassed and
         // widens only the engine's much cheaper object frustum.
@@ -527,7 +583,7 @@ namespace trlvr
         // tracking), from her model's straight rest pose instead of her
         // animation. finger_rest_curl is how curled that pose already is.
         bool finger_tracking = true;    // on: god mode gestures need it (user 2026-11-03)
-        float finger_rest_curl = 0.0f;
+        float finger_rest_curl = 0.07f;
         float stick_walk_threshold = 0.7f;   // stick below this walks
         unsigned short walk_vk = 0xA0;       // VK_LSHIFT
         // Left-handed: long guns and the aim ray use the left controller and

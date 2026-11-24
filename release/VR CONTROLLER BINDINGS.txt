@@ -4,7 +4,17 @@
 
 The VR controllers send the game's normal keyboard and mouse controls.
 The keyboard and mouse continue to work at the same time. The layout is the
-same under OpenXR (the default) and OpenVR (the fallback).
+same under OpenXR (the default) and OpenVR (vr_runtime = openvr).
+
+The tables below are the classic layout (hands_on_controllers = 0 and
+gesture_controls = 0). The default "controller" scheme with hands on
+(third person) differs: left stick double click recentres and holding it
+opens the gear menu; right stick click recentres, double click opens the PDA,
+hold (0.4 s) switches the view (no binoculars on the stick: use the gear
+menu); the right stick orbits the camera and up/down zooms; X aims; Y is
+grenade/flare. Settings panel > Controls > Button layout shows the live
+layout. [controls] control_scheme = interaction or alternate (Underworld
+VR style) select other layouts.
 
 SETTINGS PANEL (1.1.0)
 ----------------------
@@ -107,12 +117,11 @@ The same SteamVR action set remains active in gameplay and menus. This avoids
 the separate menu-binding set that some controllers left completely unbound.
 
 
-OPTIONAL IMMERSIVE MODE
------------------------
-Set this in trlvr.ini and restart the game:
-
-    [controls]
-    immersive_controls = 1
+IMMERSIVE MODE (ON BY DEFAULT)
+------------------------------
+[controls] hands_on_controllers (Lara's hands follow yours) and
+gesture_controls (first-person gestures) are both 1 by default. Set both to
+0 and restart the game for the classic layout above.
 
 Right stick long press      Switch first / third person (\ on the keyboard)
 

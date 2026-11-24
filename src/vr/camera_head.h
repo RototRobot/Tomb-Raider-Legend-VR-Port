@@ -94,8 +94,14 @@ namespace trlvr
                            float dt);
     // The current preset's defaults (the palm sliders' notches).
     void camera_tp_defaults(float* scale, float* zoom, float* side);
-    // Reset view: the live third-person preset's zoom, side and seat height
-    // back to defaults (scale kept). True when that preset is the board.
+    // A view's live seat height (0 classic, 1 shoulder, 2 board), metres;
+    // shoulder_height / board_height are only its reset defaults.
+    float camera_tp_height(int mode);
+    // A default changed in the menu: that view (0 classic, 1 shoulder,
+    // 2 board) takes it now. what: 0 zoom, 1 height, 2 side, 3 scale.
+    void camera_tp_apply_default(int mode, int what, bool save);
+    // Reset view: the live third-person preset's zoom, side, seat height
+    // and scale back to their defaults. True when that preset is the board.
     bool camera_reset_view_adjust();
     // Board view with its own heading (board_follow_lara off): the right
     // stick turns the board instead of orbiting the game camera.

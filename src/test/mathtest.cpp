@@ -478,6 +478,29 @@ int main()
                 hud_follow_step(settle, aside, 0.011f, limit);
             check(close(wrap_pi(settle.yaw - yaw_of(aside)), 0.0f, 0.03f),
                   "a still head draws an off-centre HUD back to the centre");
+
+            // [vr] hud_lock_height: heading only, level, and looking down at
+            // the HUD never sets it moving.
+            HudFollow level;
+            hud_follow_step(level, look(0.4f, 0.3f), 0.0f, limit, true);
+            check(close(level.pitch, 0.0f, 1e-5f) &&
+                  close(wrap_pi(level.yaw - yaw_of(look(0.4f, 0.3f))),
+                        0.0f, 1e-3f),
+                  "a level-only HUD starts at the head's heading, level");
+            for (int i = 0; i < 200; ++i)
+                hud_follow_step(level, look(0.4f, 0.6f), 0.011f, limit, true);
+            check(!level.moving && close(level.pitch, 0.0f, 1e-5f),
+                  "looking down at a level-only HUD leaves it in place");
+            const Mat4 gaze = look(0.4f, 0.3f);
+            check(identity(hud_frame_relative(
+                      yaw_of(gaze), asinf(gaze.m[1][2]), gaze)),
+                  "hud_frame_relative matches hud_follow_relative's frame");
+
+            // Height: with the head straight ahead, a HUD swung up (negative
+            // pitch, engine Y down) has its centre ray pointing up (-Y).
+            const Mat4 up = hud_frame_relative(0.0f, -0.3f, Mat4::identity());
+            check(up.m[2][1] < -0.29f && up.m[2][1] > -0.30f,
+                  "a positive HUD height swings the HUD up");
         }
 
         Mat4 pitch = Mat4::identity();

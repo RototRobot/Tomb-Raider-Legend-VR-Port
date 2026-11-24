@@ -5051,7 +5051,8 @@ namespace trlvr
             // movements are not lost to rounding.
             analog(g_look, &x, &y);
             // Control scheme "controller": the right stick runs the seat.
-            // Board: y zooms, x turns, click-drag scales the world. Shoulder:
+            // Board: y zooms, x turns, click-drag y = seat height, x = world
+            // scale (both schemes). Shoulder:
             // y zooms, click-drag is the height. Classic: y pitches, click-
             // drag zooms. While the stick is in (and 200 ms after, its release
             // spring) it neither turns nor pitches. Saved once it is centred.
@@ -5068,18 +5069,18 @@ namespace trlvr
                 float height_in = 0.0f, zoom_in = 0.0f, scale_in = 0.0f;
                 if (seat_stick && r3 && g_seat_drag)
                 {
-                    if (view == 2 && underworld_scheme())
+                    if (view == 2)
                     {
-                        // Alternate scheme, as the Underworld port: clicked
-                        // and pushed, up/down = seat height (up = higher),
-                        // left/right = world scale (right = Lara smaller,
-                        // the world bigger). x does not turn the board
-                        // (zeroed below while the stick is in).
+                        // Both schemes, as the Underworld port (the
+                        // controller scheme's own up/down scale merged in,
+                        // user 2026-11-24): clicked and pushed, up/down =
+                        // seat height (up = higher), left/right = world
+                        // scale (right = Lara smaller, the world bigger).
+                        // x does not turn the board (zeroed below while the
+                        // stick is in).
                         height_in = board_stick_axis(y, 0.2f);
                         scale_in = board_stick_axis(x, 0.2f);
                     }
-                    else if (view == 2)
-                        scale_in = board_stick_axis(y, 0.2f);
                     else if (view == 1)
                         height_in = board_stick_axis(y, 0.2f);
                     else

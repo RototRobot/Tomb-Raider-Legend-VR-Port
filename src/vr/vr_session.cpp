@@ -1053,19 +1053,22 @@ namespace trlvr
     // a new head pose has arrived; both eyes then agree. After a gap (the HUD
     // not drawn for a second: menu, binoculars) or a recentre it starts
     // straight in front again.
-    static Mat4 hud_lazy_relative(const Mat4& head)
+    static Mat4 hud_lazy_relative(const Mat4& head, bool level_only)
     {
         static HudFollow state;
         static Mat4 last_head = Mat4::identity();
         static ULONGLONG last_seen_ms = 0;
         static LARGE_INTEGER last_step{};
         static unsigned recenter = 0;
+        static bool was_level_only = false;
 
         const ULONGLONG now_ms = GetTickCount64();
-        if (now_ms - last_seen_ms > 1000 || recenter != g_recenter_generation)
+        if (now_ms - last_seen_ms > 1000 || recenter != g_recenter_generation ||
+            level_only != was_level_only)
             state.placed = false;
         last_seen_ms = now_ms;
         recenter = g_recenter_generation;
+        was_level_only = level_only;
 
         bool new_pose = !state.placed;
         for (int r = 0; r < 3 && !new_pose; ++r)
@@ -1081,7 +1084,8 @@ namespace trlvr
                             (float)frequency.QuadPart, 0.1f)
                 : 0.0f;
             hud_follow_step(state, head, dt,
-                            config().hud_follow_degrees * 0.01745329f);
+                            config().hud_follow_degrees * 0.01745329f,
+                            level_only);
             last_head = head;
             last_step = now;
         }
@@ -1389,8 +1393,16 @@ namespace trlvr
                                       !binoculars &&
                                       config().hud_follow_degrees > 0.0f;
                     const float follow = binoculars ? 1.0f : tune_hud_follow();
+                    // [vr] hud_lock_height / hud_height_degrees: the gameplay
+                    // HUD only, never the binocular viewfinder.
+                    const bool lock_height = !binoculars &&
+                                             config().hud_lock_height;
+                    const float height = binoculars ? 0.0f
+                        : config().hud_height_degrees * 0.01745329f;
+                    const bool placed = lock_height ||
+                                        fabsf(height) > 1.0e-4f;
                     if (lazy || (!screen_wipe && !ui_menu_active() &&
-                                 follow < 0.999f))
+                                 (follow < 0.999f || placed)))
                     {
                         // Leave a small fraction of current head rotation in
                         // the gameplay HUD. This makes edge information move
@@ -1406,10 +1418,21 @@ namespace trlvr
                             target.tan_left, target.tan_right,
                             target.tan_top, target.tan_bottom,
                             hud_near, ui_gp.far_z, ui_gp.sy < 0.0f);
-                        const Mat4 relative = lazy
-                            ? hud_lazy_relative(vr_head_rotation())
-                            : rotation_fraction(vr_head_rotation(),
-                                                1.0f - follow);
+                        const Mat4 head = vr_head_rotation();
+                        Mat4 relative;
+                        if (lazy)
+                            relative = hud_lazy_relative(head, lock_height);
+                        else if (lock_height)
+                            // Heading only (follow's share of it), level.
+                            relative = hud_frame_relative(
+                                follow * steady_yaw_of(head), 0.0f, head);
+                        else
+                            relative = rotation_fraction(head, 1.0f - follow);
+                        // Height: swing the HUD around the head, in its own
+                        // frame. Engine Y is down, so up is negative pitch.
+                        if (fabsf(height) > 1.0e-4f)
+                            relative = hud_frame_relative(
+                                0.0f, -height, Mat4::identity()) * relative;
                         ui = reproject_ndc_to_world_locked(
                             projection_from_game(ui_gp), reference,
                             hud_projection, relative, scale);
@@ -2188,7 +2211,7 @@ namespace trlvr
             u += o[1];
             const float ahead = config().board_distance + f + o[2];
             out[0] = g_pos_offset[0] + r * -fz + ahead * fx;
-            out[1] = g_pos_offset[1] - config().board_height + u;
+            out[1] = g_pos_offset[1] - camera_tp_height(2) + u;
             out[2] = g_pos_offset[2] + r * fx + ahead * fz;
         }
 

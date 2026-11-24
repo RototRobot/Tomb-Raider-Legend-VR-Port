@@ -442,8 +442,22 @@ namespace trlvr
 
         void help(const char* text)
         {
-            if (text && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
-                ImGui::SetTooltip("%s", text);
+            if (!text || !ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort))
+                return;
+            // Wrapped to about two lines (user 2026-11-24: one long line ran
+            // off the menu), never wider than the screen allows.
+            const float full = ImGui::CalcTextSize(text).x;
+            const float screen = ImGui::GetIO().DisplaySize.x;
+            const float pad = ImGui::GetStyle().WindowPadding.x * 2.0f;
+            float wrap = full * 0.5f + ImGui::GetFontSize() * 2.0f;
+            wrap = (std::max)(wrap, ImGui::GetFontSize() * 12.0f);
+            wrap = (std::min)(wrap, (std::max)(screen - pad - 8.0f,
+                                               ImGui::GetFontSize() * 8.0f));
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(wrap);
+            ImGui::TextUnformatted(text);
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
         }
 
         // Saved when the drag ends, not on every frame of it.
@@ -602,6 +616,16 @@ namespace trlvr
                    "this many degrees of it, then glides back in front of "
                    "you. 0 = stuck to your head. The binoculars always stay "
                    "fixed to your head.");
+            toggle("Lock HUD height", &c.hud_lock_height, L"vr",
+                   L"hud_lock_height",
+                   "The gameplay HUD turns left and right with you but "
+                   "ignores looking up and down, so you can glance down at "
+                   "it like a dashboard.");
+            slider("HUD height", &c.hud_height_degrees, -60.0f, 60.0f,
+                   "%.0f deg", L"vr", L"hud_height_degrees",
+                   "Swings the gameplay HUD up or down around your head. "
+                   "Negative = below eye level. With Lock HUD height this "
+                   "is measured from level, otherwise from where you look.");
             if (g_adv)
                 toggle("Pause menu fixed in the room", &c.pause_world_locked,
                        L"vr", L"pause_world_locked",
@@ -655,6 +679,24 @@ namespace trlvr
                    "to switch view. A quick click recentres.");
         }
 
+        // A third-person default (where a recentre puts that view): the
+        // view takes it live while dragging and keeps it after.
+        void default_slider(const char* label, float* value, float low,
+                            float high, const char* format,
+                            const wchar_t* key, const char* tip, int mode,
+                            int what)
+        {
+            if (ImGui::SliderFloat(label, value, low, high, format,
+                                   ImGuiSliderFlags_AlwaysClamp))
+                camera_tp_apply_default(mode, what, false);
+            if (ImGui::IsItemDeactivatedAfterEdit())
+            {
+                save_float(L"vr", key, *value);
+                camera_tp_apply_default(mode, what, true);
+            }
+            help(tip);
+        }
+
         void camera_section(Config& c)
         {
             ImGui::SeparatorText("Moving the camera");
@@ -666,21 +708,60 @@ namespace trlvr
             slider("Camera smoothing", &c.third_person_smoothing, 0.0f, 0.5f,
                    "%.2f s", L"vr", L"third_person_smoothing",
                    "How softly the camera follows Lara's moves. 0 = rigid.");
+            slider("Classic zoom speed", &c.classic_zoom_speed, 0.0f, 8.0f,
+                   "%.2f", L"vr", L"classic_zoom_speed",
+                   "Controller scheme, classic view: hold the right stick in "
+                   "and push up/down to zoom. Higher is faster. 0 = off.");
+            ImGui::SeparatorText("Defaults (on recentre)");
+            ImGui::TextWrapped("Each view's default: where it starts, and "
+                               "where a recentre (reset view) puts it back. "
+                               "The stick and palm sliders move the view "
+                               "from here until the next recentre.");
+            toggle("Recentre puts the camera behind Lara",
+                   &c.recenter_behind_lara, L"vr", L"recenter_behind_lara",
+                   "Shoulder and board views: a recentre also swings the "
+                   "camera round behind her, so she is in front of you, "
+                   "with the defaults below. Off: they keep their heading. "
+                   "Classic always swings behind her.");
+            slider("Recentre glide", &c.recenter_same_view_seconds, 0.0f,
+                   1.0f, "%.2f s", L"vr", L"recenter_same_view_seconds",
+                   "How long a recentre in the same view takes to glide "
+                   "into place. 0 snaps.");
+            static const char* const kZoomTip =
+                "Camera distance multiple: below 1 is closer, above 1 "
+                "further. A recentre returns to this default.";
+            ImGui::SeparatorText("Classic camera");
+            default_slider("Default zoom##classic", &c.classic_zoom, 0.3f,
+                           1.5f, "x%.2f", L"classic_zoom", kZoomTip, 0, 0);
             ImGui::SeparatorText("Shoulder camera");
             slider("Distance behind", &c.shoulder_distance, 0.3f, 6.0f,
-                   "%.2f m", L"vr", L"shoulder_distance", nullptr);
-            slider("Height", &c.shoulder_height, -1.0f, 2.0f, "%.2f m",
-                   L"vr", L"shoulder_height", nullptr);
-            slider("Side (right)", &c.shoulder_side, -1.5f, 1.5f, "%.2f m",
-                   L"vr", L"shoulder_side", nullptr);
+                   "%.2f m", L"vr", L"shoulder_distance",
+                   "How far behind her the camera sits, at zoom x1.");
+            default_slider("Default zoom##shoulder", &c.shoulder_zoom, 0.3f,
+                           1.5f, "x%.2f", L"shoulder_zoom", kZoomTip, 1, 0);
+            default_slider("Default height##shoulder", &c.shoulder_height,
+                           -1.0f, 2.0f, "%.2f m", L"shoulder_height",
+                           "How far above her the camera sits. A recentre "
+                           "returns to this default.", 1, 1);
+            default_slider("Default side (right)", &c.shoulder_side, -1.0f,
+                           1.0f, "%.2f m", L"shoulder_side",
+                           "How far to her right the camera sits (negative: "
+                           "left). A recentre returns to this default.", 1, 2);
             ImGui::SeparatorText("Board camera");
-            slider("Lara's height", &c.board_lara_height_cm, 3.0f, 100.0f,
-                   "%.0f cm", L"vr", L"board_lara_height_cm",
-                   "How tall Lara appears on the tabletop.");
+            default_slider("Default Lara's height", &c.board_lara_height_cm,
+                           7.0f, 100.0f, "%.0f cm", L"board_lara_height_cm",
+                           "The board's default scale: how tall Lara "
+                           "appears on the tabletop. A recentre returns to "
+                           "this default.", 2, 3);
             slider("Seat distance", &c.board_distance, 0.0f, 3.0f, "%.2f m",
-                   L"vr", L"board_distance", "How far back you sit from her.");
-            slider("Seat height", &c.board_height, 0.0f, 3.0f, "%.2f m",
-                   L"vr", L"board_height", "How far above her you sit.");
+                   L"vr", L"board_distance",
+                   "How far back you sit from her, at zoom x1.");
+            default_slider("Default zoom##board", &c.board_zoom, 0.3f, 1.5f,
+                           "x%.2f", L"board_zoom", kZoomTip, 2, 0);
+            default_slider("Default seat height", &c.board_height, 0.0f,
+                           3.0f, "%.2f m", L"board_height",
+                           "How far above her you sit. A recentre returns to "
+                           "this default.", 2, 1);
         }
 
         // Soft-part presets. High is the tuning the user settled on
@@ -693,7 +774,7 @@ namespace trlvr
         };
         const SoftPreset kSoftPresets[] = {
             { "Off",    false, 21.8f, 2.6f, 0.47f, 0.50f, 0.40f },
-            { "Low",    true,   7.0f, 3.4f, 0.60f, 0.20f, 0.20f },
+            { "Low",    true,   4.0f, 3.5f, 0.65f, 0.12f, 0.12f },
             { "Medium", true,  14.0f, 3.0f, 0.53f, 0.35f, 0.30f },
             { "High",   true,  21.8f, 2.6f, 0.47f, 0.50f, 0.40f },
             { "Max",    true,  30.0f, 2.2f, 0.40f, 0.70f, 0.60f },
@@ -774,64 +855,207 @@ namespace trlvr
                  "damping together. The sliders below still fine-tune.");
         }
 
-        // Rear presets. High is the tuning the user settled on (2026-10-20);
-        // the others step either side of it, keeping the max lag x gain
-        // about 1.4 x the absolute max so a hard swing reaches into the
-        // eased part of the limit without piling up against it. Fullness
-        // stays at or above 1 cm: lower, and her stock mesh creases.
+        // Rear presets. High is the tuning the user settled on (2026-11-23).
+        // The presets mostly keep the same spring (the up-down spring,
+        // where it stiffens: max lag, the landing ramp) so they keep the
+        // same weight; what changes is how far the motion shows: the gain,
+        // with the absolute limit scaled by the same ratio so the round-off
+        // has the same shape (user: less movement, not a stiffer spring).
+        // Low and Medium also cut the sideways share hardest, and settle a
+        // little sooner (slightly quicker, better damped: user 2026-11-23).
+        // Low is the user's own tuning (2026-11-23): almost no back-forward
+        // share, little inward pull, a short max lag. The presets only set
+        // the motion: the shape is left as it is. Off stops the motion and
+        // keeps the shape.
         struct RearPreset
         {
             const char* name;
             bool on;
-            float hz, damping, gain, max_cm, limit_cm, fullness_cm, dent;
+            float hz, damping, gain, max_cm, limit_cm, dent;
+            float up_speed, up_damping, event_cm, stride;
+            float side, up, back, inward;
         };
         const RearPreset kRearPresets[] = {
-            { "Off",    false, 3.5f, 0.39f, 0.66f, 4.4f, 2.0f, 2.0f,  0.62f },
-            { "Low",    true,  4.5f, 0.55f, 0.45f, 3.0f, 1.0f, 1.0f,  0.40f },
-            { "Medium", true,  4.0f, 0.47f, 0.55f, 3.7f, 1.5f, 1.25f, 0.50f },
-            { "High",   true,  3.5f, 0.39f, 0.66f, 4.4f, 2.0f, 1.5f,  0.62f },
-            { "Max",    true,  3.0f, 0.31f, 0.80f, 5.2f, 3.0f, 2.0f,  0.80f },
+            { "Off",    false, 3.2f, 0.29f, 0.66f, 4.4f, 2.0f, 0.62f,
+              1.35f, 1.4f, 2.0f, 0.80f, 0.74f, 0.93f, 1.0f, 0.5f },
+            { "Low",    true,  3.5f, 0.49f, 0.28f, 1.3f, 0.9f, 0.62f,
+              1.73f, 1.41f, 2.0f, 0.47f, 0.45f, 0.93f, 0.02f, 0.12f },
+            { "Medium", true,  3.35f, 0.33f, 0.45f, 4.4f, 1.35f, 0.62f,
+              1.35f, 1.4f, 2.0f, 0.75f, 0.62f, 0.93f, 1.0f, 0.5f },
+            { "High",   true,  3.2f, 0.29f, 0.66f, 4.4f, 2.0f, 0.62f,
+              1.35f, 1.4f, 2.0f, 0.80f, 0.74f, 0.93f, 1.0f, 0.5f },
+            { "Max",    true,  3.2f, 0.29f, 0.83f, 4.4f, 2.5f, 0.62f,
+              1.35f, 1.4f, 2.0f, 0.80f, 0.74f, 0.93f, 1.0f, 0.5f },
         };
+
+        // Rear shape presets (2026-11-23): her shape at rest, apart from the
+        // motion. Off is the mesh as modelled (the motion carries on); Low to
+        // High fuller, wider at the hips (flare, cleft kept) and a slightly
+        // deeper, closed cleft. Every preset also puts the region settings
+        // back to the defaults (the user's 2026-11-23 tuning, which brings
+        // the hip area into the motion), so a preset always looks the same.
+        struct RearShapePreset
+        {
+            const char* name;
+            float fullness_cm, flare_cm, cleft_close_cm, cleft_cm;
+        };
+        const RearShapePreset kRearShapePresets[] = {
+            { "Off",    0.0f, 0.0f, 0.0f,  0.0f },
+            { "Low",    0.5f, 0.2f, 0.1f,  0.15f },
+            { "Medium", 1.0f, 0.4f, 0.2f,  0.3f },
+            { "High",   1.5f, 0.6f, 0.3f,  0.4f },
+        };
+        struct RearShapeShared
+        {
+            const wchar_t* key;
+            float value;
+            float Config::*field;
+        };
+        const RearShapeShared kRearShapeShared[] = {
+            { L"body_rear_size", 1.21f, &Config::body_rear_size },
+            { L"body_rear_width", 1.12f, &Config::body_rear_width },
+            // Height (body_rear_lift_cm) and tallness (body_rear_height) are
+            // left to the user: they do not change with fullness (user
+            // 2026-11-23).
+            { L"body_rear_spread_cm", 8.0f, &Config::body_rear_spread_cm },
+            { L"body_rear_core", 0.14f, &Config::body_rear_core },
+            { L"body_rear_seam_cm", 1.0f, &Config::body_rear_seam_cm },
+            { L"body_rear_seam_inset_cm", 0.0f,
+              &Config::body_rear_seam_inset_cm },
+            { L"body_rear_cleft_width_cm", 2.0f,
+              &Config::body_rear_cleft_width_cm },
+            { L"body_rear_flare_start_cm", 3.9f,
+              &Config::body_rear_flare_start_cm },
+        };
+
+        void apply_rear_shape_preset(Config& c, const RearShapePreset& p)
+        {
+            if (!c.body_rear)
+            {
+                c.body_rear = true;
+                config_save_setting(L"vr", L"body_rear", L"1");
+            }
+            c.body_rear_fullness_cm = p.fullness_cm;
+            c.body_rear_flare_cm = p.flare_cm;
+            c.body_rear_cleft_close_cm = p.cleft_close_cm;
+            c.body_rear_cleft_cm = p.cleft_cm;
+            save_float(L"vr", L"body_rear_fullness_cm", p.fullness_cm);
+            save_float(L"vr", L"body_rear_flare_cm", p.flare_cm);
+            save_float(L"vr", L"body_rear_cleft_close_cm", p.cleft_close_cm);
+            save_float(L"vr", L"body_rear_cleft_cm", p.cleft_cm);
+            for (const RearShapeShared& s : kRearShapeShared)
+            {
+                c.*(s.field) = s.value;
+                save_float(L"vr", s.key, s.value);
+            }
+        }
+
+        bool rear_shape_preset_matches(const Config& c,
+                                       const RearShapePreset& p)
+        {
+            if (!c.body_rear)
+                return false;
+            for (const RearShapeShared& s : kRearShapeShared)
+                if (!near_value(c.*(s.field), s.value))
+                    return false;
+            return near_value(c.body_rear_fullness_cm, p.fullness_cm) &&
+                near_value(c.body_rear_flare_cm, p.flare_cm) &&
+                near_value(c.body_rear_cleft_close_cm, p.cleft_close_cm) &&
+                near_value(c.body_rear_cleft_cm, p.cleft_cm);
+        }
+
+        void rear_shape_presets(Config& c)
+        {
+            ImGui::PushID("rear_shape");
+            ImGui::TextUnformatted("Rear shape preset");
+            static const char* const names[4] = { "Off", "Low", "Medium",
+                                                  "High" };
+            int active = -1;
+            for (int i = 0; i < 4; ++i)
+                if (rear_shape_preset_matches(c, kRearShapePresets[i]))
+                {
+                    active = i;
+                    break;
+                }
+            const int pressed = preset_row(names, 4, active);
+            if (pressed >= 0)
+                apply_rear_shape_preset(c, kRearShapePresets[pressed]);
+            ImGui::PopID();
+            help("Sets her shape at rest: fullness, hip flare and the cleft, "
+                 "with the region settings below put back to their defaults "
+                 "(except height and tallness, which stay as you set them). "
+                 "Off is her mesh as modelled. The motion is not changed. "
+                 "The sliders below still fine-tune.");
+        }
 
         void apply_rear_preset(Config& c, const RearPreset& preset)
         {
-            c.body_rear = preset.on;
-            config_save_setting(L"vr", L"body_rear", preset.on ? L"1" : L"0");
+            c.body_rear_motion = preset.on;
+            config_save_setting(L"vr", L"body_rear_motion",
+                                preset.on ? L"1" : L"0");
             if (!preset.on)
                 return;             // Off keeps the tuning for next time
+            if (!c.body_rear)
+            {
+                // The springs need the rear on (it was the old Off).
+                c.body_rear = true;
+                config_save_setting(L"vr", L"body_rear", L"1");
+            }
             c.body_rear_hz = preset.hz;
             c.body_rear_damping = preset.damping;
             c.body_rear_gain = preset.gain;
             c.body_rear_max_cm = preset.max_cm;
             c.body_rear_limit_cm = preset.limit_cm;
-            c.body_rear_fullness_cm = preset.fullness_cm;
             c.body_rear_dent = preset.dent;
+            c.body_rear_up_speed = preset.up_speed;
+            c.body_rear_up_damping = preset.up_damping;
+            c.body_rear_event_cm = preset.event_cm;
+            c.body_rear_stride = preset.stride;
+            c.body_rear_side = preset.side;
+            c.body_rear_up = preset.up;
+            c.body_rear_back = preset.back;
+            c.body_rear_inward = preset.inward;
+            save_float(L"vr", L"body_rear_back", preset.back);
+            save_float(L"vr", L"body_rear_inward", preset.inward);
+            save_float(L"vr", L"body_rear_side", preset.side);
+            save_float(L"vr", L"body_rear_up", preset.up);
+            save_float(L"vr", L"body_rear_up_speed", preset.up_speed);
+            save_float(L"vr", L"body_rear_up_damping", preset.up_damping);
+            save_float(L"vr", L"body_rear_event_cm", preset.event_cm);
+            save_float(L"vr", L"body_rear_stride", preset.stride);
             save_float(L"vr", L"body_rear_hz", preset.hz);
             save_float(L"vr", L"body_rear_damping", preset.damping);
             save_float(L"vr", L"body_rear_gain", preset.gain);
             save_float(L"vr", L"body_rear_max_cm", preset.max_cm);
             save_float(L"vr", L"body_rear_limit_cm", preset.limit_cm);
-            save_float(L"vr", L"body_rear_fullness_cm", preset.fullness_cm);
             save_float(L"vr", L"body_rear_dent", preset.dent);
         }
 
         bool rear_preset_matches(const Config& c, const RearPreset& p)
         {
+            const bool moving = c.body_rear && c.body_rear_motion;
             if (!p.on)
-                return !c.body_rear;
-            return c.body_rear && near_value(c.body_rear_hz, p.hz) &&
+                return !moving;
+            return moving && near_value(c.body_rear_hz, p.hz) &&
                 near_value(c.body_rear_damping, p.damping) &&
                 near_value(c.body_rear_gain, p.gain) &&
                 near_value(c.body_rear_max_cm, p.max_cm) &&
                 near_value(c.body_rear_limit_cm, p.limit_cm) &&
-                near_value(c.body_rear_fullness_cm, p.fullness_cm) &&
-                near_value(c.body_rear_dent, p.dent);
+                near_value(c.body_rear_dent, p.dent) &&
+                near_value(c.body_rear_up_speed, p.up_speed) &&
+                near_value(c.body_rear_up_damping, p.up_damping) &&
+                near_value(c.body_rear_event_cm, p.event_cm) &&
+                near_value(c.body_rear_stride, p.stride) &&
+                near_value(c.body_rear_side, p.side) &&
+                near_value(c.body_rear_up, p.up) &&
+                near_value(c.body_rear_back, p.back) &&
+                near_value(c.body_rear_inward, p.inward);
         }
 
         void rear_presets(Config& c)
         {
             ImGui::PushID("rear");
-            ImGui::TextUnformatted("Rear preset");
+            ImGui::TextUnformatted("Rear physics preset");
             static const char* const names[5] = { "Off", "Low", "Medium",
                                                   "High", "Max" };
             int active = -1;
@@ -846,9 +1070,10 @@ namespace trlvr
                 apply_rear_preset(c, kRearPresets[pressed]);
             ImGui::PopID();
             help("Sets the rear's speed, damping, gain, max lag, absolute "
-                 "max, fullness and dent together. Off shows her stock "
-                 "shape and keeps the tuning. The sliders below still "
-                 "fine-tune.");
+                 "max, dent, up-down spring, big motion ramp and stride "
+                 "bounce together; the shape is not changed. Off "
+                 "stops the motion, keeps the shape and keeps the tuning. "
+                 "The sliders below still fine-tune.");
         }
 
         // One "Physics" amount for everything soft: the chest spring (first
@@ -882,10 +1107,14 @@ namespace trlvr
                 apply_physics_preset(c, pressed);
             ImGui::PopID();
             help("How much her chest and rear move and bounce, "
-                 "in first and third person and under your hands. Off shows "
-                 "her stock shape. No button lit means the advanced "
-                 "settings have been tuned by hand.");
+                 "in first and third person and under your hands. Off stops "
+                 "the motion; the rear's shape settings stay as they are. "
+                 "No button lit means the advanced settings have been tuned "
+                 "by hand.");
         }
+
+        void rear_physics_section(Config& c);
+        void rear_shape_section(Config& c);
 
         void body_section(Config& c)
         {
@@ -909,10 +1138,19 @@ namespace trlvr
                 ImGui::Spacing();
             }
             physics_presets(c);
-            if (g_adv)
+            if (!g_adv)
+                return;
+            // Advanced: each part's presets; the fine-tuning sliders only
+            // with Show debug settings (user 2026-11-24).
+            toggle("Show debug settings", &c.overlay_body_debug, L"vr",
+                   L"overlay_body_debug",
+                   "Shows every fine-tuning slider under the chest and rear "
+                   "presets. Off = the presets only; the values are kept.");
+            if (ImGui::CollapsingHeader("Chest physics"))
             {
-                ImGui::SeparatorText("Chest");
                 soft_presets(c);
+                if (c.overlay_body_debug)
+                {
                 ImGui::Spacing();
                 slider("Spring limit", &c.body_spring_angle, 0.0f,
                        15.0f, "%.1f deg", L"vr", L"body_spring_angle",
@@ -932,16 +1170,25 @@ namespace trlvr
                        "%.1f Hz", L"vr", L"body_soft_sway_hz",
                        "Side-to-side spring rate. Lower swings wider and slower "
                        "and is carried by her stride; 3 is the old, stiff value.");
-                slider("Damping", &c.body_soft_damping, 0.03f, 0.6f, "%.2f",
+                slider("Damping", &c.body_soft_damping, 0.03f, 1.0f, "%.2f",
                        L"vr", L"body_soft_damping",
                        "How quickly a swing dies away. Lower rings longer; 0.22 "
                        "is the old value.");
+                }
             }
+            if (ImGui::CollapsingHeader("Rear physics"))
+                rear_physics_section(c);
+            if (ImGui::CollapsingHeader("Rear shape"))
+                rear_shape_section(c);
+        }
 
-            if (!g_adv)
-                return;
-            ImGui::SeparatorText("Rear");
+        // The rear's motion: the springs, how much of each axis shows, the
+        // hands' dent.
+        void rear_physics_section(Config& c)
+        {
             rear_presets(c);
+            if (!c.overlay_body_debug)
+                return;
             slider("Rear speed", &c.body_rear_hz, 0.5f, 8.0f, "%.1f Hz",
                    L"vr", L"body_rear_hz",
                    "How fast a cheek bounces. Lower is softer and slower.");
@@ -960,35 +1207,119 @@ namespace trlvr
                    "The most any point of the cheeks ever moves from rest, "
                    "however hard a hand pulls or high the gain is. Motion "
                    "eases toward it rather than stopping at it.");
+            slider("Side to side", &c.body_rear_side, 0.0f, 2.0f, "%.2f",
+                   L"vr", L"body_rear_side",
+                   "How much of the motion is kept along her side axis.");
+            slider("Back and forth", &c.body_rear_back, 0.0f, 2.0f, "%.2f",
+                   L"vr", L"body_rear_back",
+                   "How much of the motion is kept along her forward axis.");
+            slider("Up and down", &c.body_rear_up, 0.0f, 2.0f, "%.2f",
+                   L"vr", L"body_rear_up",
+                   "How much of the motion is kept along her up axis.");
+            slider("Inward", &c.body_rear_inward, 0.0f, 1.0f, "%.2f", L"vr",
+                   L"body_rear_inward",
+                   "How much of the motion into her body (toward the "
+                   "pelvis) is kept, hands included. 0 = none.");
+            slider("Big motion ramp", &c.body_rear_event_cm, 0.0f, 4.0f,
+                   "%.2f cm", L"vr", L"body_rear_event_cm",
+                   "Jumps, landings and being carried show at full strength: "
+                   "the gain and the side / back / up amounts ease up to 1 "
+                   "as a cheek's lag grows to this length, while walking "
+                   "keeps the tuned amounts. 0 = off; try about 2.");
+            slider("Up-down speed", &c.body_rear_up_speed, 0.25f, 3.0f,
+                   "x%.2f", L"vr", L"body_rear_up_speed",
+                   "The up-down bounce's speed as a multiple of Rear speed; "
+                   "the sideways sway keeps Rear speed. Above 1 = a firmer, "
+                   "quicker landing bounce under a soft sway. 1 = one "
+                   "spring for all.");
+            slider("Up-down damping", &c.body_rear_up_damping, 0.25f, 4.0f,
+                   "x%.2f", L"vr", L"body_rear_up_damping",
+                   "How quickly the up-down bounce dies away, as a multiple "
+                   "of Rear damping. Higher = one drop and rebound on a "
+                   "landing, not a ring. 1 = as the sway.");
+            slider("Stride bounce", &c.body_rear_stride, 0.0f, 1.0f, "%.2f",
+                   L"vr", L"body_rear_stride",
+                   "Each cheek follows its own thigh this much, so walking "
+                   "and running lift them in turn instead of together. "
+                   "0 = the hips only; try 0.3.");
+            slider("Rear dent", &c.body_rear_dent, 0.0f, 2.0f, "%.2f", L"vr",
+                   L"body_rear_dent",
+                   "God mode: a fingertip dents her where it presses, as a "
+                   "multiple of a fingertip. 0 = no dent.");
+        }
+
+        // The rear's shape at rest (fullness, hip flare, cleft) and the
+        // region the motion moves.
+        void rear_shape_section(Config& c)
+        {
+            toggle("Rear shape and physics", &c.body_rear, L"vr", L"body_rear",
+                   "Off shows her stock mesh: no shape changes and no "
+                   "motion.");
+            rear_shape_presets(c);
+            if (!c.overlay_body_debug)
+                return;
             slider("Rear fullness", &c.body_rear_fullness_cm, -2.0f, 5.0f,
                    "%.1f cm", L"vr", L"body_rear_fullness_cm",
                    "How far the cheeks stand out at rest (her real size): "
                    "the baseline size. Minus = slimmer.");
+            slider("Hip flare", &c.body_rear_flare_cm, -3.0f, 5.0f, "%.1f cm",
+                   L"vr", L"body_rear_flare_cm",
+                   "Fills the outer cheeks toward the hips, for more curve "
+                   "between hip and cheek. A stretch away from her middle "
+                   "that starts at Flare start, so the cleft keeps its "
+                   "width. 0 = as modelled.");
+            slider("Flare start", &c.body_rear_flare_start_cm, 0.0f, 10.0f,
+                   "%.1f cm", L"vr", L"body_rear_flare_start_cm",
+                   "How far out from her middle the hip flare begins. More "
+                   "keeps the inner cheeks and the cleft as they are.");
+            slider("Cleft close", &c.body_rear_cleft_close_cm, 0.0f, 1.5f,
+                   "%.2f cm", L"vr", L"body_rear_cleft_close_cm",
+                   "Moves both cheeks toward her middle to close the gap at "
+                   "the cleft. Above about 0.8 cm the skin there can fold "
+                   "unless Seam cut is raised. 0 = as modelled.");
+            slider("Cleft depth", &c.body_rear_cleft_cm, 0.0f, 3.0f, "%.2f cm",
+                   L"vr", L"body_rear_cleft_cm",
+                   "Pulls the cleft between the glutes into her body. 0 = as "
+                   "modelled (magenta in the debug lines).");
+            slider("Cleft width", &c.body_rear_cleft_width_cm, 0.5f, 6.0f,
+                   "%.1f cm", L"vr", L"body_rear_cleft_width_cm",
+                   "How far either side of the cleft that pull reaches.");
+            slider("Seam cut", &c.body_rear_seam_cm, 0.0f, 4.0f, "%.1f cm",
+                   L"vr", L"body_rear_seam_cm",
+                   "Each cheek's shape and motion fade out this far past her "
+                   "midline, so one cheek never moves the other. 0 = no cut.");
+            slider("Seam inset", &c.body_rear_seam_inset_cm, 0.0f, 6.0f,
+                   "%.1f cm", L"vr", L"body_rear_seam_inset_cm",
+                   "Moves that cut outward: motion, fullness and flare fade "
+                   "out this much further from the middle. Needs Seam cut "
+                   "above 0.");
+            ImGui::SeparatorText("Region that moves");
             slider("Rear height", &c.body_rear_lift_cm, -12.0f, 12.0f,
                    "%.1f cm", L"vr", L"body_rear_lift_cm",
-                   "Moves the moving regions up (+) or down (-): their "
-                   "centre, at her real size.");
+                   "Moves the regions and the flare up (+) or down (-), cm. "
+                   "0 = as fitted to her glutes.");
             slider("Rear spread", &c.body_rear_spread_cm, 0.0f, 16.0f,
                    "%.1f cm", L"vr", L"body_rear_spread_cm",
                    "8 = as fitted to her mesh; more moves each region out "
                    "from her middle.");
             slider("Rear size", &c.body_rear_size, 0.5f, 2.0f, "%.2f", L"vr",
                    L"body_rear_size",
-                   "Size of the region that moves (not the shape itself; "
-                   "see Rear fullness).");
+                   "Size of the region that moves and fills out; 1 = fitted "
+                   "to her glutes (top to crease, middle to outer edge).");
             slider("Rear width", &c.body_rear_width, 0.5f, 2.0f, "%.2f",
                    L"vr", L"body_rear_width", "The region's width, times "
-                   "its size.");
+                   "its size. 1 = fitted.");
             slider("Rear tallness", &c.body_rear_height, 0.5f, 2.0f, "%.2f",
                    L"vr", L"body_rear_height", "The region's height, times "
-                   "its size.");
+                   "its size. 1 = fitted.");
             slider("Rear core", &c.body_rear_core, 0.0f, 0.9f, "%.2f",
                    L"vr", L"body_rear_core", "How much of a region moves "
-                   "fully before it eases out.");
-            slider("Rear dent", &c.body_rear_dent, 0.0f, 2.0f, "%.2f", L"vr",
-                   L"body_rear_dent",
-                   "God mode: a fingertip dents her where it presses, as a "
-                   "multiple of a fingertip. 0 = no dent.");
+                   "fully before it eases out. 0 = an even ease from the "
+                   "middle (the most natural).");
+            slider("Touch zone", &c.body_rear_touch_cm, -3.0f, 3.0f,
+                   "%.1f cm", L"vr", L"body_rear_touch_cm",
+                   "God mode: grows (+) or shrinks (-) the cheeks' touch "
+                   "zones (cyan in the debug lines).");
             toggle("Rear debug lines", &c.body_rear_debug, L"vr",
                    L"body_rear_debug",
                    "Tuning aid: draws the regions as boxes (yellow = moves, "
@@ -1134,8 +1465,17 @@ namespace trlvr
         void god_section(Config& c)
         {
             ImGui::TextWrapped("Board view with god hands only.");
-            ImGui::SeparatorText("Board");
+            // Advanced shows the presets and switches; the fine-tuning
+            // sliders only with Show debug settings (user 2026-11-24).
             if (g_adv)
+                toggle("Show debug settings", &c.overlay_god_debug, L"vr",
+                       L"overlay_god_debug",
+                       "Shows every fine-tuning slider: zones, speeds, throw "
+                       "and drop details. Off = presets and switches only; "
+                       "the values are kept.");
+            const bool dbg = g_adv && c.overlay_god_debug;
+            ImGui::SeparatorText("Board");
+            if (dbg)
             {
                 slider("Leash radius", &c.board_leash, 0.0f, 2.0f, "%.2f m",
                        L"vr", L"board_leash",
@@ -1144,6 +1484,9 @@ namespace trlvr
                 slider("Leash height", &c.board_leash_height, 0.0f, 1.0f,
                        "%.2f m", L"vr", L"board_leash_height",
                        "Same for up and down. 0 = height follows at once.");
+            }
+            if (g_adv)
+            {
                 toggle("Camera collision", &c.board_camera_collision, L"vr",
                        L"board_camera_collision",
                        "On: the board camera stops short of walls, floor and "
@@ -1160,24 +1503,25 @@ namespace trlvr
                    L"vr", L"board_rope_turn",
                    "Off: the board keeps its heading while Lara hangs on a "
                    "rope, pole or grapple. On: it turns with her there.");
-            if (g_adv)
+            if (dbg)
             {
-                slider("Zoom speed", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
+                slider("Zoom speed (shoulder, board)", &c.board_zoom_speed, 0.0f, 5.0f, "%.2f",
                        L"vr", L"board_zoom_speed",
                        "Controller scheme: right stick up/down zooms to Lara (up "
                        "= closer). 0 = off.");
                 slider("World scale speed", &c.board_scale_speed, 0.0f, 5.0f,
                        "%.2f", L"vr", L"board_scale_speed",
-                       "Controller scheme, board view: hold the right stick in "
-                       "and push up/down to scale Lara. 0 = off.");
-                slider("Shoulder height speed", &c.stick_height_speed, 0.0f,
+                       "Board view: hold the right stick in and push left/"
+                       "right to scale the world (right = Lara smaller). "
+                       "0 = off.");
+                slider("Seat height speed", &c.stick_height_speed, 0.0f,
                        3.0f, "%.2f m/s", L"vr", L"stick_height_speed",
-                       "Controller scheme, shoulder view: hold the right stick in "
+                       "Shoulder and board views: hold the right stick in "
                        "and push up/down to raise and lower the seat. 0 = off.");
             }
             ImGui::SeparatorText("Arm stretch");
             stretch_presets(c);
-            if (g_adv)
+            if (dbg)
                 slider("Arm stretch starts at", &c.god_stretch_start, 15.0f,
                        80.0f, "%.0f cm", L"vr", L"god_stretch_start",
                        "How far from your chest the hand stays on the "
@@ -1188,7 +1532,7 @@ namespace trlvr
                    "Pinch (trigger + thumb down) or fist (trigger + grip) "
                    "grabs; grip alone only points and presses. Needs finger "
                    "tracking. Off = the grip button grabs.");
-            if (g_adv)
+            if (dbg)
             {
                 slider("Head zone", &c.god_head_zone, 0.05f, 1.0f, "%.2f m",
                        L"vr", L"god_head_zone",
@@ -1199,6 +1543,9 @@ namespace trlvr
                        L"vr", L"god_claim_zone",
                        "A hand this close to her keeps its grip and trigger "
                        "from the game.");
+            }
+            if (g_adv)
+            {
                 toggle("Drag by hand (experimental)", &c.god_drag_hand, L"vr",
                        L"god_drag_hand",
                        "Grab her hand or arm and drag her up like a ragdoll, "
@@ -1206,10 +1553,11 @@ namespace trlvr
                        "animation.");
                 if (c.god_drag_hand)
                 {
-                    slider("Arm zone", &c.god_arm_zone, 0.0f, 0.5f, "%.2f m",
-                           L"vr", L"god_arm_zone",
-                           "A grip this close to an arm holds that arm. 0 = no "
-                           "arm grab.");
+                    if (dbg)
+                        slider("Arm zone", &c.god_arm_zone, 0.0f, 0.5f,
+                               "%.2f m", L"vr", L"god_arm_zone",
+                               "A grip this close to an arm holds that arm. "
+                               "0 = no arm grab.");
                     toggle("Two hands", &c.god_two_hands, L"vr", L"god_two_hands",
                            "Holding her by one arm, grab her other arm with your "
                            "other hand: she hangs below both hands. Let go of one "
@@ -1227,17 +1575,20 @@ namespace trlvr
                        "Hit her with a free hand fast and she stumbles and "
                        "falls along your hand's motion, front or back, as the "
                        "Y flick does.");
-                ImGui::BeginDisabled(!c.god_swat);
-                slider("Swat speed", &c.god_swat_speed, 0.5f, 6.0f, "%.1f m/s",
-                       L"vr", L"god_swat_speed",
-                       "How fast your real hand must be moving when it hits "
-                       "her. Lower = easier to trigger; slower hits only "
-                       "shove.");
-                ImGui::EndDisabled();
+                if (dbg)
+                {
+                    ImGui::BeginDisabled(!c.god_swat);
+                    slider("Swat speed", &c.god_swat_speed, 0.5f, 6.0f,
+                           "%.1f m/s", L"vr", L"god_swat_speed",
+                           "How fast your real hand must be moving when it "
+                           "hits her. Lower = easier to trigger; slower hits "
+                           "only shove.");
+                    ImGui::EndDisabled();
+                }
             }
             ImGui::SeparatorText("Throw and drop");
             toss_presets(c);
-            if (g_adv)
+            if (dbg)
             {
                 slider("Throw strength", &c.god_throw_strength, 0.2f, 3.0f,
                        "%.2f", L"vr", L"god_throw_strength",
@@ -1303,6 +1654,13 @@ namespace trlvr
                    "belly and hold her like a doll: she follows your hand, "
                    "her limbs hang. Let go with a swing to toss her. Needs "
                    "'Grab with hand pose'.");
+            toggle("Show grab zones", &c.god_zone_debug, L"vr",
+                   L"god_zone_debug",
+                   "Wireframes in the headset: body green, head magenta, "
+                   "arms orange, your hand's points white. Board view only "
+                   "(the god hand does not run in classic or shoulder).");
+            if (!dbg)
+                return;
             slider("Max height", &c.god_torso_max_height, 0.05f, 3.0f,
                    "%.2f m", L"vr", L"god_torso_max_height",
                    "Only while she looks no taller than this to you.");
@@ -1323,10 +1681,6 @@ namespace trlvr
             slider("Grab grace", &c.god_torso_grace, 0.0f, 1.0f,
                    "%.2f s", L"vr", L"god_torso_grace",
                    "The fist may close this long after the palm was aimed.");
-            toggle("Fist beats chest pinch", &c.god_torso_fist_first, L"vr",
-                   L"god_torso_fist_first",
-                   "While she is small, a squeezed fist never holds a soft "
-                   "part (chest, rear): only a pinch does.");
             slider("Fist block height", &c.god_fist_block_height, 0.0f, 3.0f,
                    "%.2f m", L"vr", L"god_fist_block_height",
                    "A fist never holds a soft part while she looks smaller "
@@ -1338,11 +1692,6 @@ namespace trlvr
             slider("Toss spin", &c.god_torso_spin, 0.0f, 2.0f, "%.2f",
                    L"vr", L"god_torso_spin",
                    "The tumble, as a fraction of your hand's turn.");
-            toggle("Show grab zones", &c.god_zone_debug, L"vr",
-                   L"god_zone_debug",
-                   "Wireframes in the headset: body green, head magenta, "
-                   "arms orange, your hand's points white. Board view only "
-                   "(the god hand does not run in classic or shoulder).");
             slider("Grab zone size", &c.god_zone_scale, 0.25f, 4.0f, "%.2fx",
                    L"vr", L"god_zone_scale",
                    "Multiplies the head, arm and body grab zones.");
@@ -1739,11 +2088,10 @@ namespace trlvr
                                             : "recentre";
                     const char* drag = nullptr;
                     if (view == 3)
-                        drag = alt ? "up/down = seat height, left/right = "
-                                     "world scale"
-                             : c.tp_scale_control != 2 ? "up/down = world "
-                                                         "scale"
-                                                       : nullptr;
+                        drag = c.tp_scale_control != 2
+                            ? "up/down = seat height, left/right = world "
+                              "scale"
+                            : "up/down = seat height";
                     else if (view == 2)
                         drag = "up/down = seat height";
                     else if (view == 1 && c.tp_scale_control != 2)
@@ -2010,13 +2358,16 @@ namespace trlvr
         }
 
         // The two stereo speed-ups (2026-11-22, on by default after the
-        // headset test). Both are set up when the VR session starts, so a
-        // change needs a restart; they stay in the everyday settings so a
-        // player with trouble can find them.
+        // headset test) and the per-eye water. All are set up when the VR
+        // session starts, so a change needs a restart; they stay in the
+        // everyday settings so a player with trouble can find them. The GPU
+        // copy wait and the live water switches are advanced.
         void performance_section(Config& c)
         {
             static const bool dxvk_started = c.stereo_dxvk;
             static const bool async_started = c.xr_async_end;
+            static const bool refl_started = c.water_reflection;
+            static const bool fx_started = c.water_effects;
             toggle("Draw both eyes in one pass", &c.stereo_dxvk, L"vr",
                    L"stereo_dxvk",
                    "On: each scene draw is handed to the graphics driver once "
@@ -2029,12 +2380,32 @@ namespace trlvr
                    "is still being sent to the headset, which is faster. Turn "
                    "off if you see judder, freezes or crashes. Takes effect "
                    "after restarting the game.");
-            if (c.stereo_dxvk != dxvk_started || c.xr_async_end != async_started)
+            toggle("Water reflections for each eye", &c.water_reflection,
+                   L"vr", L"water_reflection",
+                   "On: the game's water reflection is drawn for each eye, so "
+                   "it sits at the right depth. Needs Reflections on in the "
+                   "game's Setup dialog. Takes effect after restarting the "
+                   "game.");
+            toggle("Water effects for each eye", &c.water_effects, L"vr",
+                   L"water_effects",
+                   "On: the distortion at and under the water surface is drawn "
+                   "for each eye, its waves staying on the water. Needs Water "
+                   "Effects on in the game's Setup dialog. Takes effect after "
+                   "restarting the game.");
+            if (c.stereo_dxvk != dxvk_started || c.xr_async_end != async_started ||
+                c.water_reflection != refl_started ||
+                c.water_effects != fx_started)
                 ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.3f, 1.0f),
                                    "Restart the game to apply this.");
             if (g_adv)
             {
-                if (c.water_reflection)
+                toggle("Wait for the GPU copy", &c.xr_copy_wait, L"vr",
+                       L"xr_copy_wait",
+                       "Wait for each frame's copy to finish before handing it "
+                       "to the headset. Leave on unless a runtime stutters.");
+                // Live switches for this session, while the per-eye water
+                // set up at start is running.
+                if (refl_started)
                 {
                     // Performance test (user 2026-11-22: fps halves at water):
                     // the per-eye reflection draws the mirrored scene twice.
@@ -2048,7 +2419,7 @@ namespace trlvr
                          "records each change.");
                 }
                 bool fx = false;
-                if (c.water_effects && water_stereo_effects_live(&fx))
+                if (fx_started && water_stereo_effects_live(&fx))
                 {
                     if (ImGui::Checkbox("Water effects", &fx))
                         water_stereo_set_effects_live(fx);
@@ -2092,10 +2463,6 @@ namespace trlvr
                    "Off: hands use OpenXR's own grip pose (Quest over Virtual "
                    "Desktop). On: the pose is converted to SteamVR's, which "
                    "the built-in hand tuning was made against.");
-            toggle("Wait for the GPU copy", &c.xr_copy_wait, L"vr",
-                   L"xr_copy_wait",
-                   "Wait for each frame's copy to finish before handing it "
-                   "to the headset. Leave on unless a runtime stutters.");
         }
 
         void overlay_section(Config& c)

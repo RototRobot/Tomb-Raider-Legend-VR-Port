@@ -125,12 +125,21 @@ namespace trlvr
         bool placed = false;
         bool moving = false;
     };
+    // level_only ([vr] hud_lock_height): the HUD follows the heading only and
+    // its pitch eases to 0 (level); looking up or down never moves it.
     void hud_follow_step(HudFollow& follow, const Mat4& head_view_rotation,
-                         float dt_seconds, float limit_radians);
+                         float dt_seconds, float limit_radians,
+                         bool level_only = false);
     // The rotation for reproject_ndc_to_world_locked that puts the HUD at the
     // kept direction, level. Identity when the head looks along it, level.
     Mat4 hud_follow_relative(const HudFollow& follow,
                              const Mat4& head_view_rotation);
+    // The same for any HUD direction: heading `yaw` (yaw_of's convention)
+    // and `pitch` (engine Y down: positive = below level). With an identity
+    // head it is the rotation that swings a head-locked HUD by that much;
+    // hud_frame_relative(0, p, I) * R adds pitch p in the HUD's own frame.
+    Mat4 hud_frame_relative(float yaw, float pitch,
+                            const Mat4& head_view_rotation);
 
     // Strip a heading out of a view matrix, keeping pitch and roll. Used
     // when the game camera has been given the yaw and the projection must

@@ -37,6 +37,49 @@ static void test_rear_shape()
         r.core = 0.0f;
         CHECK(region_weight(r, in_core) < 0.99f && region_weight(r, in_core) > 0.5f);
     }
+    // The teardrop: longer above, the upper half bent toward her front,
+    // holding weight lower down then dropping fast below, no step at the
+    // centre, and region_outline on its zero surface.
+    {
+        RearRegion r;
+        r.radius[0] = 10.0f; r.radius[1] = 10.0f; r.radius[2] = 10.0f;
+        r.up = 20.0f;
+        r.lean = 4.0f;
+        r.sharp_bottom = true;
+        const float above[3] = { 0.0f, 0.0f, 15.0f }, below[3] = { 0.0f, 0.0f, -15.0f };
+        CHECK(region_weight(r, above) > 0.0f && region_weight(r, below) == 0.0f);
+        // Sharp bottom: more weight than the plain fall at half way down,
+        // none at the radius.
+        RearRegion plain = r;
+        plain.sharp_bottom = false;
+        const float half_down[3] = { 0.0f, 0.0f, -5.0f }, end_down[3] = { 0.0f, 0.0f, -10.0f };
+        CHECK(region_weight(r, half_down) > region_weight(plain, half_down) + 0.1f);
+        CHECK(region_weight(r, end_down) == 0.0f);
+        // Lean: up high, the axis has moved to her front (-y).
+        const float front[3] = { 0.0f, -3.0f, 18.0f }, back[3] = { 0.0f, 3.0f, 18.0f };
+        CHECK(region_weight(r, front) > region_weight(r, back));
+        const float just_up[3] = { 0.0f, 2.0f, 0.01f }, just_down[3] = { 0.0f, 2.0f, -0.01f };
+        CHECK(std::fabs(region_weight(r, just_up) - region_weight(r, just_down)) < 1e-3f);
+        bool on_surface = true;
+        for (int pl = 0; pl < 3; ++pl)
+            for (int i = 0; i < 24; ++i)
+            {
+                const int u = pl == 2 ? 1 : 0, v = pl == 0 ? 1 : 2;
+                float q[3], t[3];
+                region_outline(r, u, v, 6.2831853f * i / 24.0f, 1.0f, q);
+                region_local(r, q, t);
+                const float tz2 = t[2] * t[2];
+                const float d2 = t[0] * t[0] + t[1] * t[1] + (t[2] < 0.0f ? tz2 * tz2 : tz2);
+                on_surface = on_surface && std::fabs(d2 - 1.0f) < 1e-3f;
+            }
+        CHECK(on_surface);
+        // Without the teardrop fields it is the old ellipsoid.
+        RearRegion e;
+        e.radius[0] = 10.0f; e.radius[1] = 20.0f; e.radius[2] = 40.0f;
+        const float p[3] = { 3.0f, -5.0f, 12.0f };
+        const float d2 = 0.09f + 0.0625f + 0.09f;
+        CHECK(near(region_weight(e, p), (1.0f - d2) * (1.0f - d2) * (1.0f + 2.0f * d2)));
+    }
     // The seam: half on the line, each side keeps its own, none across.
     {
         CHECK(near(seam_weight(2.0f, 2.0f, 3.0f, 0), 0.5f));
@@ -175,11 +218,22 @@ static void test_rear_shape()
         CHECK(fit.centre[0][1] < fit.peak[0][1]);                   // inside the skin
         for (int s = 0; s < 2; ++s)
             for (int k = 0; k < 3; ++k)
-                CHECK(fit.radius[s][k] >= 0.05f * metre - 0.01f && fit.radius[s][k] <= 0.15f * metre + 0.01f);
+                CHECK(fit.radius[s][k] >= 0.04f * metre - 0.01f && fit.radius[s][k] <= 0.15f * metre + 0.01f);
+        // Teardrop: the centre in the lower half, longer above than below,
+        // the lower end just under the crease.
+        for (int s = 0; s < 2; ++s)
+        {
+            CHECK(fit.centre[s][2] < 0.5f * (fit.top_z[s] + fit.fold_z[s]));
+            CHECK(fit.up[s] > fit.radius[s][2] && fit.lean[s] > 0.0f);
+            CHECK(std::fabs(fit.centre[s][2] - fit.radius[s][2] - fit.fold_z[s]) < 0.01f * metre);
+        }
         // At the default sliders the peak moves fully, her front not at all.
         RearAdjust adj;
         RearShape shape;
         rear_shape_from_fit(fit, adj, metre, shape);
+        const float under[3] = { fit.centre[1][0], fit.peak[1][1],
+                                 fit.fold_z[1] - 0.01f * metre };
+        CHECK(rear_weights(shape, under).cheek[1] == 0.0f);        // not down her leg
         RearWeights w = rear_weights(shape, fit.peak[1]);
         CHECK(w.cheek[1] > 0.95f && w.cheek[0] == 0.0f);
         const float front[3] = { 0.08f * metre, -0.08f * metre, -0.09f * metre };
@@ -332,5 +386,155 @@ static void test_rear_shape()
         const float back[3] = { 0.0f, 4.0f, 0.0f };
         cheek_offset(back, gain, 0.0f, 0.0f, 10.0f, out);
         CHECK(near(out[1], 14.0f));
+        // A big motion eases the gains below 1 up to 1; gains at or above 1
+        // are left alone.
+        const float big[3] = { 0.5f, 1.5f, 0.0f };
+        cheek_offset(lag, big, 0.0f, 1.0f, 0.0f, out, 1.0f);
+        CHECK(near(out[0], 2.0f) && near(out[1], -6.0f) && near(out[2], 3.0f));
+        cheek_offset(lag, big, 0.0f, 1.0f, 0.0f, out, 0.5f);
+        CHECK(near(out[0], 1.5f));
+    }
+    // The big motion ramp: 0 at rest, 1 at the ramp length, capped at 0.6 x
+    // the max lag, off at 0.
+    {
+        const float none[3] = {};
+        const float two[3] = { 0.0f, 2.0f, 0.0f };
+        CHECK(event_ramp(none, 2.0f, 10.0f) == 0.0f);
+        CHECK(near(event_ramp(two, 2.0f, 10.0f), 1.0f));
+        CHECK(near(event_ramp(two, 4.0f, 10.0f), 0.5f));
+        CHECK(near(event_ramp(two, 4.0f, 3.0f), 1.0f));     // ramp capped at 1.8
+        CHECK(event_ramp(two, 0.0f, 10.0f) == 0.0f);
+    }
+    // Seam inset: the half-weight point moves out from the seam.
+    {
+        CHECK(near(seam_weight(0.0f, 0.0f, 1.0f, 1, 0.0f), 0.5f));
+        CHECK(near(seam_weight(3.0f, 0.0f, 1.0f, 1, 3.0f), 0.5f));
+        CHECK(seam_weight(1.0f, 0.0f, 1.0f, 1, 3.0f) == 0.0f);
+        CHECK(near(seam_weight(-3.0f, 0.0f, 1.0f, 0, 3.0f), 0.5f));
+    }
+    // Hip flare and cleft close on the nominal fit: the flare is nothing at
+    // the cleft and inside its start, full from the glute's outer edge on
+    // over the hip side (no rim, so no "wings"), fading above, below and
+    // toward her front; cleft close pulls toward the middle near it, never
+    // across it, and leaves the outer hips alone.
+    {
+        RearFit fit;
+        rear_fit(nullptr, 0, metre, fit);                   // the nominal shape
+        RearAdjust adj;
+        adj.seam_cm = 1.0f;
+        adj.flare_start_cm = 3.0f;
+        RearShape s;
+        rear_shape_from_fit(fit, adj, metre, s);
+        const float cm = metre * 0.01f;
+        const float amount = 2.0f * cm;
+        const float zmid = 0.5f * (s.flare_zlo + s.flare_zhi);
+        const RearWeights none;
+        const auto flare_x = [&](float x, float y, float z) -> float
+        {
+            const float p[3] = { x, y, z };
+            float d[3] = {};
+            rear_flare(s, none, p, amount, d);
+            return d[0];
+        };
+        for (int side = 0; side < 2; ++side)
+        {
+            const float sign = side ? 1.0f : -1.0f;
+            const float back = 10.0f * cm;
+            CHECK(flare_x(s.seam_x, back, zmid) == 0.0f);
+            CHECK(flare_x(s.seam_x + sign * 2.0f * cm, back, zmid) == 0.0f);
+            // Full at the outer edge and the same beyond it (the hip side).
+            const float edge = s.seam_x + sign * s.flare_x1[side];
+            CHECK(near(flare_x(edge, back, zmid), sign * amount));
+            CHECK(near(flare_x(edge + sign * 3.0f * cm, 2.0f * cm, zmid), sign * amount));
+            // Rising outward, never backward.
+            float last = 0.0f;
+            bool rising = true;
+            for (int k = 0; k <= 40; ++k)
+            {
+                const float v = sign * flare_x(s.seam_x + sign * 0.5f * cm * (float)k, back, zmid);
+                rising = rising && v >= last - 1e-5f;
+                last = v;
+            }
+            CHECK(rising);
+            // Fading above and below, and at her front.
+            CHECK(flare_x(edge, back, s.flare_zhi + s.flare_fade + cm) == 0.0f);
+            CHECK(flare_x(edge, back, s.flare_zlo - s.flare_fade - cm) == 0.0f);
+            CHECK(flare_x(edge, s.flare_y0 - cm, zmid) == 0.0f);
+            const float half = sign * flare_x(edge, back, s.flare_zhi + 0.5f * s.flare_fade);
+            CHECK(half > 0.2f * amount && half < 0.8f * amount);
+            // Cleft close: toward the middle near it, nothing at the outer hip.
+            const float close = 1.0f * cm;
+            const float pc[3] = { s.seam_x + sign * 3.0f * cm, back, zmid };
+            float dc[3] = {};
+            rear_cleft_close(s, pc, close, dc);
+            CHECK(near(-sign * dc[0], close, 0.05f * close));
+            const float ph[3] = { s.seam_x + sign * 15.0f * cm, back, zmid };
+            float dh[3] = {};
+            rear_cleft_close(s, ph, close, dh);
+            CHECK(dh[0] == 0.0f);
+            // Never across the midline, even at the slider's top (1.5 cm):
+            // every point stays on its side and in order.
+            bool ordered = true;
+            float prev = 0.0f;
+            for (int k = 1; k <= 60; ++k)
+            {
+                const float d = 0.1f * cm * (float)k;
+                const float p[3] = { s.seam_x + sign * d, back, zmid };
+                float m[3] = {};
+                rear_cleft_close(s, p, 1.5f * cm, m);
+                const float out = d + sign * m[0];      // distance from the seam after
+                ordered = ordered && out > 0.0f && out >= prev;
+                prev = out;
+            }
+            CHECK(ordered);
+        }
+        // rear_baseline = inflate + flare + close.
+        const float* c0 = s.cheek[0].centre;
+        const float q[3] = { c0[0] - 2.0f * cm, c0[1], c0[2] };
+        const RearWeights wq = rear_weights(s, q);
+        float sum[3] = {}, all[3] = {};
+        rear_inflate(s, wq, q, 3.0f, sum);
+        rear_flare(s, wq, q, amount, sum);
+        rear_cleft_close(s, q, 1.0f, sum);
+        rear_baseline(s, wq, q, 3.0f, amount, 1.0f, all);
+        CHECK(near(all[0], sum[0]) && near(all[1], sum[1]) && near(all[2], sum[2]));
+    }
+    // The landmark fit on a synthetic rear: two half-ellipsoid glutes on a
+    // wider hip band. The edge comes out past the glute's middle, the crease
+    // below the peak, the top above it, and the region covers the glute.
+    {
+        std::vector<float> pts;
+        const float cm = metre * 0.01f;
+        for (int side = 0; side < 2; ++side)
+        {
+            const float sign = side ? 1.0f : -1.0f;
+            for (int i = 0; i <= 40; ++i)
+                for (int j = 0; j <= 40; ++j)
+                {
+                    // Glute: centre x 7, z -8, half 6.5 x 8, back to y 12.5.
+                    const float u = -1.0f + 2.0f * (float)i / 40.0f;
+                    const float v = -1.0f + 2.0f * (float)j / 40.0f;
+                    const float r2 = u * u + v * v;
+                    if (r2 > 1.0f)
+                        continue;
+                    pts.push_back(sign * (7.0f + 6.5f * u) * cm);
+                    pts.push_back((4.5f + 8.0f * std::sqrt(1.0f - r2)) * cm);
+                    pts.push_back((-8.0f + 8.0f * v) * cm);
+                }
+        }
+        RearFit fit;
+        CHECK(rear_fit(pts.data(), (int)pts.size() / 3, metre, fit));
+        for (int side = 0; side < 2; ++side)
+        {
+            const float sign = side ? 1.0f : -1.0f;
+            CHECK(fit.landmarks[side]);
+            const float edge = sign * fit.edge_x[side] / cm;
+            CHECK(edge > 9.0f && edge < 14.0f);
+            CHECK(fit.fold_z[side] < fit.peak[side][2] && fit.top_z[side] > fit.peak[side][2]);
+            CHECK(fit.fold_z[side] / cm < -10.0f && fit.fold_z[side] / cm > -17.0f);
+            // The region reaches from near the midline past the outer edge.
+            const float cx = sign * fit.centre[side][0], rx = fit.radius[side][0];
+            CHECK(cx - rx < 1.0f * cm && cx + rx > sign * fit.edge_x[side]);
+        }
     }
 }

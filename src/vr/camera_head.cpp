@@ -3798,15 +3798,32 @@ namespace trlvr
             }
         }
 
+        // `segment` is `head` or below it. A bone sharing head's parent and
+        // joint (a "twin" at the same pivot) counts as part of head's limb:
+        // Lara's left shoulder cap / short sleeve is bone 78, a child of the
+        // clavicle beside the upper arm 59 at the same joint, while on the
+        // right the cap is the upper arm itself (80). The game animates the
+        // twin with the arm; posing only 59's subtree tore the sleeve off.
         bool segment_is_in_head_subtree(const ModelSegment* segments,
                                         int count, int segment, int head)
         {
+            const bool twins = head >= 0 && head < count &&
+                segments[head].parent >= 0;
             for (int guard = 0; guard < count && segment >= 0; ++guard)
             {
                 if (segment == head)
                     return true;
                 if (segment >= count)
                     return false;
+                if (twins && segments[segment].parent == segments[head].parent)
+                {
+                    const float* a = segments[segment].pivot;
+                    const float* b = segments[head].pivot;
+                    const float dx = a[0] - b[0], dy = a[1] - b[1],
+                                dz = a[2] - b[2];
+                    if (dx * dx + dy * dy + dz * dz < 0.25f)
+                        return true;
+                }
                 const int parent = segments[segment].parent;
                 if (parent == segment)
                     return false;
@@ -13728,11 +13745,31 @@ namespace trlvr
         // (soft_body) and fingertip dent, and from those each vertex's new
         // shorts. Third person and board mode; in first person whenever her
         // body is drawn (no hand touch there: those are her own hands).
-        // Her model's vertex shorts are fixed point: 256 per game unit
+        // Her model's vertex shorts are fixed point: 256 per game unit for
+        // vanilla (model_raw_per_unit reads each model's own)
         // (simulator run 2026-10-19: the pelvis spans +-11690 raw for
         // +-0.16 m at 278 units a metre; a thigh -24599 raw = -0.35 m).
         // Joints (bind_joint_position) are plain game units.
         const float kRearRawPerUnit = 256.0f;
+
+        // A model's own raw-to-unit factor: 1 / its model_scale (+0x10, the
+        // vec4 before the vertex count; cdcEditor's importer multiplies
+        // the shorts by it). Vanilla is 1/256, but rebuilt models differ:
+        // the smooth Lara 1/242, the refined one 1/147, so a fixed 256 put
+        // her hips 5% / 42% too small and the fit missed (2026-11-23).
+        // Falls back to 256 when the field is not a sane scale. Call
+        // inside the caller's __try.
+        float model_raw_per_unit(const void* model)
+        {
+            if (!model)
+                return kRearRawPerUnit;
+            const float s = *reinterpret_cast<const float*>(
+                static_cast<const unsigned char*>(model) + 0x10);
+            if (!std::isfinite(s) || !(s > 1.0f / 4096.0f) ||
+                !(s < 1.0f / 32.0f))
+                return kRearRawPerUnit;
+            return 1.0f / s;
+        }
 
         struct RearVertex
         {
@@ -13753,6 +13790,7 @@ namespace trlvr
             const ModelSegment* segments = nullptr;
             int count = 0;
             int virtual_count = 0;
+            float raw = kRearRawPerUnit;    // raw shorts per game unit
             bool usable = false;
             int pelvis = -1;
             int thigh[2] = { -1, -1 };
@@ -13873,6 +13911,7 @@ namespace trlvr
             r.virtual_count = virtual_count;
             r.vertices = vertices;
             r.vertex_count = vertex_count;
+            r.raw = model_raw_per_unit(model);
             r.usable = false;
             r.weights_valid = false;
             r.verts.clear();
@@ -13953,9 +13992,9 @@ namespace trlvr
                 const unsigned char* p = vertices + i * 16;
                 const int seg = *reinterpret_cast<const short*>(p + 10);
                 const short* xyz = reinterpret_cast<const short*>(p);
-                out[0] = xyz[0] / kRearRawPerUnit;
-                out[1] = xyz[1] / kRearRawPerUnit;
-                out[2] = xyz[2] / kRearRawPerUnit;
+                out[0] = xyz[0] / r.raw;
+                out[1] = xyz[1] / r.raw;
+                out[2] = xyz[2] / r.raw;
                 return seg;
             };
             // Blended joints: where their vertices' origin is in the bind
@@ -14074,10 +14113,11 @@ namespace trlvr
             r.usable = !r.verts.empty();
             const float cm = metre * 0.01f;
             const rear::RearFit& f = r.fit;
-            log("rear: model %p -- pelvis bone %d (legs %d / %d, joint %.1f "
+            log("rear: model %p -- %.1f raw per unit, pelvis bone %d (legs "
+                "%d / %d, joint %.1f "
                 "cm up), %d body vertices of %d; blended-joint origin: %s "
                 "(mean miss %.2f / %.2f / %.2f / %.2f cm over %d vertices)",
-                model, pelvis, r.thigh[0], r.thigh[1], pj[2] / cm,
+                model, r.raw, pelvis, r.thigh[0], r.thigh[1], pj[2] / cm,
                 (int)r.verts.size(), vertex_count, kOriginName[mode],
                 origin_samples ? origin_error[0] / origin_samples / cm : 0.0,
                 origin_samples ? origin_error[1] / origin_samples / cm : 0.0,
@@ -14134,7 +14174,7 @@ namespace trlvr
                     {
                         lo[k] = xyz[k] < lo[k] ? xyz[k] : lo[k];
                         hi[k] = xyz[k] > hi[k] ? xyz[k] : hi[k];
-                        const float b = xyz[k] / kRearRawPerUnit +
+                        const float b = xyz[k] / r.raw +
                                         g_rear_origin[sg][k] - pj[k];
                         blo[k] = b < blo[k] ? b : blo[k];
                         bhi[k] = b > bhi[k] ? b : bhi[k];
@@ -14180,6 +14220,8 @@ namespace trlvr
             a.core = cfg.body_rear_core;
             a.seam_cm = cfg.body_rear_seam_cm;
             a.cleft_width_cm = cfg.body_rear_cleft_width_cm;
+            a.seam_inset_cm = cfg.body_rear_seam_inset_cm;
+            a.flare_start_cm = cfg.body_rear_flare_start_cm;
             return a;
         }
 
@@ -14190,7 +14232,49 @@ namespace trlvr
                    a.height == b.height && a.spread_cm == b.spread_cm &&
                    a.lift_cm == b.lift_cm && a.core == b.core &&
                    a.seam_cm == b.seam_cm &&
-                   a.cleft_width_cm == b.cleft_width_cm;
+                   a.cleft_width_cm == b.cleft_width_cm &&
+                   a.seam_inset_cm == b.seam_inset_cm &&
+                   a.flare_start_cm == b.flare_start_cm;
+        }
+
+        // The baseline (rest) shape's offset at a bind point: fullness, hip
+        // flare and cleft close, model units.
+        void rear_baseline_at(const rear::RearShape& shape,
+                              const rear::RearWeights& w, const float p[3],
+                              float delta[3])
+        {
+            const Config& cfg = config();
+            const float cm = cfg.world_scale * 0.01f;
+            rear::rear_baseline(shape, w, p, cfg.body_rear_fullness_cm * cm,
+                                cfg.body_rear_flare_cm * cm,
+                                cfg.body_rear_cleft_close_cm * cm, delta);
+        }
+
+        // Both cheeks' god-mode touch zones: fitted, grown by the touch
+        // slider and the fullness, and moved sideways with the hip flare
+        // and cleft close at their centres so they follow the shape.
+        void rear_touch_zones(const rear::RearFit& fit,
+                              const rear::RearShape& shape,
+                              const rear::RearAdjust& adj, float zone_c[2][3],
+                              float zone_s[2][3])
+        {
+            const Config& cfg = config();
+            const float cm = cfg.world_scale * 0.01f;
+            for (int c = 0; c < 2; ++c)
+            {
+                rear::rear_touch_zone(fit, adj, c, cfg.world_scale,
+                                      cfg.body_rear_touch_cm +
+                                          fmaxf(cfg.body_rear_fullness_cm,
+                                                0.0f), zone_c[c], zone_s[c]);
+                const rear::RearWeights w = rear::rear_weights(shape,
+                                                               zone_c[c]);
+                float side[3] = {};
+                rear::rear_flare(shape, w, zone_c[c],
+                                 cfg.body_rear_flare_cm * cm, side);
+                rear::rear_cleft_close(shape, zone_c[c],
+                                       cfg.body_rear_cleft_close_cm * cm, side);
+                zone_c[c][0] += side[0];
+            }
         }
 
         // God-mode hands on the cheeks (third person): each hand's index
@@ -14211,12 +14295,7 @@ namespace trlvr
                 cfg.hand_body_collision && scale > 0.0f;
             const rear::RearAdjust adj = rear_adjust();
             float zone_c[2][3], zone_s[2][3];
-            for (int c = 0; c < 2; ++c)
-                rear::rear_touch_zone(r.fit, adj, c, metre,
-                                      cfg.body_rear_touch_cm +
-                                          fmaxf(cfg.body_rear_fullness_cm,
-                                                0.0f), zone_c[c],
-                                      zone_s[c]);
+            rear_touch_zones(r.fit, r.shape, adj, zone_c, zone_s);
             const float grow = camera_world_scale_factor();
             const float dent_world = cfg.body_rear_dent * 0.009f * metre * grow;
             for (int h = 0; h < 2; ++h)
@@ -14404,7 +14483,9 @@ namespace trlvr
                 r.offset[c][0] = r.offset[c][1] = r.offset[c][2] = 0.0f;
             r.cleft[0] = r.cleft[2] = 0.0f;
             r.cleft[1] = -cfg.body_rear_cleft_cm * metre * 0.01f;
-            if (!sane)
+            // Motion off (the physics preset's Off): the shape stays, the
+            // springs, hands and dents rest.
+            if (!sane || !cfg.body_rear_motion)
             {
                 for (int c = 0; c < 2; ++c)
                     r.spring[c] = JiggleState();
@@ -14419,6 +14500,19 @@ namespace trlvr
                 p.max_offset = cfg.body_rear_max_cm * metre * 0.01f;
                 p.touch_offset = 0.04f * metre;     // a hand takes it 4 cm further
                 p.reset_distance = 0.5f * metre;
+                // Her up axis its own spring (speed and damping multiples):
+                // the pelvis's rows are its axes in the world (x left,
+                // y back, z up). 1 and 1 = one spring, as before.
+                if (cfg.body_rear_up_speed != 1.0f ||
+                    cfg.body_rear_up_damping != 1.0f)
+                {
+                    p.axes_valid = true;
+                    for (int a = 0; a < 3; ++a)
+                        for (int k = 0; k < 3; ++k)
+                            p.axes[a][k] = m[4 * a + k];
+                    p.hz_scale[2] = cfg.body_rear_up_speed;
+                    p.damping_scale[2] = cfg.body_rear_up_damping;
+                }
                 const float gain[3] = {
                     cfg.body_rear_side * cfg.body_rear_gain,
                     cfg.body_rear_back * cfg.body_rear_gain,
@@ -14429,6 +14523,30 @@ namespace trlvr
                     float target[3], lag[3] = {};
                     rear::local_point_to_world(m, r.shape.cheek[c].centre,
                                                target);
+                    // Stride bounce: the same point carried by this side's
+                    // thigh, blended in, so each step lifts its own cheek.
+                    const int th = r.thigh[c];
+                    if (cfg.body_rear_stride > 0.0f && th >= 0 &&
+                        th < r.count && th != r.pelvis)
+                    {
+                        const float* mt = matrices + th * 16;
+                        const float ts = rear::matrix_scale(mt);
+                        bool ok = ts > 0.2f && ts < 5.0f;
+                        for (int k = 0; k < 16; ++k)
+                            ok = ok && std::isfinite(mt[k]);
+                        if (ok)
+                        {
+                            float local[3], on_thigh[3];
+                            for (int k = 0; k < 3; ++k)
+                                local[k] = r.shape.cheek[c].centre[k] +
+                                           g_rear_joint[r.pelvis][k] -
+                                           g_rear_joint[th][k];
+                            rear::local_point_to_world(mt, local, on_thigh);
+                            const float s = cfg.body_rear_stride;
+                            for (int k = 0; k < 3; ++k)
+                                target[k] += (on_thigh[k] - target[k]) * s;
+                        }
+                    }
                     JiggleContact contact;
                     rear::RearContact& t = r.contact[c];
                     for (int h = 0; h < 2; ++h)
@@ -14467,10 +14585,14 @@ namespace trlvr
                     if (!rear::world_dir_to_local(m, lag, lag_local))
                         lag_local[0] = lag_local[1] = lag_local[2] = 0.0f;
                     memcpy(r.lag[c], lag_local, sizeof(lag_local));
+                    // Big motions (jumps, landings, being carried) ease the
+                    // axis gains below 1 toward 1; gait bounce keeps them.
+                    const float event = rear::event_ramp(lag_local,
+                        cfg.body_rear_event_cm * metre * 0.01f, p.max_offset);
                     rear::cheek_offset(lag_local, gain, r.spring[c].boost,
                                        cfg.body_rear_inward,
                                        cfg.body_rear_test_cm * metre * 0.01f,
-                                       r.offset[c]);
+                                       r.offset[c], event);
                     // The absolute limit is applied once, per vertex below
                     // (a second curve here squeezed the range twice).
                 }
@@ -14482,16 +14604,17 @@ namespace trlvr
             for (int i = 0; i < (int)r.verts.size(); ++i)
             {
                 RearVertex& v = r.verts[i];
-                if (!dents && v.w.cheek[0] == 0.0f && v.w.cheek[1] == 0.0f &&
-                    v.w.cleft == 0.0f)
-                    continue;
-                // Baseline fullness first (body_rear_fullness_cm: the
-                // cheeks' own size at rest), then the spring's offsets and
-                // the dents on top of it.
+                // The baseline shape first (fullness, hip flare, cleft
+                // close: the cheeks at rest), then the spring's offsets and
+                // the dents on top of it. The flare reaches past the cheeks'
+                // regions (over the hip side), so only a vertex with no
+                // weight, no rest shape and no dent near is left alone.
                 float shifted[3] = { v.bind[0], v.bind[1], v.bind[2] };
-                rear::rear_inflate(r.shape, v.w, v.bind,
-                                   cfg.body_rear_fullness_cm * metre * 0.01f,
-                                   shifted);
+                rear_baseline_at(r.shape, v.w, v.bind, shifted);
+                if (!dents && v.w.cheek[0] == 0.0f && v.w.cheek[1] == 0.0f &&
+                    v.w.cleft == 0.0f && shifted[0] == v.bind[0] &&
+                    shifted[1] == v.bind[1] && shifted[2] == v.bind[2])
+                    continue;
                 float moved[3];
                 rear::rear_deform(shifted, v.w, r.offset, r.cleft, r.dent, 2,
                                   moved);
@@ -14510,7 +14633,7 @@ namespace trlvr
                 for (int k = 0; k < 3; ++k)
                 {
                     v.out[k] = rear::round_short((float)v.orig[k] +
-                        (moved[k] - v.bind[k]) * kRearRawPerUnit);
+                        (moved[k] - v.bind[k]) * r.raw);
                     differs = differs || v.out[k] != v.orig[k];
                 }
                 if (differs)
@@ -14522,7 +14645,7 @@ namespace trlvr
                 // goes body_rear_test_cm along bind +y (her back).
                 r.changed.clear();
                 const float push = cfg.body_rear_test_cm * metre * 0.01f *
-                                   kRearRawPerUnit;
+                                   r.raw;
                 for (int i = 0; i < (int)r.verts.size(); ++i)
                 {
                     RearVertex& v = r.verts[i];
@@ -16034,6 +16157,7 @@ namespace trlvr
             float adj_metre = 0.0f;
             bool weights_valid = false;
             std::vector<WetVert> verts;
+            float raw = kRearRawPerUnit;            // its own, as the body's
             bool disabled = false;
             int reported = 0;                       // once-logs written
             int calls = 0;
@@ -16081,6 +16205,7 @@ namespace trlvr
                 body_scale > 0.001f && body_scale < 1000.0f &&
                 fabsf(wet_scale / body_scale - 1.0f) > 0.01f)
                 ratio = wet_scale / body_scale;
+            w.raw = model_raw_per_unit(wet);
             const bool same_skeleton = wet_count == r.count &&
                 wet_segments && wet_virtual >= 0 &&
                 wet_count + wet_virtual <= total;
@@ -16152,8 +16277,7 @@ namespace trlvr
                 for (int k = 0; k < 3; ++k)
                 {
                     wv.orig[k] = xyz[k];
-                    wv.bind[k] = xyz[k] / kRearRawPerUnit * ratio +
-                                 origin[k] - pj[k];
+                    wv.bind[k] = xyz[k] / w.raw + origin[k] - pj[k];
                 }
                 w.verts.push_back(wv);
             }
@@ -16256,15 +16380,16 @@ namespace trlvr
                     stale = 0;
                 for (const WetVert& v : w.verts)
                 {
+                    float shifted[3] = { v.bind[0], v.bind[1], v.bind[2] };
+                    rear_baseline_at(r.shape, v.w, v.bind, shifted);
                     if (!dents && v.w.cheek[0] == 0.0f &&
-                        v.w.cheek[1] == 0.0f && v.w.cleft == 0.0f)
+                        v.w.cheek[1] == 0.0f && v.w.cleft == 0.0f &&
+                        shifted[0] == v.bind[0] && shifted[1] == v.bind[1] &&
+                        shifted[2] == v.bind[2])
                     {
                         ++zero_weight;
                         continue;
                     }
-                    float shifted[3] = { v.bind[0], v.bind[1], v.bind[2] };
-                    rear::rear_inflate(r.shape, v.w, v.bind,
-                        cfg.body_rear_fullness_cm * metre * 0.01f, shifted);
                     float moved[3];
                     rear::rear_deform(shifted, v.w, r.offset, r.cleft, r.dent,
                                       2, moved);
@@ -16279,7 +16404,7 @@ namespace trlvr
                     {
                         out[k] = rear::round_short((float)v.orig[k] +
                             (shifted[k] + dynamic[k] - v.bind[k]) *
-                            kRearRawPerUnit);
+                            w.raw);
                         differs = differs || out[k] != v.orig[k];
                     }
                     if (!differs)
@@ -18442,6 +18567,7 @@ namespace trlvr
             float q[4] = { 1.0f, 0.0f, 0.0f, 0.0f };   // K's rotation
             float t[3] = { 0.0f, 0.0f, 0.0f };          // K's translation
             LARGE_INTEGER start{};
+            float seconds = 0.0f;   // this glide's length, picked at its start
         };
         RecentreGlide g_glide;
         bool g_glide_snap_next = false;
@@ -18543,7 +18669,6 @@ namespace trlvr
         bool recentre_glide(const Mat4& fresh, Mat4* k)
         {
             const unsigned generation = vr_recenter_generation();
-            const float seconds = config().recenter_transition_seconds;
             if (!g_glide.seen_valid)
             {
                 g_glide.seen = generation;
@@ -18556,7 +18681,12 @@ namespace trlvr
                 g_glide_snap_next = false;
                 // Not in the middle of a view switch's flight, except the
                 // switch's own recentre at its very start: then the glide
-                // runs alongside the flight (2026-11-13).
+                // runs alongside the flight (2026-11-13). A recentre in
+                // the same view has its own, shorter glide (2026-11-24).
+                const float seconds = view_tween_starting()
+                    ? config().recenter_transition_seconds
+                    : config().recenter_same_view_seconds;
+                g_glide.seconds = seconds;
                 if (!snap && seconds > 0.01f && g_glide.last_valid &&
                     (!camera_view_tween_active() || view_tween_starting()))
                 {
@@ -18594,6 +18724,7 @@ namespace trlvr
             const float elapsed = (float)(now.QuadPart -
                                           g_glide.start.QuadPart) /
                                   (float)freq.QuadPart;
+            const float seconds = g_glide.seconds;
             const float p = seconds > 0.01f ? elapsed / seconds : 1.0f;
             if (!(p < 1.0f))
             {
@@ -18798,6 +18929,11 @@ namespace trlvr
         // the third palm slider (user 2026-10-28). Shoulder starts at
         // shoulder_side, classic and board centred.
         float g_tp_side[3] = { 0.0f, 0.35f, 0.0f };
+        // Live seat height, metres (shoulder: above her; board: table
+        // metres up), [vr] third_person_height_<preset>. shoulder_height /
+        // board_height are the defaults reset view returns to (user
+        // 2026-11-23: the stick used to overwrite them). Classic unused.
+        float g_tp_height[3] = { 0.0f, 0.0f, 0.35f };
         const float kTpSideMax = 1.0f;
         bool g_tp_view_loaded = false;
         const wchar_t* kTpPresetNames[3] = { L"classic", L"shoulder",
@@ -18808,6 +18944,33 @@ namespace trlvr
             const float board = 175.0f / config().board_lara_height_cm;
             return mode == 2 && std::isfinite(board) && board > 0.5f
                 ? fminf(25.0f, board) : 1.0f;
+        }
+
+        float tp_default_zoom(int mode)
+        {
+            const Config& c = config();
+            const float z = mode == 0 ? c.classic_zoom
+                          : mode == 1 ? c.shoulder_zoom : c.board_zoom;
+            return std::isfinite(z) ? fminf(1.5f, fmaxf(0.3f, z)) : 1.0f;
+        }
+
+        float tp_default_side(int mode)
+        {
+            return mode == 1 ? fminf(kTpSideMax, fmaxf(-kTpSideMax,
+                                     config().shoulder_side))
+                             : 0.0f;
+        }
+
+        float tp_default_height(int mode)
+        {
+            return mode == 2 ? config().board_height
+                 : mode == 1 ? config().shoulder_height : 0.0f;
+        }
+
+        float tp_clamp_height(int mode, float h)
+        {
+            return mode == 2 ? fmaxf(0.0f, fminf(3.0f, h))
+                             : fmaxf(-1.0f, fminf(2.0f, h));
         }
 
         void tp_view_load()
@@ -18829,16 +18992,22 @@ namespace trlvr
                     ? v : defaults[m];
                 swprintf_s(key, L"third_person_zoom_%s", kTpPresetNames[m]);
                 GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
-                v = text[0] ? (float)_wtof(text) : 1.0f;
+                const float zoom_default = tp_default_zoom(m);
+                v = text[0] ? (float)_wtof(text) : zoom_default;
                 g_tp_zoom[m] = std::isfinite(v) && v >= 0.3f && v <= 3.5f
-                    ? v : 1.0f;
-                const float side_default = m == 1 ? config().shoulder_side
-                                                  : 0.0f;
+                    ? v : zoom_default;
+                const float side_default = tp_default_side(m);
                 swprintf_s(key, L"third_person_side_%s", kTpPresetNames[m]);
                 GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
                 v = text[0] ? (float)_wtof(text) : side_default;
                 g_tp_side[m] = std::isfinite(v) && fabsf(v) <= kTpSideMax
                     ? v : side_default;
+                const float height_default = tp_default_height(m);
+                swprintf_s(key, L"third_person_height_%s", kTpPresetNames[m]);
+                GetPrivateProfileStringW(L"vr", key, L"", text, 32, path);
+                v = text[0] ? (float)_wtof(text) : height_default;
+                g_tp_height[m] = std::isfinite(v)
+                    ? tp_clamp_height(m, v) : height_default;
             }
         }
 
@@ -18860,10 +19029,18 @@ namespace trlvr
             swprintf_s(key, L"third_person_side_%s", kTpPresetNames[mode]);
             swprintf_s(text, L"%.3f", g_tp_side[mode]);
             WritePrivateProfileStringW(L"vr", key, text, path);
+            if (mode != 0)
+            {
+                swprintf_s(key, L"third_person_height_%s",
+                           kTpPresetNames[mode]);
+                swprintf_s(text, L"%.3f", g_tp_height[mode]);
+                WritePrivateProfileStringW(L"vr", key, text, path);
+            }
             WritePrivateProfileStringW(nullptr, nullptr, nullptr, path);
             log("view: %S preset -- scale x%.2f (Lara %.0f cm), zoom x%.2f, "
-                "side %+.2f m; saved", kTpPresetNames[mode], scale,
-                175.0f / scale, g_tp_zoom[mode], g_tp_side[mode]);
+                "side %+.2f m, height %.2f; saved", kTpPresetNames[mode], scale,
+                175.0f / scale, g_tp_zoom[mode], g_tp_side[mode],
+                g_tp_height[mode]);
         }
         // How far the third-person camera stands from the retail one.
         float g_tp_retail_distance = 0.0f;
@@ -18984,7 +19161,7 @@ namespace trlvr
                 target[0] = focus[0] + away[0] * back + right[0] * side;
                 target[1] = focus[1] + away[1] * back + right[1] * side;
                 target[2] = focus[2] + away[2] * back +
-                            config().shoulder_height * metre * zoom;
+                            g_tp_height[1] * metre * zoom;
             }
             else if (mode == 2)
             {
@@ -19040,7 +19217,7 @@ namespace trlvr
                 target[1] = g_tp_camera.anchor[1] -
                     forward[1] * back * table + right[1] * across * table;
                 target[2] = g_tp_camera.anchor[2] +
-                    (config().board_height * zoom - moved[1]) * table;
+                    (g_tp_height[2] * zoom - moved[1]) * table;
                 // Collision (user, 2026-10-03): turning the view must not
                 // swing the board camera into rock. Probe from just above
                 // Lara to the seat; on a hit, sit 0.3 m (her scale) short
@@ -20215,6 +20392,36 @@ namespace trlvr
         // a view turn the player did not make), on the main camera's next
         // build, in follow mode only.
         bool g_classic_orbit_reset_pending = false;
+        // A recentre with recenter_behind_lara in the board view with its
+        // own heading: the board turns so the camera is behind her
+        // (2026-11-24), taken at the recentre's generation change.
+        bool g_board_behind_pending = false;
+
+        // Retail's "behind Lara" yaw (camera Euler / orbit convention).
+        bool lara_behind_yaw(float* yaw)
+        {
+            __try
+            {
+                const unsigned char* lara =
+                    *reinterpret_cast<unsigned char* const*>(kPlayerInstance);
+                if (!lara)
+                    return false;
+                const float heading = *reinterpret_cast<const float*>(
+                    lara + kOffInstanceHeading);
+                if (!std::isfinite(heading))
+                    return false;
+                const float kTwoPi = 6.28318531f;
+                float y = fmodf(heading + 3.14159265f, kTwoPi);
+                if (y < 0.0f)
+                    y += kTwoPi;
+                *yaw = y;
+                return true;
+            }
+            __except(EXCEPTION_EXECUTE_HANDLER)
+            {
+                return false;
+            }
+        }
 
         // Board view with its own heading (board_follow_lara off, user
         // 2026-11-12, as Underworld): the drawn board is built at
@@ -20259,8 +20466,11 @@ namespace trlvr
         void classic_orbit_reset_apply(void* cam)
         {
             g_classic_orbit_reset_pending = false;
-            if (camera_first_person_active() ||
-                camera_third_person_mode() != 0)
+            // Classic always; shoulder and board (which follow the same
+            // orbit) with recenter_behind_lara.
+            const int tp = camera_third_person_mode();
+            if (camera_first_person_active() || tp < 0 || tp > 2 ||
+                (tp != 0 && !config().recenter_behind_lara))
                 return;
             const float kTwoPi = 6.28318531f;
             float yaw = 0.0f, tilt = 0.0f;
@@ -20505,6 +20715,16 @@ namespace trlvr
                         g_board.recentre != vr_recenter_generation())
                     {
                         g_board.heading = saved[2];
+                        // Reset view with recenter_behind_lara: the board
+                        // turns so you look along her facing instead.
+                        if (g_board.recentre != vr_recenter_generation())
+                        {
+                            float behind = 0.0f;
+                            if (g_board_behind_pending &&
+                                lara_behind_yaw(&behind))
+                                g_board.heading = wrap_heading(behind);
+                            g_board_behind_pending = false;
+                        }
                         g_board.stick = stick;
                         g_board.recentre = vr_recenter_generation();
                         g_board.valid = true;
@@ -21263,11 +21483,36 @@ namespace trlvr
         if (scale)
             *scale = tp_default_scale(mode);
         if (zoom)
-            *zoom = 1.0f;
+            *zoom = tp_default_zoom(mode);
         if (side)
-            *side = mode == 1 ? fminf(kTpSideMax, fmaxf(-kTpSideMax,
-                                      config().shoulder_side))
-                              : 0.0f;
+            *side = tp_default_side(mode);
+    }
+
+    float camera_tp_height(int mode)
+    {
+        tp_view_load();
+        return mode >= 0 && mode < 3 ? g_tp_height[mode]
+                                     : tp_default_height(mode);
+    }
+
+    void camera_tp_apply_default(int mode, int what, bool save)
+    {
+        // A default changed in the menu: that view takes it now (the
+        // other live adjustments stay). what: 0 zoom, 1 height, 2 side,
+        // 3 scale.
+        tp_view_load();
+        if (mode < 0 || mode > 2)
+            return;
+        if (what == 0)
+            g_tp_zoom[mode] = tp_default_zoom(mode);
+        else if (what == 1)
+            g_tp_height[mode] = tp_clamp_height(mode, tp_default_height(mode));
+        else if (what == 2)
+            g_tp_side[mode] = tp_default_side(mode);
+        else if (what == 3)
+            g_tp_scale[mode] = tp_default_scale(mode);
+        if (save)
+            tp_view_save(mode);
     }
 
     float camera_tp_side()
@@ -21293,41 +21538,34 @@ namespace trlvr
 
     bool camera_reset_view_adjust()
     {
-        // The live third-person preset only (as Underworld's reset view):
-        // zoom, sideways offset and seat height back to their defaults; the
-        // scale stays. First person has nothing here beyond the recentre.
+        // The live third-person preset only: zoom, sideways offset, seat
+        // height and scale back to the defaults set in the menu (user
+        // 2026-11-23; the scale used to stay). First person has nothing here
+        // beyond the recentre.
         if (camera_view_first_person())
             return false;
         tp_view_load();
         const int mode = camera_third_person_mode();
         if (mode < 0 || mode > 2)
             return false;
-        float zoom = 1.0f, side = 0.0f;
-        camera_tp_defaults(nullptr, &zoom, &side);
-        g_tp_zoom[mode] = zoom;
-        g_tp_side[mode] = side;
-        tp_view_save(mode);
-        const Config defaults{};
-        Config& c = config_edit();
         const bool board = mode == 2;
-        float& height = board ? c.board_height : c.shoulder_height;
-        const float wanted = board ? defaults.board_height
-                                   : defaults.shoulder_height;
-        if (height != wanted)
-        {
-            height = wanted;
-            wchar_t text[32];
-            swprintf(text, 32, L"%.3f", wanted);
-            config_save_setting(L"vr", board ? L"board_height"
-                                             : L"shoulder_height", text);
-        }
-        log("view: reset -- %S preset zoom x%.2f, side %+.2f, %s %.2f; "
-            "scale kept", kTpPresetNames[mode], zoom, side,
-            board ? "board height" : "shoulder height", wanted);
+        for (int what = 0; what < 4; ++what)
+            camera_tp_apply_default(mode, what, false);
+        tp_view_save(mode);
+        log("view: reset -- %S preset to its defaults: zoom x%.2f, side "
+            "%+.2f, height %.2f, scale x%.2f", kTpPresetNames[mode],
+            g_tp_zoom[mode], g_tp_side[mode], g_tp_height[mode],
+            g_tp_scale[mode]);
         // Classic keeps the retail camera's heading: swing its orbit back
-        // behind Lara too (applied on the main camera's next build).
-        if (mode == 0)
+        // behind Lara too (applied on the main camera's next build). With
+        // recenter_behind_lara, shoulder and board too: the shoulder seat
+        // and a following board ride that orbit; a board with its own
+        // heading turns at the recentre (g_board_behind_pending).
+        const bool behind = config().recenter_behind_lara;
+        if (mode == 0 || behind)
             g_classic_orbit_reset_pending = true;
+        if (board && behind)
+            g_board_behind_pending = true;
         return board;
     }
 
@@ -21358,7 +21596,6 @@ namespace trlvr
         // at the centre (like the palm sliders on release). Lara stays
         // 7 .. 175 cm (scale 1 .. 25).
         static int view_dirty = -1;     // the preset whose zoom/scale moved
-        static int height_dirty = 0;    // 1 shoulder, 2 board
         tp_view_load();
         const int mode = camera_third_person_mode();
         const bool moving = height_in != 0.0f || zoom_in != 0.0f ||
@@ -21371,9 +21608,10 @@ namespace trlvr
                 if (mode != 2)
                     scale_in = 0.0f;
                 float zoom = g_tp_zoom[mode], scale = g_tp_scale[mode];
+                const float zoom_speed = mode == 0
+                    ? config().classic_zoom_speed : config().board_zoom_speed;
                 if (board_stick_step(&zoom, &scale, zoom_in, scale_in,
-                                     config().board_zoom_speed *
-                                         config().camera_speed,
+                                     zoom_speed * config().camera_speed,
                                      config().board_scale_speed *
                                          config().camera_speed, dt, 0.3f,
                                      3.5f, 1.0f, 25.0f))
@@ -21383,18 +21621,14 @@ namespace trlvr
                     view_dirty = mode;
                 }
             }
-            if (height_in != 0.0f)
+            if (height_in != 0.0f && mode != 0)
             {
-                Config& c = config_edit();
+                // The live seat height; the menu's default stays.
                 const float step = height_in * config().stick_height_speed *
                                    config().camera_speed * dt;
-                if (mode == 2)
-                    c.board_height = fmaxf(0.0f,
-                        fminf(3.0f, c.board_height + step));
-                else
-                    c.shoulder_height = fmaxf(-1.0f,
-                        fminf(2.0f, c.shoulder_height + step));
-                height_dirty = mode;
+                g_tp_height[mode] = tp_clamp_height(mode,
+                                                    g_tp_height[mode] + step);
+                view_dirty = mode;
             }
         }
         else if (!moving)
@@ -21403,15 +21637,6 @@ namespace trlvr
             {
                 tp_view_save(view_dirty);
                 view_dirty = -1;
-            }
-            if (height_dirty)
-            {
-                wchar_t text[32];
-                swprintf(text, 32, L"%.3f", height_dirty == 2
-                    ? config().board_height : config().shoulder_height);
-                config_save_setting(L"vr", height_dirty == 2
-                    ? L"board_height" : L"shoulder_height", text);
-                height_dirty = 0;
             }
         }
     }
@@ -23833,26 +24058,42 @@ namespace trlvr
                 }
             }
         };
+        // A region's true outline (the cheeks are teardrops: longer and
+        // bent toward her front above, sharp below), moved by `shift`.
+        auto region = [&](const rear::RearRegion& g, const float shift[3],
+                          float scale, unsigned colour)
+        {
+            const int kSteps = 24;
+            const int planes[3][2] = { { 0, 1 }, { 1, 2 }, { 0, 2 } };
+            for (const auto& pl : planes)
+            {
+                float prev[3];
+                for (int i = 0; i <= kSteps; ++i)
+                {
+                    float p[3];
+                    rear::region_outline(g, pl[0], pl[1],
+                                         6.2831853f * i / kSteps, scale, p);
+                    for (int k = 0; k < 3; ++k)
+                        p[k] += shift[k];
+                    if (i)
+                        line(prev, p, colour);
+                    memcpy(prev, p, sizeof(prev));
+                }
+            }
+        };
         const rear::RearAdjust adj = rear_adjust();
+        float zone_c[2][3], zone_s[2][3];
+        rear_touch_zones(r.fit, r.shape, adj, zone_c, zone_s);
         for (int c = 0; c < 2; ++c)
         {
             const rear::RearRegion& g = r.shape.cheek[c];
-            float centre[3];
-            for (int k = 0; k < 3; ++k)
-                centre[k] = g.centre[k] + r.offset[c][k];
-            ellipsoid(centre, g.radius, 0xFFFFD54Au);
-            const float core[3] = { g.radius[0] * g.core,
-                                    g.radius[1] * g.core,
-                                    g.radius[2] * g.core };
-            ellipsoid(centre, core, 0xFF5AFF66u);
-            float zc[3], zs[3];
-            rear::rear_touch_zone(r.fit, adj, c, cfg.world_scale,
-                                  cfg.body_rear_touch_cm +
-                                      fmaxf(cfg.body_rear_fullness_cm, 0.0f),
-                                  zc, zs);
-            ellipsoid(zc, zs, 0xFF4AD8FFu);
+            region(g, r.offset[c], 1.0f, 0xFFFFD54Au);
+            if (g.core > 0.0f)
+                region(g, r.offset[c], g.core, 0xFF5AFF66u);
+            ellipsoid(zone_c[c], zone_s[c], 0xFF4AD8FFu);
         }
-        ellipsoid(r.shape.cleft.centre, r.shape.cleft.radius, 0xFFFF55FFu);
+        const float still[3] = {};
+        region(r.shape.cleft, still, 1.0f, 0xFFFF55FFu);
         // The pelvis bind joint: a 4 cm cross.
         const float arm = 4.0f * cfg.world_scale * 0.01f;
         for (int k = 0; k < 3; ++k)

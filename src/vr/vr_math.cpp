@@ -428,7 +428,8 @@ namespace trlvr
         return m;
     }
 
-    void hud_follow_step(HudFollow& f, const Mat4& head, float dt, float limit)
+    void hud_follow_step(HudFollow& f, const Mat4& head, float dt, float limit,
+                         bool level_only)
     {
         const float kEaseSeconds = 0.15f;
         const float kDoneRadians = 0.026f;          // 1.5 degrees
@@ -436,21 +437,26 @@ namespace trlvr
         const float kSettleRadians = 0.035f;        // 2 degrees
         const float kSettleSeconds = 1.0f;
 
-        const float yaw = yaw_of(head);
+        // Level only: the HUD keeps no pitch of its own, so looking down at
+        // it never counts as looking away; steady_yaw_of holds the heading
+        // when the gaze dips steeply.
+        const float yaw = level_only ? steady_yaw_of(head) : yaw_of(head);
         const float pitch = asinf(fmaxf(-1.0f, fminf(1.0f, head.m[1][2])));
+        const float target_pitch = level_only ? 0.0f : pitch;
         if (!f.placed)
         {
             f.yaw = f.head_yaw = yaw;
-            f.pitch = f.head_pitch = pitch;
+            f.pitch = target_pitch;
+            f.head_pitch = pitch;
             f.still_seconds = 0.0f;
             f.moving = false;
             f.placed = true;
             return;
         }
 
-        const float cos_pitch = cosf(pitch);
+        const float cos_pitch = level_only ? 1.0f : cosf(pitch);
         const float dy = wrap_pi(yaw - f.yaw);
-        const float dp = pitch - f.pitch;
+        const float dp = target_pitch - f.pitch;
         const float across = dy * cos_pitch;
         const float off = sqrtf(across * across + dp * dp);
         if (off > limit)
@@ -480,11 +486,16 @@ namespace trlvr
 
     Mat4 hud_follow_relative(const HudFollow& f, const Mat4& head)
     {
+        return hud_frame_relative(f.yaw, f.pitch, head);
+    }
+
+    Mat4 hud_frame_relative(float yaw, float pitch, const Mat4& head)
+    {
         // The HUD's own view rotation has columns right, up, forward; this
         // is its transpose (rows) times the head, so rays fixed in the HUD's
         // frame stay fixed in the room.
-        const float sy = sinf(f.yaw), cy = cosf(f.yaw);
-        const float sp = sinf(f.pitch), cp = cosf(f.pitch);
+        const float sy = sinf(yaw), cy = cosf(yaw);
+        const float sp = sinf(pitch), cp = cosf(pitch);
         Mat4 from_hud = Mat4::identity();
         from_hud.m[0][0] = cy;        from_hud.m[0][1] = 0.0f;
         from_hud.m[0][2] = -sy;

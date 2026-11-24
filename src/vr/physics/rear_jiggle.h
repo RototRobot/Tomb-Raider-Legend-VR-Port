@@ -14,6 +14,15 @@ namespace trlvr
         float max_offset = 1.0f;        // the shown offset eases toward this (units)
         float touch_offset = 0.0f;      // ... plus this while a hand is on it (eased)
         float reset_distance = 100.0f;  // a target jump this large in one step resets (units)
+        // Optional per-axis spring (a modern jiggle bone's anisotropy): with
+        // axes_valid, the spring and damper act separately along three axes
+        // (world unit vectors, made orthonormal here), axis a at hz x
+        // hz_scale[a] and damping x damping_scale[a] -- e.g. her up axis
+        // firmer than the sideways sway. Without, one spring for all.
+        bool axes_valid = false;
+        float axes[3][3] = { { 1.0f, 0.0f, 0.0f }, { 0.0f, 1.0f, 0.0f }, { 0.0f, 0.0f, 1.0f } };
+        float hz_scale[3] = { 1.0f, 1.0f, 1.0f };
+        float damping_scale[3] = { 1.0f, 1.0f, 1.0f };
     };
 
     struct JiggleState

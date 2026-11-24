@@ -71,6 +71,37 @@ namespace trlvr
         const float omega = 6.2831853f * hz;
         const float k_spring = omega * omega;
         const float c_damp = 2.0f * damping * omega;
+        // Per-axis springs (not while gripped: the grip holds it evenly).
+        // The axes made orthonormal (Gram-Schmidt) so the three springs
+        // never fight; a degenerate frame falls back to one spring.
+        bool aniso = p.axes_valid && !gripped;
+        float ax[3][3] = {}, k_axis[3] = {}, c_axis[3] = {};
+        if (aniso)
+        {
+            for (int a = 0; a < 3 && aniso; ++a)
+            {
+                for (int k = 0; k < 3; ++k)
+                    ax[a][k] = p.axes[a][k];
+                for (int b = 0; b < a; ++b)
+                {
+                    const float d = ax[a][0] * ax[b][0] + ax[a][1] * ax[b][1] + ax[a][2] * ax[b][2];
+                    for (int k = 0; k < 3; ++k)
+                        ax[a][k] -= d * ax[b][k];
+                }
+                const float len = std::sqrt(ax[a][0] * ax[a][0] + ax[a][1] * ax[a][1] +
+                                            ax[a][2] * ax[a][2]);
+                if (!(len > 1e-6f) || !std::isfinite(len))
+                    aniso = false;
+                else
+                    for (int k = 0; k < 3; ++k)
+                        ax[a][k] /= len;
+                const float hs = p.hz_scale[a] > 0.05f ? p.hz_scale[a] : 0.05f;
+                const float ds = p.damping_scale[a] > 0.0f ? p.damping_scale[a] : 0.0f;
+                const float w = omega * hs;
+                k_axis[a] = w * w;
+                c_axis[a] = 2.0f * damping * ds * w;
+            }
+        }
         float vt[3];
         for (int k = 0; k < 3; ++k)
             vt[k] = (target[k] - s.target[k]) / dt;
@@ -100,6 +131,24 @@ namespace trlvr
                 a[k] = k_spring * (t0[k] + shift[k] - s.pos[k]) - c_damp * (s.vel[k] - vt[k]);
                 lag0[k] = s.pos[k] - t0[k];
                 lag0_len2 += lag0[k] * lag0[k];
+            }
+            if (aniso)
+            {
+                float d0[3], v0[3];
+                for (int k = 0; k < 3; ++k)
+                {
+                    d0[k] = t0[k] + shift[k] - s.pos[k];
+                    v0[k] = s.vel[k] - vt[k];
+                    a[k] = 0.0f;
+                }
+                for (int q = 0; q < 3; ++q)
+                {
+                    const float dq = d0[0] * ax[q][0] + d0[1] * ax[q][1] + d0[2] * ax[q][2];
+                    const float vq = v0[0] * ax[q][0] + v0[1] * ax[q][1] + v0[2] * ax[q][2];
+                    const float force = k_axis[q] * dq - c_axis[q] * vq;
+                    for (int k = 0; k < 3; ++k)
+                        a[k] += force * ax[q][k];
+                }
             }
             const float lag0_len = std::sqrt(lag0_len2);
             if (shown_limit > 0.0f && lag0_len > shown_limit)
